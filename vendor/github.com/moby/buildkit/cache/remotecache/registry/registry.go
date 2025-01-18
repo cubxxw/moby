@@ -2,12 +2,13 @@ package registry
 
 import (
 	"context"
+	"maps"
 	"strconv"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/snapshots"
-	"github.com/docker/distribution/reference"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/distribution/reference"
 	"github.com/moby/buildkit/cache/remotecache"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/compression"
@@ -163,9 +164,7 @@ func (dsl *withDistributionSourceLabel) SnapshotLabels(descs []ocispecs.Descript
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	for k, v := range estargz.SnapshotLabels(dsl.ref, descs, index) {
-		labels[k] = v
-	}
+	maps.Copy(labels, estargz.SnapshotLabels(dsl.ref, descs, index))
 	return labels
 }
 

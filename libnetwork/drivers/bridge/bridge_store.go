@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/datastore"
-	"github.com/docker/docker/libnetwork/discoverapi"
-	"github.com/docker/docker/libnetwork/netlabel"
-	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/docker/libnetwork/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -24,34 +24,22 @@ const (
 	bridgeEndpointPrefix = "bridge-endpoint"
 )
 
-func (d *driver) initStore(option map[string]interface{}) error {
-	if data, ok := option[netlabel.LocalKVClient]; ok {
-		var err error
-		dsc, ok := data.(discoverapi.DatastoreConfigData)
-		if !ok {
-			return types.InternalErrorf("incorrect data in datastore configuration: %v", data)
-		}
-		d.store, err = datastore.FromConfig(dsc)
-		if err != nil {
-			return types.InternalErrorf("bridge driver failed to initialize data store: %v", err)
-		}
+func (d *driver) initStore() error {
+	err := d.populateNetworks()
+	if err != nil {
+		return err
+	}
 
-		err = d.populateNetworks()
-		if err != nil {
-			return err
-		}
-
-		err = d.populateEndpoints()
-		if err != nil {
-			return err
-		}
+	err = d.populateEndpoints()
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
 func (d *driver) populateNetworks() error {
-	kvol, err := d.store.List(datastore.Key(bridgePrefix), &networkConfiguration{})
+	kvol, err := d.store.List(&networkConfiguration{})
 	if err != nil && err != datastore.ErrKeyNotFound {
 		return fmt.Errorf("failed to get bridge network configurations from store: %v", err)
 	}
@@ -73,7 +61,7 @@ func (d *driver) populateNetworks() error {
 }
 
 func (d *driver) populateEndpoints() error {
-	kvol, err := d.store.List(datastore.Key(bridgeEndpointPrefix), &bridgeEndpoint{})
+	kvol, err := d.store.List(&bridgeEndpoint{})
 	if err != nil && err != datastore.ErrKeyNotFound {
 		return fmt.Errorf("failed to get bridge endpoints from store: %v", err)
 	}
@@ -101,9 +89,13 @@ func (d *driver) populateEndpoints() error {
 	return nil
 }
 
-func (d *driver) storeUpdate(kvObject datastore.KVObject) error {
+func (d *driver) storeUpdate(ctx context.Context, kvObject datastore.KVObject) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.storeUpdate", trace.WithAttributes(
+		attribute.String("kvObject", fmt.Sprintf("%+v", kvObject.Key()))))
+	defer span.End()
+
 	if d.store == nil {
-		log.G(context.TODO()).Warnf("bridge store not initialized. kv object %s is not added to the store", datastore.Key(kvObject.Key()...))
+		log.G(ctx).Warnf("bridge store not initialized. kv object %s is not added to the store", datastore.Key(kvObject.Key()...))
 		return nil
 	}
 
@@ -120,33 +112,27 @@ func (d *driver) storeDelete(kvObject datastore.KVObject) error {
 		return nil
 	}
 
-retry:
-	if err := d.store.DeleteObjectAtomic(kvObject); err != nil {
-		if err == datastore.ErrKeyModified {
-			if err := d.store.GetObject(datastore.Key(kvObject.Key()...), kvObject); err != nil {
-				return fmt.Errorf("could not update the kvobject to latest when trying to delete: %v", err)
-			}
-			goto retry
-		}
-		return err
-	}
-
-	return nil
+	return d.store.DeleteObject(kvObject)
 }
 
 func (ncfg *networkConfiguration) MarshalJSON() ([]byte, error) {
 	nMap := make(map[string]interface{})
 	nMap["ID"] = ncfg.ID
 	nMap["BridgeName"] = ncfg.BridgeName
+	nMap["EnableIPv4"] = ncfg.EnableIPv4
 	nMap["EnableIPv6"] = ncfg.EnableIPv6
 	nMap["EnableIPMasquerade"] = ncfg.EnableIPMasquerade
+	nMap["GwModeIPv4"] = ncfg.GwModeIPv4
+	nMap["GwModeIPv6"] = ncfg.GwModeIPv6
 	nMap["EnableICC"] = ncfg.EnableICC
 	nMap["InhibitIPv4"] = ncfg.InhibitIPv4
 	nMap["Mtu"] = ncfg.Mtu
 	nMap["Internal"] = ncfg.Internal
 	nMap["DefaultBridge"] = ncfg.DefaultBridge
 	nMap["DefaultBindingIP"] = ncfg.DefaultBindingIP.String()
-	nMap["HostIP"] = ncfg.HostIP.String()
+	// This key is "HostIP" instead of "HostIPv4" to preserve compatibility with the on-disk format.
+	nMap["HostIP"] = ncfg.HostIPv4.String()
+	nMap["HostIPv6"] = ncfg.HostIPv6.String()
 	nMap["DefaultGatewayIPv4"] = ncfg.DefaultGatewayIPv4.String()
 	nMap["DefaultGatewayIPv6"] = ncfg.DefaultGatewayIPv6.String()
 	nMap["ContainerIfacePrefix"] = ncfg.ContainerIfacePrefix
@@ -177,6 +163,8 @@ func (ncfg *networkConfiguration) UnmarshalJSON(b []byte) error {
 		if ncfg.AddressIPv4, err = types.ParseCIDR(v.(string)); err != nil {
 			return types.InternalErrorf("failed to decode bridge network address IPv4 after json unmarshal: %s", v.(string))
 		}
+		// For networks created before EnableIPv4 was added ...
+		ncfg.EnableIPv4 = true
 	}
 
 	if v, ok := nMap["AddressIPv6"]; ok {
@@ -189,8 +177,12 @@ func (ncfg *networkConfiguration) UnmarshalJSON(b []byte) error {
 		ncfg.ContainerIfacePrefix = v.(string)
 	}
 
+	// This key is "HostIP" instead of "HostIPv4" to preserve compatibility with the on-disk format.
 	if v, ok := nMap["HostIP"]; ok {
-		ncfg.HostIP = net.ParseIP(v.(string))
+		ncfg.HostIPv4 = net.ParseIP(v.(string))
+	}
+	if v, ok := nMap["HostIPv6"]; ok {
+		ncfg.HostIPv6 = net.ParseIP(v.(string))
 	}
 
 	ncfg.DefaultBridge = nMap["DefaultBridge"].(bool)
@@ -199,8 +191,17 @@ func (ncfg *networkConfiguration) UnmarshalJSON(b []byte) error {
 	ncfg.DefaultGatewayIPv6 = net.ParseIP(nMap["DefaultGatewayIPv6"].(string))
 	ncfg.ID = nMap["ID"].(string)
 	ncfg.BridgeName = nMap["BridgeName"].(string)
+	if v, ok := nMap["EnableIPv4"]; ok {
+		ncfg.EnableIPv4 = v.(bool)
+	}
 	ncfg.EnableIPv6 = nMap["EnableIPv6"].(bool)
 	ncfg.EnableIPMasquerade = nMap["EnableIPMasquerade"].(bool)
+	if v, ok := nMap["GwModeIPv4"]; ok {
+		ncfg.GwModeIPv4, _ = newGwMode(v.(string))
+	}
+	if v, ok := nMap["GwModeIPv6"]; ok {
+		ncfg.GwModeIPv6, _ = newGwMode(v.(string))
+	}
 	ncfg.EnableICC = nMap["EnableICC"].(bool)
 	if v, ok := nMap["InhibitIPv4"]; ok {
 		ncfg.InhibitIPv4 = v.(bool)
@@ -265,21 +266,18 @@ func (ncfg *networkConfiguration) CopyTo(o datastore.KVObject) error {
 	return nil
 }
 
-func (ncfg *networkConfiguration) DataScope() string {
-	return scope.Local
-}
-
 func (ep *bridgeEndpoint) MarshalJSON() ([]byte, error) {
 	epMap := make(map[string]interface{})
 	epMap["id"] = ep.id
 	epMap["nid"] = ep.nid
 	epMap["SrcName"] = ep.srcName
 	epMap["MacAddress"] = ep.macAddress.String()
-	epMap["Addr"] = ep.addr.String()
+	if ep.addr != nil {
+		epMap["Addr"] = ep.addr.String()
+	}
 	if ep.addrv6 != nil {
 		epMap["Addrv6"] = ep.addrv6.String()
 	}
-	epMap["Config"] = ep.config
 	epMap["ContainerConfig"] = ep.containerConfig
 	epMap["ExternalConnConfig"] = ep.extConnConfig
 	epMap["PortMapping"] = ep.portMapping
@@ -315,11 +313,7 @@ func (ep *bridgeEndpoint) UnmarshalJSON(b []byte) error {
 	ep.id = epMap["id"].(string)
 	ep.nid = epMap["nid"].(string)
 	ep.srcName = epMap["SrcName"].(string)
-	d, _ := json.Marshal(epMap["Config"])
-	if err := json.Unmarshal(d, &ep.config); err != nil {
-		log.G(context.TODO()).Warnf("Failed to decode endpoint config %v", err)
-	}
-	d, _ = json.Marshal(epMap["ContainerConfig"])
+	d, _ := json.Marshal(epMap["ContainerConfig"])
 	if err := json.Unmarshal(d, &ep.containerConfig); err != nil {
 		log.G(context.TODO()).Warnf("Failed to decode endpoint container config %v", err)
 	}
@@ -330,6 +324,18 @@ func (ep *bridgeEndpoint) UnmarshalJSON(b []byte) error {
 	d, _ = json.Marshal(epMap["PortMapping"])
 	if err := json.Unmarshal(d, &ep.portMapping); err != nil {
 		log.G(context.TODO()).Warnf("Failed to decode endpoint port mapping %v", err)
+	}
+	// Until release 27.0, HostPortEnd in PortMapping (operational data) was left at
+	// the value it had in ExternalConnConfig.PortBindings (configuration). So, for
+	// example, if the configured host port range was 8000-8009 and the allocated
+	// port was 8004, the stored range was 8004-8009. Also, if allocation for an
+	// explicit (non-ephemeral) range failed because some other process had a port
+	// bound, there was no attempt to retry (because HostPort!=0). Now that's fixed,
+	// on live-restore we don't want to allocate different ports - so, remove the range
+	// from the operational data.
+	// TODO(robmry) - remove once direct upgrade from moby 26.x is no longer supported.
+	for i := range ep.portMapping {
+		ep.portMapping[i].HostPortEnd = ep.portMapping[i].HostPort
 	}
 
 	return nil
@@ -382,21 +388,30 @@ func (ep *bridgeEndpoint) CopyTo(o datastore.KVObject) error {
 	return nil
 }
 
-func (ep *bridgeEndpoint) DataScope() string {
-	return scope.Local
-}
-
+// restorePortAllocations is used during live-restore. It re-creates iptables
+// forwarding/NAT rules, and restarts docker-proxy, as needed.
+//
+// TODO(robmry) - if any previously-mapped host ports are no longer available, all
+// iptables forwarding/NAT rules get removed and there will be no docker-proxy
+// processes. So, the container will be left running, but inaccessible.
 func (n *bridgeNetwork) restorePortAllocations(ep *bridgeEndpoint) {
 	if ep.extConnConfig == nil ||
 		ep.extConnConfig.ExposedPorts == nil ||
 		ep.extConnConfig.PortBindings == nil {
 		return
 	}
-	tmp := ep.extConnConfig.PortBindings
-	ep.extConnConfig.PortBindings = ep.portMapping
-	_, err := n.allocatePorts(ep, n.config.DefaultBindingIP, n.driver.config.EnableUserlandProxy)
+
+	// ep.portMapping has HostPort=HostPortEnd, the host port allocated last
+	// time around ... use that in place of ep.extConnConfig.PortBindings, which
+	// may specify host port ranges.
+	cfg := make([]types.PortBinding, len(ep.portMapping))
+	for i, b := range ep.portMapping {
+		cfg[i] = b.PortBinding
+	}
+
+	var err error
+	ep.portMapping, err = n.addPortMappings(context.TODO(), ep.addr, ep.addrv6, cfg, n.config.DefaultBindingIP, ep.extConnConfig.NoProxy6To4)
 	if err != nil {
 		log.G(context.TODO()).Warnf("Failed to reserve existing port mapping for endpoint %.7s:%v", ep.id, err)
 	}
-	ep.extConnConfig.PortBindings = tmp
 }

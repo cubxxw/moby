@@ -22,14 +22,17 @@ import (
 	"github.com/docker/docker/integration-cli/checker"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/daemon"
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/ipamapi"
 	remoteipam "github.com/docker/docker/libnetwork/ipams/remote/api"
 	"github.com/docker/docker/pkg/plugins"
 	"github.com/docker/docker/testutil"
+	testdaemon "github.com/docker/docker/testutil/daemon"
 	"github.com/moby/swarmkit/v2/ca/keyutils"
 	"github.com/vishvananda/netlink"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/fs"
 	"gotest.tools/v3/icmd"
 	"gotest.tools/v3/poll"
@@ -54,7 +57,7 @@ func (s *DockerSwarmSuite) TestSwarmUpdate(c *testing.T) {
 	// setting anything under 30m for cert-expiry is not allowed
 	out, err = d.Cmd("swarm", "update", "--cert-expiry", "15m")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, "minimum certificate expiry time"))
+	assert.Assert(c, is.Contains(out, "minimum certificate expiry time"))
 	spec = getSpec()
 	assert.Equal(c, spec.CAConfig.NodeCertExpiry, 30*time.Hour)
 
@@ -120,7 +123,7 @@ func (s *DockerSwarmSuite) TestSwarmInit(c *testing.T) {
 	assert.Equal(c, spec.CAConfig.ExternalCAs[0].CACert, "")
 	assert.Equal(c, spec.CAConfig.ExternalCAs[1].CACert, string(expected))
 
-	assert.Assert(c, d.SwarmLeave(ctx, c, true) == nil)
+	assert.NilError(c, d.SwarmLeave(ctx, c, true))
 	cli.Docker(cli.Args("swarm", "init"), cli.Daemon(d)).Assert(c, icmd.Success)
 
 	spec = getSpec()
@@ -129,16 +132,18 @@ func (s *DockerSwarmSuite) TestSwarmInit(c *testing.T) {
 }
 
 func (s *DockerSwarmSuite) TestSwarmInitIPv6(c *testing.T) {
-	testRequires(c, IPv6)
 	ctx := testutil.GetContext(c)
 	d1 := s.AddDaemon(ctx, c, false, false)
-	cli.Docker(cli.Args("swarm", "init", "--listen-add", "::1"), cli.Daemon(d1)).Assert(c, icmd.Success)
+	cli.Docker(cli.Args("swarm", "init", "--listen-addr", "::1"),
+		cli.Daemon(d1)).Assert(c, icmd.Success)
 
+	token := s.daemons[0].JoinTokens(c).Worker
 	d2 := s.AddDaemon(ctx, c, false, false)
-	cli.Docker(cli.Args("swarm", "join", "::1"), cli.Daemon(d2)).Assert(c, icmd.Success)
+	cli.Docker(cli.Args("swarm", "join", "[::1]", "--token", token),
+		cli.Daemon(d2)).Assert(c, icmd.Success)
 
 	out := cli.Docker(cli.Args("info"), cli.Daemon(d2)).Assert(c, icmd.Success).Combined()
-	assert.Assert(c, strings.Contains(out, "Swarm: active"))
+	assert.Assert(c, is.Contains(out, "Swarm: active"))
 }
 
 func (s *DockerSwarmSuite) TestSwarmInitUnspecifiedAdvertiseAddr(c *testing.T) {
@@ -146,7 +151,7 @@ func (s *DockerSwarmSuite) TestSwarmInitUnspecifiedAdvertiseAddr(c *testing.T) {
 	d := s.AddDaemon(ctx, c, false, false)
 	out, err := d.Cmd("swarm", "init", "--advertise-addr", "0.0.0.0")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, "advertise address must be a non-zero IP address"))
+	assert.Assert(c, is.Contains(out, "advertise address must be a non-zero IP address"))
 }
 
 func (s *DockerSwarmSuite) TestSwarmIncompatibleDaemon(c *testing.T) {
@@ -162,7 +167,7 @@ func (s *DockerSwarmSuite) TestSwarmIncompatibleDaemon(c *testing.T) {
 	assert.ErrorContains(c, err, "")
 	content, err := d.ReadLogFile()
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(string(content), "--live-restore daemon configuration is incompatible with swarm mode"))
+	assert.Assert(c, is.Contains(string(content), "--live-restore daemon configuration is incompatible with swarm mode"))
 	// restart for teardown
 	d.StartNode(c)
 }
@@ -383,7 +388,8 @@ func (s *DockerSwarmSuite) TestSwarmContainerAttachByNetworkId(c *testing.T) {
 	out, err = d.Cmd("run", "-d", "--net", networkID, "busybox", "top")
 	assert.NilError(c, err, out)
 	cID := strings.TrimSpace(out)
-	d.WaitRun(cID)
+	err = d.WaitRun(cID)
+	assert.NilError(c, err)
 
 	out, err = d.Cmd("rm", "-f", cID)
 	assert.NilError(c, err, out)
@@ -437,7 +443,7 @@ func (s *DockerSwarmSuite) TestOverlayAttachableOnSwarmLeave(c *testing.T) {
 	assert.NilError(c, err, out)
 
 	// Leave the swarm
-	assert.Assert(c, d.SwarmLeave(ctx, c, true) == nil)
+	assert.NilError(c, d.SwarmLeave(ctx, c, true))
 
 	// Check the container is disconnected
 	out, err = d.Cmd("inspect", "c1", "--format", "{{.NetworkSettings.Networks."+nwName+"}}")
@@ -637,16 +643,18 @@ const (
 	globalIPAMPlugin    = "global-ipam-plugin"
 )
 
-func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDrv, ipamDrv string) {
+func setupRemoteGlobalNetworkPlugin(t *testing.T, mux *http.ServeMux, url, netDrv, ipamDrv string) {
 	mux.HandleFunc("/Plugin.Activate", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, `{"Implements": ["%s", "%s"]}`, driverapi.NetworkPluginEndpointType, ipamapi.PluginEndpointType)
+		_, err := fmt.Fprintf(w, `{"Implements": ["%s", "%s"]}`, driverapi.NetworkPluginEndpointType, ipamapi.PluginEndpointType)
+		assert.NilError(t, err)
 	})
 
 	// Network driver implementation
 	mux.HandleFunc(fmt.Sprintf("/%s.GetCapabilities", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, `{"Scope":"global"}`)
+		_, err := fmt.Fprint(w, `{"Scope":"global"}`)
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.AllocateNetwork", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
@@ -656,12 +664,14 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 			return
 		}
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, "null")
+		_, err = fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.FreeNetwork", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, "null")
+		_, err := fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.CreateNetwork", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
@@ -671,17 +681,20 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 			return
 		}
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, "null")
+		_, err = fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.DeleteNetwork", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, "null")
+		_, err := fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.CreateEndpoint", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, `{"Interface":{"MacAddress":"a0:b1:c2:d3:e4:f5"}}`)
+		_, err := fmt.Fprint(w, `{"Interface":{"MacAddress":"a0:b1:c2:d3:e4:f5"}}`)
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.Join", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
@@ -691,23 +704,28 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 			LinkAttrs: netlink.LinkAttrs{Name: "randomIfName", TxQLen: 0}, PeerName: "cnt0",
 		}
 		if err := netlink.LinkAdd(veth); err != nil {
-			fmt.Fprintf(w, `{"Error":"failed to add veth pair: `+err.Error()+`"}`)
+			_, err = fmt.Fprint(w, `{"Error":"failed to add veth pair: `+err.Error()+`"}`)
+			assert.NilError(t, err)
 		} else {
-			fmt.Fprintf(w, `{"InterfaceName":{ "SrcName":"cnt0", "DstPrefix":"veth"}}`)
+			_, err = fmt.Fprint(w, `{"InterfaceName":{ "SrcName":"cnt0", "DstPrefix":"veth"}}`)
+			assert.NilError(t, err)
 		}
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.Leave", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, "null")
+		_, err := fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.DeleteEndpoint", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		if link, err := netlink.LinkByName("cnt0"); err == nil {
-			netlink.LinkDel(link)
+		if link, err := nlwrap.LinkByName("cnt0"); err == nil {
+			err := netlink.LinkDel(link)
+			assert.NilError(t, err)
 		}
-		fmt.Fprintf(w, "null")
+		_, err := fmt.Fprint(w, "null")
+		assert.NilError(t, err)
 	})
 
 	// IPAM Driver implementation
@@ -716,16 +734,19 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 		poolReleaseReq    remoteipam.ReleasePoolRequest
 		addressRequest    remoteipam.RequestAddressRequest
 		addressReleaseReq remoteipam.ReleaseAddressRequest
-		lAS               = "localAS"
-		gAS               = "globalAS"
-		pool              = "172.28.0.0/16"
-		poolID            = lAS + "/" + pool
-		gw                = "172.28.255.254/16"
+	)
+	const (
+		lAS    = "localAS"
+		gAS    = "globalAS"
+		pool   = "172.28.0.0/16"
+		poolID = lAS + "/" + pool
+		gw     = "172.28.255.254/16"
 	)
 
 	mux.HandleFunc(fmt.Sprintf("/%s.GetDefaultAddressSpaces", ipamapi.PluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
-		fmt.Fprintf(w, `{"LocalDefaultAddressSpace":"`+lAS+`", "GlobalDefaultAddressSpace": "`+gAS+`"}`)
+		_, err := fmt.Fprint(w, `{"LocalDefaultAddressSpace":"`+lAS+`", "GlobalDefaultAddressSpace": "`+gAS+`"}`)
+		assert.NilError(t, err)
 	})
 
 	mux.HandleFunc(fmt.Sprintf("/%s.RequestPool", ipamapi.PluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
@@ -736,11 +757,14 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 		}
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
 		if poolRequest.AddressSpace != lAS && poolRequest.AddressSpace != gAS {
-			fmt.Fprintf(w, `{"Error":"Unknown address space in pool request: `+poolRequest.AddressSpace+`"}`)
+			_, err := fmt.Fprint(w, `{"Error":"Unknown address space in pool request: `+poolRequest.AddressSpace+`"}`)
+			assert.NilError(t, err)
 		} else if poolRequest.Pool != "" && poolRequest.Pool != pool {
-			fmt.Fprintf(w, `{"Error":"Cannot handle explicit pool requests yet"}`)
+			_, err := fmt.Fprint(w, `{"Error":"Cannot handle explicit pool requests yet"}`)
+			assert.NilError(t, err)
 		} else {
-			fmt.Fprintf(w, `{"PoolID":"`+poolID+`", "Pool":"`+pool+`"}`)
+			_, err := fmt.Fprint(w, `{"PoolID":"`+poolID+`", "Pool":"`+pool+`"}`)
+			assert.NilError(t, err)
 		}
 	})
 
@@ -753,11 +777,14 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
 		// make sure libnetwork is now querying on the expected pool id
 		if addressRequest.PoolID != poolID {
-			fmt.Fprintf(w, `{"Error":"unknown pool id"}`)
+			_, err := fmt.Fprint(w, `{"Error":"unknown pool id"}`)
+			assert.NilError(t, err)
 		} else if addressRequest.Address != "" {
-			fmt.Fprintf(w, `{"Error":"Cannot handle explicit address requests yet"}`)
+			_, err := fmt.Fprint(w, `{"Error":"Cannot handle explicit address requests yet"}`)
+			assert.NilError(t, err)
 		} else {
-			fmt.Fprintf(w, `{"Address":"`+gw+`"}`)
+			_, err := fmt.Fprint(w, `{"Address":"`+gw+`"}`)
+			assert.NilError(t, err)
 		}
 	})
 
@@ -770,11 +797,14 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
 		// make sure libnetwork is now asking to release the expected address from the expected poolid
 		if addressRequest.PoolID != poolID {
-			fmt.Fprintf(w, `{"Error":"unknown pool id"}`)
+			_, err := fmt.Fprint(w, `{"Error":"unknown pool id"}`)
+			assert.NilError(t, err)
 		} else if addressReleaseReq.Address != gw {
-			fmt.Fprintf(w, `{"Error":"unknown address"}`)
+			_, err := fmt.Fprint(w, `{"Error":"unknown address"}`)
+			assert.NilError(t, err)
 		} else {
-			fmt.Fprintf(w, "null")
+			_, err := fmt.Fprint(w, "null")
+			assert.NilError(t, err)
 		}
 	})
 
@@ -787,22 +817,24 @@ func setupRemoteGlobalNetworkPlugin(c *testing.T, mux *http.ServeMux, url, netDr
 		w.Header().Set("Content-Type", plugins.VersionMimetype)
 		// make sure libnetwork is now asking to release the expected poolid
 		if addressRequest.PoolID != poolID {
-			fmt.Fprintf(w, `{"Error":"unknown pool id"}`)
+			_, err := fmt.Fprint(w, `{"Error":"unknown pool id"}`)
+			assert.NilError(t, err)
 		} else {
-			fmt.Fprintf(w, "null")
+			_, err := fmt.Fprint(w, "null")
+			assert.NilError(t, err)
 		}
 	})
 
 	err := os.MkdirAll("/etc/docker/plugins", 0o755)
-	assert.NilError(c, err)
+	assert.NilError(t, err)
 
 	fileName := fmt.Sprintf("/etc/docker/plugins/%s.spec", netDrv)
 	err = os.WriteFile(fileName, []byte(url), 0o644)
-	assert.NilError(c, err)
+	assert.NilError(t, err)
 
 	ipamFileName := fmt.Sprintf("/etc/docker/plugins/%s.spec", ipamDrv)
 	err = os.WriteFile(ipamFileName, []byte(url), 0o644)
-	assert.NilError(c, err)
+	assert.NilError(t, err)
 }
 
 func (s *DockerSwarmSuite) TestSwarmNetworkPlugin(c *testing.T) {
@@ -1260,6 +1292,8 @@ func (s *DockerSwarmSuite) TestSwarmJoinPromoteLocked(c *testing.T) {
 	poll.WaitOn(c, pollCheck(c, d3.CheckLocalNodeState(ctx), checker.Equals(swarm.LocalNodeStateActive)), poll.WithTimeout(time.Second))
 }
 
+const swarmIsEncryptedMsg = "Swarm is encrypted and needs to be unlocked"
+
 func (s *DockerSwarmSuite) TestSwarmRotateUnlockKey(c *testing.T) {
 	ctx := testutil.GetContext(c)
 	d := s.AddDaemon(ctx, c, true, true)
@@ -1280,12 +1314,16 @@ func (s *DockerSwarmSuite) TestSwarmRotateUnlockKey(c *testing.T) {
 		d.RestartNode(c)
 		assert.Equal(c, getNodeStatus(c, d), swarm.LocalNodeStateLocked)
 
-		outs, _ = d.Cmd("node", "ls")
-		assert.Assert(c, strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-		cmd := d.Command("swarm", "unlock")
-		cmd.Stdin = bytes.NewBufferString(unlockKey)
-		result := icmd.RunCmd(cmd)
+		unlock := func(d *daemon.Daemon, key string) *icmd.Result {
+			cmd := d.Command("swarm", "unlock")
+			cmd.Stdin = strings.NewReader(key)
+			return icmd.RunCmd(cmd)
+		}
 
+		outs, _ = d.Cmd("node", "ls")
+		assert.Assert(c, strings.Contains(outs, swarmIsEncryptedMsg), outs)
+
+		result := unlock(d, unlockKey)
 		if result.Error == nil {
 			// On occasion, the daemon may not have finished
 			// rotating the KEK before restarting. The test is
@@ -1295,13 +1333,16 @@ func (s *DockerSwarmSuite) TestSwarmRotateUnlockKey(c *testing.T) {
 			// restart again, the new key should be required this
 			// time.
 
-			time.Sleep(3 * time.Second)
+			// Wait for the rotation to happen
+			// Since there are multiple rotations, we need to wait until for the number of rotations we are currently on to be reflected in the logs
+			// This is a little janky... its depending on specific log messages AND these are debug logs... but it is the best we can do for now.
+			matcher := testdaemon.ScanLogsMatchCount(testdaemon.ScanLogsMatchString("successfully rotated KEK"), i+1)
+			poll.WaitOn(c, d.PollCheckLogs(ctx, matcher), poll.WithDelay(3*time.Second), poll.WithTimeout(time.Minute))
+			d.Restart(c)
 
 			d.RestartNode(c)
 
-			cmd = d.Command("swarm", "unlock")
-			cmd.Stdin = bytes.NewBufferString(unlockKey)
-			result = icmd.RunCmd(cmd)
+			result = unlock(d, unlockKey)
 		}
 		result.Assert(c, icmd.Expected{
 			ExitCode: 1,
@@ -1309,28 +1350,20 @@ func (s *DockerSwarmSuite) TestSwarmRotateUnlockKey(c *testing.T) {
 		})
 
 		outs, _ = d.Cmd("node", "ls")
-		assert.Assert(c, strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-		cmd = d.Command("swarm", "unlock")
-		cmd.Stdin = bytes.NewBufferString(newUnlockKey)
-		icmd.RunCmd(cmd).Assert(c, icmd.Success)
+		assert.Assert(c, strings.Contains(outs, swarmIsEncryptedMsg), outs)
+		unlock(d, newUnlockKey).Assert(c, icmd.Success)
 
 		assert.Equal(c, getNodeStatus(c, d), swarm.LocalNodeStateActive)
 
-		retry := 0
-		for {
+		checkNodeLs := func(t poll.LogT) poll.Result {
 			// an issue sometimes prevents leader to be available right away
-			outs, err = d.Cmd("node", "ls")
-			if err != nil && retry < 5 {
-				if strings.Contains(outs, "swarm does not have a leader") {
-					retry++
-					time.Sleep(3 * time.Second)
-					continue
-				}
+			out, err := d.Cmd("node", "ls")
+			if err != nil {
+				return poll.Continue("error running node ls: %v: %s", err, out)
 			}
-			assert.NilError(c, err)
-			assert.Assert(c, !strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-			break
+			return poll.Success()
 		}
+		poll.WaitOn(c, checkNodeLs, poll.WithDelay(3*time.Second), poll.WithTimeout(time.Minute))
 
 		unlockKey = newUnlockKey
 	}
@@ -1368,15 +1401,23 @@ func (s *DockerSwarmSuite) TestSwarmClusterRotateUnlockKey(c *testing.T) {
 		d2.RestartNode(c)
 		d3.RestartNode(c)
 
+		unlock := func(d *daemon.Daemon, key string) *icmd.Result {
+			cmd := d.Command("swarm", "unlock")
+			cmd.Stdin = strings.NewReader(key)
+			return icmd.RunCmd(cmd)
+		}
+
+		const swarmIsEncryptedMsg = "Swarm is encrypted and needs to be unlocked"
+
 		for _, d := range []*daemon.Daemon{d2, d3} {
 			assert.Equal(c, getNodeStatus(c, d), swarm.LocalNodeStateLocked)
 
 			outs, _ := d.Cmd("node", "ls")
-			assert.Assert(c, strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-			cmd := d.Command("swarm", "unlock")
-			cmd.Stdin = bytes.NewBufferString(unlockKey)
-			result := icmd.RunCmd(cmd)
+			assert.Assert(c, strings.Contains(outs, swarmIsEncryptedMsg), outs)
 
+			// unlock with the original key should fail
+			// Use poll here because the daemon may not have finished
+			result := unlock(d, unlockKey)
 			if result.Error == nil {
 				// On occasion, the daemon may not have finished
 				// rotating the KEK before restarting. The test is
@@ -1386,13 +1427,14 @@ func (s *DockerSwarmSuite) TestSwarmClusterRotateUnlockKey(c *testing.T) {
 				// restart again, the new key should be required this
 				// time.
 
-				time.Sleep(3 * time.Second)
+				// Wait for the rotation to happen
+				// Since there are multiple rotations, we need to wait until for the number of rotations we are currently on to be reflected in the logs
+				// This is a little janky... its depending on specific log messages AND these are debug logs... but it is the best we can do for now.
+				matcher := testdaemon.ScanLogsMatchCount(testdaemon.ScanLogsMatchString("successfully rotated KEK"), i+1)
+				poll.WaitOn(c, d.PollCheckLogs(ctx, matcher), poll.WithDelay(3*time.Second), poll.WithTimeout(time.Minute))
+				d.Restart(c)
 
-				d.RestartNode(c)
-
-				cmd = d.Command("swarm", "unlock")
-				cmd.Stdin = bytes.NewBufferString(unlockKey)
-				result = icmd.RunCmd(cmd)
+				result = unlock(d, unlockKey)
 			}
 			result.Assert(c, icmd.Expected{
 				ExitCode: 1,
@@ -1400,31 +1442,21 @@ func (s *DockerSwarmSuite) TestSwarmClusterRotateUnlockKey(c *testing.T) {
 			})
 
 			outs, _ = d.Cmd("node", "ls")
-			assert.Assert(c, strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-			cmd = d.Command("swarm", "unlock")
-			cmd.Stdin = bytes.NewBufferString(newUnlockKey)
-			icmd.RunCmd(cmd).Assert(c, icmd.Success)
+			assert.Assert(c, strings.Contains(outs, swarmIsEncryptedMsg), outs)
 
+			// now unlock with the rotated key, this should succeed
+			unlock(d, newUnlockKey).Assert(c, icmd.Success)
 			assert.Equal(c, getNodeStatus(c, d), swarm.LocalNodeStateActive)
 
-			retry := 0
-			for {
+			checkNodeLs := func(t poll.LogT) poll.Result {
 				// an issue sometimes prevents leader to be available right away
-				outs, err = d.Cmd("node", "ls")
-				if err != nil && retry < 5 {
-					if strings.Contains(outs, "swarm does not have a leader") {
-						retry++
-						c.Logf("[%s] got 'swarm does not have a leader'. retrying (attempt %d/5)", d.ID(), retry)
-						time.Sleep(3 * time.Second)
-						continue
-					} else {
-						c.Logf("[%s] gave error: '%v'. retrying (attempt %d/5): %s", d.ID(), err, retry, outs)
-					}
+				out, err := d.Cmd("node", "ls")
+				if err != nil {
+					return poll.Continue("error running node ls: %v: %s", err, out)
 				}
-				assert.NilError(c, err, "[%s] failed after %d retries: %v (%s)", d.ID(), retry, err, outs)
-				assert.Assert(c, !strings.Contains(outs, "Swarm is encrypted and needs to be unlocked"), outs)
-				break
+				return poll.Success()
 			}
+			poll.WaitOn(c, checkNodeLs, poll.WithDelay(3*time.Second), poll.WithTimeout(time.Minute))
 		}
 
 		unlockKey = newUnlockKey
@@ -1630,7 +1662,7 @@ func (s *DockerSwarmSuite) TestSwarmInitWithDrain(c *testing.T) {
 
 	out, err = d.Cmd("node", "ls")
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(out, "Drain"))
+	assert.Assert(c, is.Contains(out, "Drain"))
 }
 
 func (s *DockerSwarmSuite) TestSwarmReadonlyRootfs(c *testing.T) {

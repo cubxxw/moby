@@ -26,6 +26,13 @@ const (
 	// DNSServers A list of DNS servers associated with the endpoint
 	DNSServers = Prefix + ".endpoint.dnsservers"
 
+	// EndpointSysctls is a comma separated list interface-specific sysctls
+	// where the interface name is represented by the string "IFNAME".
+	EndpointSysctls = Prefix + ".endpoint.sysctls"
+
+	// EnableIPv4 constant represents enabling IPV4 at network level
+	EnableIPv4 = Prefix + ".enable_ipv4"
+
 	// EnableIPv6 constant represents enabling IPV6 at network level
 	EnableIPv6 = Prefix + ".enable_ipv6"
 
@@ -44,9 +51,14 @@ const (
 	// ContainerIfacePrefix can be used to override the interface prefix used inside the container
 	ContainerIfacePrefix = Prefix + ".container_iface_prefix"
 
-	// HostIP is the Source-IP Address used to SNAT container traffic
-	HostIP = Prefix + ".host_ipv4"
+	// HostIPv4 is the Source-IPv4 Address used to SNAT IPv4 container traffic
+	HostIPv4 = Prefix + ".host_ipv4"
 
-	// LocalKVClient constants represents the local kv store client
-	LocalKVClient = DriverPrivatePrefix + "localkv_client"
+	// HostIPv6 is the Source-IPv6 Address used to SNAT IPv6 container traffic
+	HostIPv6 = Prefix + ".host_ipv6"
+
+	// NoProxy6To4 disables proxying from an IPv6 host port to an IPv4-only
+	// container, when the default binding address is 0.0.0.0. This label
+	// is intended for internal use, it may be removed in a future release.
+	NoProxy6To4 = DriverPrivatePrefix + ".no_proxy_6to4"
 )

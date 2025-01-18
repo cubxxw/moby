@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	swarmapi "github.com/moby/swarmkit/v2/api"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestIsolationConversion(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		name string
 		from swarmapi.ContainerSpec_Isolation
 		to   container.Isolation
@@ -18,14 +20,14 @@ func TestIsolationConversion(t *testing.T) {
 		{name: "process", from: swarmapi.ContainerIsolationProcess, to: container.IsolationProcess},
 		{name: "hyperv", from: swarmapi.ContainerIsolationHyperV, to: container.IsolationHyperV},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			task := swarmapi.Task{
 				Spec: swarmapi.TaskSpec{
 					Runtime: &swarmapi.TaskSpec_Container{
 						Container: &swarmapi.ContainerSpec{
 							Image:     "alpine:latest",
-							Isolation: c.from,
+							Isolation: tc.from,
 						},
 					},
 				},
@@ -34,7 +36,7 @@ func TestIsolationConversion(t *testing.T) {
 			// NOTE(dperny): you shouldn't ever pass nil outside of testing,
 			// because if there are CSI volumes, the code will panic. However,
 			// in testing. this is acceptable.
-			assert.Equal(t, c.to, config.hostConfig(nil).Isolation)
+			assert.Equal(t, tc.to, config.hostConfig(nil).Isolation)
 		})
 	}
 }
@@ -85,7 +87,7 @@ func TestContainerLabels(t *testing.T) {
 }
 
 func TestCredentialSpecConversion(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		name string
 		from swarmapi.Privileges_CredentialSpec
 		to   []string
@@ -117,15 +119,15 @@ func TestCredentialSpecConversion(t *testing.T) {
 			to: []string{"credentialspec=registry://testing"},
 		},
 	}
-	for _, c := range cases {
-		c := c
-		t.Run(c.name, func(t *testing.T) {
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			task := swarmapi.Task{
 				Spec: swarmapi.TaskSpec{
 					Runtime: &swarmapi.TaskSpec_Container{
 						Container: &swarmapi.ContainerSpec{
 							Privileges: &swarmapi.Privileges{
-								CredentialSpec: &c.from,
+								CredentialSpec: &tc.from,
 							},
 						},
 					},
@@ -135,7 +137,79 @@ func TestCredentialSpecConversion(t *testing.T) {
 			// NOTE(dperny): you shouldn't ever pass nil outside of testing,
 			// because if there are CSI volumes, the code will panic. However,
 			// in testing. this is acceptable.
-			assert.DeepEqual(t, c.to, config.hostConfig(nil).SecurityOpt)
+			assert.DeepEqual(t, tc.to, config.hostConfig(nil).SecurityOpt)
+		})
+	}
+}
+
+func TestTmpfsConversion(t *testing.T) {
+	tests := []struct {
+		name string
+		from []swarmapi.Mount
+		to   []mount.Mount
+	}{
+		{
+			name: "tmpfs-exec",
+			from: []swarmapi.Mount{
+				{
+					Source: "/foo",
+					Target: "/bar",
+					Type:   swarmapi.MountTypeTmpfs,
+					TmpfsOptions: &swarmapi.Mount_TmpfsOptions{
+						Options: "[[\"exec\"]]",
+					},
+				},
+			},
+			to: []mount.Mount{
+				{
+					Source: "/foo",
+					Target: "/bar",
+					Type:   mount.TypeTmpfs,
+					TmpfsOptions: &mount.TmpfsOptions{
+						Options: [][]string{{"exec"}},
+					},
+				},
+			},
+		},
+		{
+			name: "tmpfs-noexec",
+			from: []swarmapi.Mount{
+				{
+					Source: "/foo",
+					Target: "/bar",
+					Type:   swarmapi.MountTypeTmpfs,
+					TmpfsOptions: &swarmapi.Mount_TmpfsOptions{
+						Options: "[[\"noexec\"]]",
+					},
+				},
+			},
+			to: []mount.Mount{
+				{
+					Source: "/foo",
+					Target: "/bar",
+					Type:   mount.TypeTmpfs,
+					TmpfsOptions: &mount.TmpfsOptions{
+						Options: [][]string{{"noexec"}},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			task := swarmapi.Task{
+				Spec: swarmapi.TaskSpec{
+					Runtime: &swarmapi.TaskSpec_Container{
+						Container: &swarmapi.ContainerSpec{
+							Image:  "alpine:latest",
+							Mounts: tc.from,
+						},
+					},
+				},
+			}
+			config := containerConfig{task: &task}
+			assert.Check(t, is.DeepEqual(tc.to, config.hostConfig(nil).Mounts))
 		})
 	}
 }

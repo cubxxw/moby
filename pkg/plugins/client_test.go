@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +105,6 @@ func TestBackoff(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(fmt.Sprintf("retries: %v", tc.retries), func(t *testing.T) {
 			s := tc.expTimeOff * time.Second
 			if d := backoff(tc.retries); d != s {
@@ -130,7 +128,6 @@ func TestAbortRetry(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(fmt.Sprintf("duration: %v", tc.timeOff), func(t *testing.T) {
 			s := tc.timeOff * time.Second
 			if a := abort(time.Now(), s, 0); a != tc.expAbort {
@@ -169,15 +166,21 @@ func TestNewClientWithTimeout(t *testing.T) {
 	m := Manifest{[]string{"VolumeDriver", "NetworkDriver"}}
 
 	mux.HandleFunc("/Test.Echo", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		io.Copy(w, r.Body)
 	})
 
 	timeout := 10 * time.Millisecond
 	c, _ := NewClientWithTimeout(addr, &tlsconfig.Options{InsecureSkipVerify: true}, timeout)
 	var output Manifest
+
 	err := c.CallWithOptions("Test.Echo", m, &output, func(opts *RequestOpts) { opts.testTimeOut = 1 })
-	assert.ErrorType(t, err, os.IsTimeout)
+	var tErr interface {
+		Timeout() bool
+	}
+	if assert.Check(t, errors.As(err, &tErr), "want timeout error, got %T", err) {
+		assert.Check(t, tErr.Timeout())
+	}
 }
 
 func TestClientStream(t *testing.T) {

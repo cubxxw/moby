@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/homedir"
@@ -95,6 +95,7 @@ func defaultCertPath() string {
 func newDaemonOptions(config *config.Config) *daemonOptions {
 	return &daemonOptions{
 		daemonConfig: config,
+		configFile:   getDefaultDaemonConfigFile(),
 	}
 }
 

@@ -1,66 +1,18 @@
-// Network utility functions.
-
+// Package netutils provides network utility functions.
 package netutils
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync"
 
-	"github.com/docker/docker/libnetwork/types"
+	"github.com/containerd/log"
 )
-
-var (
-	// ErrNetworkOverlapsWithNameservers preformatted error
-	ErrNetworkOverlapsWithNameservers = errors.New("requested network overlaps with nameserver")
-	// ErrNetworkOverlaps preformatted error
-	ErrNetworkOverlaps = errors.New("requested network overlaps with existing network")
-)
-
-// CheckNameserverOverlaps checks whether the passed network overlaps with any of the nameservers
-func CheckNameserverOverlaps(nameservers []string, toCheck *net.IPNet) error {
-	if len(nameservers) > 0 {
-		for _, ns := range nameservers {
-			_, nsNetwork, err := net.ParseCIDR(ns)
-			if err != nil {
-				return err
-			}
-			if NetworkOverlaps(toCheck, nsNetwork) {
-				return ErrNetworkOverlapsWithNameservers
-			}
-		}
-	}
-	return nil
-}
-
-// NetworkOverlaps detects overlap between one IPNet and another
-func NetworkOverlaps(netX *net.IPNet, netY *net.IPNet) bool {
-	return netX.Contains(netY.IP) || netY.Contains(netX.IP)
-}
-
-// NetworkRange calculates the first and last IP addresses in an IPNet
-func NetworkRange(network *net.IPNet) (net.IP, net.IP) {
-	if network == nil {
-		return nil, nil
-	}
-
-	firstIP := network.IP.Mask(network.Mask)
-	lastIP := types.GetIPCopy(firstIP)
-	for i := 0; i < len(firstIP); i++ {
-		lastIP[i] = firstIP[i] | ^network.Mask[i]
-	}
-
-	if network.IP.To4() != nil {
-		firstIP = firstIP.To4()
-		lastIP = lastIP.To4()
-	}
-
-	return firstIP, lastIP
-}
 
 func genMAC(ip net.IP) net.HardwareAddr {
 	hw := make(net.HardwareAddr, 6)
@@ -143,4 +95,36 @@ func ReverseIP(IP string) string {
 	}
 
 	return strings.Join(reverseIP, ".")
+}
+
+var (
+	v6ListenableCached bool
+	v6ListenableOnce   sync.Once
+)
+
+// IsV6Listenable returns true when `[::1]:0` is listenable.
+// IsV6Listenable returns false mostly when the kernel was booted with `ipv6.disable=1` option.
+func IsV6Listenable() bool {
+	v6ListenableOnce.Do(func() {
+		ln, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			// When the kernel was booted with `ipv6.disable=1`,
+			// we get err "listen tcp6 [::1]:0: socket: address family not supported by protocol"
+			// https://github.com/moby/moby/issues/42288
+			log.G(context.TODO()).Debugf("v6Listenable=false (%v)", err)
+		} else {
+			v6ListenableCached = true
+			ln.Close()
+		}
+	})
+	return v6ListenableCached
+}
+
+// MustParseMAC returns a net.HardwareAddr or panic.
+func MustParseMAC(s string) net.HardwareAddr {
+	mac, err := net.ParseMAC(s)
+	if err != nil {
+		panic(err)
+	}
+	return mac
 }

@@ -1,6 +1,8 @@
 package registry // import "github.com/docker/docker/registry"
 
 import (
+	"errors"
+	"net"
 	"testing"
 
 	"github.com/distribution/reference"
@@ -8,6 +10,29 @@ import (
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
+
+// overrideLookupIP overrides net.LookupIP for testing.
+func overrideLookupIP(t *testing.T) {
+	t.Helper()
+	restoreLookup := lookupIP
+
+	// override net.LookupIP
+	lookupIP = func(host string) ([]net.IP, error) {
+		mockHosts := map[string][]net.IP{
+			"":            {net.ParseIP("0.0.0.0")},
+			"localhost":   {net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+			"example.com": {net.ParseIP("42.42.42.42")},
+			"other.com":   {net.ParseIP("43.43.43.43")},
+		}
+		if addrs, ok := mockHosts[host]; ok {
+			return addrs, nil
+		}
+		return nil, errors.New("lookup: no such host")
+	}
+	t.Cleanup(func() {
+		lookupIP = restoreLookup
+	})
+}
 
 func TestParseRepositoryInfo(t *testing.T) {
 	type staticRepositoryInfo struct {
@@ -242,6 +267,7 @@ func TestParseRepositoryInfo(t *testing.T) {
 }
 
 func TestNewIndexInfo(t *testing.T) {
+	overrideLookupIP(t)
 	testIndexInfo := func(config *serviceConfig, expectedIndexInfos map[string]*registry.IndexInfo) {
 		for indexName, expectedIndexInfo := range expectedIndexInfos {
 			index, err := newIndexInfo(config, indexName)
@@ -414,52 +440,8 @@ func TestMirrorEndpointLookup(t *testing.T) {
 	}
 }
 
-func TestAllowNondistributableArtifacts(t *testing.T) {
-	tests := []struct {
-		addr       string
-		registries []string
-		expected   bool
-	}{
-		{IndexName, nil, false},
-		{"example.com", []string{}, false},
-		{"example.com", []string{"example.com"}, true},
-		{"localhost", []string{"localhost:5000"}, false},
-		{"localhost:5000", []string{"localhost:5000"}, true},
-		{"localhost", []string{"example.com"}, false},
-		{"127.0.0.1:5000", []string{"127.0.0.1:5000"}, true},
-		{"localhost", nil, false},
-		{"localhost:5000", nil, false},
-		{"127.0.0.1", nil, false},
-		{"localhost", []string{"example.com"}, false},
-		{"127.0.0.1", []string{"example.com"}, false},
-		{"example.com", nil, false},
-		{"example.com", []string{"example.com"}, true},
-		{"127.0.0.1", []string{"example.com"}, false},
-		{"127.0.0.1:5000", []string{"example.com"}, false},
-		{"example.com:5000", []string{"42.42.0.0/16"}, true},
-		{"example.com", []string{"42.42.0.0/16"}, true},
-		{"example.com:5000", []string{"42.42.42.42/8"}, true},
-		{"127.0.0.1:5000", []string{"127.0.0.0/8"}, true},
-		{"42.42.42.42:5000", []string{"42.1.1.1/8"}, true},
-		{"invalid.example.com", []string{"42.42.0.0/16"}, false},
-		{"invalid.example.com", []string{"invalid.example.com"}, true},
-		{"invalid.example.com:5000", []string{"invalid.example.com"}, false},
-		{"invalid.example.com:5000", []string{"invalid.example.com:5000"}, true},
-	}
-	for _, tt := range tests {
-		config, err := newServiceConfig(ServiceOptions{
-			AllowNondistributableArtifacts: tt.registries,
-		})
-		if err != nil {
-			t.Error(err)
-		}
-		if v := config.allowNondistributableArtifacts(tt.addr); v != tt.expected {
-			t.Errorf("allowNondistributableArtifacts failed for %q %v, expected %v got %v", tt.addr, tt.registries, tt.expected, v)
-		}
-	}
-}
-
 func TestIsSecureIndex(t *testing.T) {
+	overrideLookupIP(t)
 	tests := []struct {
 		addr               string
 		insecureRegistries []string

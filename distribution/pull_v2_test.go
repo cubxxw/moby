@@ -8,12 +8,12 @@ import (
 	"net/url"
 	"os"
 	"reflect"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/containerd/log/logtest"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution/manifest/schema1"
 	registrytypes "github.com/docker/docker/api/types/registry"
@@ -124,6 +124,9 @@ func TestValidateManifest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Needs fixing on Windows")
 	}
+	ctx := context.TODO()
+	ctx = logtest.WithT(ctx, t)
+
 	expectedDigest, err := reference.ParseNormalizedNamed("repo@sha256:02fee8c3220ba806531f606525eceb83f4feb654f62b207191b1c9209188dedd")
 	if err != nil {
 		t.Fatal("could not parse reference")
@@ -143,7 +146,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	verifiedManifest, err := verifySchema1Manifest(&goodSignedManifest, expectedDigest)
+	verifiedManifest, err := verifySchema1Manifest(ctx, &goodSignedManifest, expectedDigest)
 	if err != nil {
 		t.Fatal("validateManifest failed:", err)
 	}
@@ -165,7 +168,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	verifiedManifest, err = verifySchema1Manifest(&extraDataSignedManifest, expectedDigest)
+	verifiedManifest, err = verifySchema1Manifest(ctx, &extraDataSignedManifest, expectedDigest)
 	if err != nil {
 		t.Fatal("validateManifest failed:", err)
 	}
@@ -187,30 +190,23 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	_, err = verifySchema1Manifest(&badSignedManifest, expectedDigest)
+	_, err = verifySchema1Manifest(ctx, &badSignedManifest, expectedDigest)
 	if err == nil || !strings.HasPrefix(err.Error(), "image verification failed for digest") {
 		t.Fatal("expected validateManifest to fail with digest error")
 	}
 }
 
-func TestFormatPlatform(t *testing.T) {
-	var platform ocispec.Platform
-	result := formatPlatform(platform)
-	if strings.HasPrefix(result, "unknown") {
-		t.Fatal("expected formatPlatform to show a known platform")
-	}
-	if !strings.HasPrefix(result, runtime.GOOS) {
-		t.Fatal("expected formatPlatform to show the current platform")
-	}
-	if runtime.GOOS == "windows" {
-		if !strings.HasPrefix(result, "windows") {
-			t.Fatal("expected formatPlatform to show windows platform")
-		}
-		matches, _ := regexp.MatchString("windows.* [0-9]", result)
-		if !matches {
-			t.Fatalf("expected formatPlatform to show windows platform with a version, but got '%s'", result)
-		}
-	}
+func TestNoMatchesErr(t *testing.T) {
+	err := noMatchesErr{}
+	assert.Check(t, is.ErrorContains(err, "no matching manifest for "+runtime.GOOS))
+
+	err = noMatchesErr{ocispec.Platform{
+		Architecture: "arm64",
+		OS:           "windows",
+		OSVersion:    "10.0.17763",
+		Variant:      "v8",
+	}}
+	assert.Check(t, is.Error(err, "no matching manifest for windows(10.0.17763)/arm64/v8 in the manifest list entries"))
 }
 
 func TestPullSchema2Config(t *testing.T) {
@@ -231,7 +227,7 @@ func TestPullSchema2Config(t *testing.T) {
 		name           string
 		handler        func(callCount int, w http.ResponseWriter)
 		expectError    string
-		expectAttempts int64
+		expectAttempts uint64
 	}{
 		{
 			name: "success first time",
@@ -268,24 +264,43 @@ func TestPullSchema2Config(t *testing.T) {
 			name: "unauthorized",
 			handler: func(callCount int, w http.ResponseWriter) {
 				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("you need to be authenticated"))
+			},
+			expectError:    "unauthorized: you need to be authenticated",
+			expectAttempts: 1,
+		},
+		{
+			name: "unauthorized JSON",
+			handler: func(callCount int, w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`					{ "errors":	[{"code": "UNAUTHORIZED", "message": "you need to be authenticated", "detail": "more detail"}]}`))
+			},
+			expectError:    "unauthorized: you need to be authenticated",
+			expectAttempts: 1,
+		},
+		{
+			name: "unauthorized JSON no body",
+			handler: func(callCount int, w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
 			},
 			expectError:    "unauthorized: authentication required",
 			expectAttempts: 1,
 		},
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			var callCount int64
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var callCount atomic.Uint64
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				t.Logf("HTTP %s %s", r.Method, r.URL.Path)
 				defer r.Body.Close()
 				switch {
 				case r.Method == "GET" && r.URL.Path == "/v2":
 					w.WriteHeader(http.StatusOK)
-				case r.Method == "GET" && r.URL.Path == "/v2/docker.io/library/testremotename/blobs/"+expectedDigest.String():
-					tt.handler(int(atomic.AddInt64(&callCount, 1)), w)
+				case r.Method == "GET" && r.URL.Path == "/v2/library/testremotename/blobs/"+expectedDigest.String():
+					tc.handler(int(callCount.Add(1)), w)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -295,7 +310,7 @@ func TestPullSchema2Config(t *testing.T) {
 			p := testNewPuller(t, ts.URL)
 
 			config, err := p.pullSchema2Config(ctx, expectedDigest)
-			if tt.expectError == "" {
+			if tc.expectError == "" {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -306,15 +321,15 @@ func TestPullSchema2Config(t *testing.T) {
 				}
 			} else {
 				if err == nil {
-					t.Fatalf("expected error to contain %q", tt.expectError)
+					t.Fatalf("expected error to contain %q", tc.expectError)
 				}
-				if !strings.Contains(err.Error(), tt.expectError) {
-					t.Fatalf("expected error=%q to contain %q", err, tt.expectError)
+				if !strings.Contains(err.Error(), tc.expectError) {
+					t.Fatalf("expected error=%q to contain %q", err, tc.expectError)
 				}
 			}
 
-			if callCount != tt.expectAttempts {
-				t.Fatalf("got callCount=%d but expected=%d", callCount, tt.expectAttempts)
+			if cc := callCount.Load(); cc != tc.expectAttempts {
+				t.Fatalf("got callCount=%d but expected=%d", cc, tc.expectAttempts)
 			}
 		})
 	}
@@ -324,41 +339,27 @@ func testNewPuller(t *testing.T, rawurl string) *puller {
 	t.Helper()
 
 	uri, err := url.Parse(rawurl)
-	if err != nil {
-		t.Fatalf("could not parse url from test server: %v", err)
-	}
+	assert.NilError(t, err, "could not parse url from test server: %v", rawurl)
 
-	endpoint := registry.APIEndpoint{
-		Mirror:       false,
-		URL:          uri,
-		Official:     false,
-		TrimHostname: false,
-		TLSConfig:    nil,
-	}
-	n, _ := reference.ParseNormalizedNamed("testremotename")
+	n, err := reference.ParseNormalizedNamed("testremotename")
+	assert.NilError(t, err)
+
 	repoInfo := &registry.RepositoryInfo{
 		Name: n,
 		Index: &registrytypes.IndexInfo{
-			Name:     "testrepo",
-			Mirrors:  nil,
-			Secure:   false,
-			Official: false,
+			Name: "testrepo",
 		},
-		Official: false,
 	}
 	imagePullConfig := &ImagePullConfig{
 		Config: Config{
-			MetaHeaders: http.Header{},
 			AuthConfig: &registrytypes.AuthConfig{
 				RegistryToken: secretRegistryToken,
 			},
 		},
 	}
 
-	p := newPuller(endpoint, repoInfo, imagePullConfig, nil)
+	p := newPuller(registry.APIEndpoint{URL: uri}, repoInfo, imagePullConfig, nil)
 	p.repo, err = newRepository(context.Background(), p.repoInfo, p.endpoint, p.config.MetaHeaders, p.config.AuthConfig, "pull")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NilError(t, err)
 	return p
 }

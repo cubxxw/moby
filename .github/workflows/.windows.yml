@@ -3,21 +3,34 @@ name: .windows
 
 # TODO: hide reusable workflow from the UI. Tracked in https://github.com/community/community/discussions/12025
 
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
       os:
         required: true
         type: string
+      storage:
+        required: true
+        type: string
+        default: "graphdriver"
       send_coverage:
         required: false
         type: boolean
         default: false
 
 env:
-  GO_VERSION: "1.20.8"
+  GO_VERSION: "1.23.4"
   GOTESTLIST_VERSION: v0.3.1
-  TESTSTAT_VERSION: v0.1.3
+  TESTSTAT_VERSION: v0.1.25
   WINDOWS_BASE_IMAGE: mcr.microsoft.com/windows/servercore
   WINDOWS_BASE_TAG_2019: ltsc2019
   WINDOWS_BASE_TAG_2022: ltsc2022
@@ -29,6 +42,7 @@ env:
 jobs:
   build:
     runs-on: ${{ inputs.os }}
+    timeout-minutes: 120 # guardrails timeout for the whole job
     env:
       GOPATH: ${{ github.workspace }}\go
       GOBIN: ${{ github.workspace }}\go\bin
@@ -39,7 +53,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: ${{ env.GOPATH }}/src/github.com/docker/docker
       -
@@ -58,7 +72,7 @@ jobs:
           }
       -
         name: Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\go-build
@@ -99,16 +113,16 @@ jobs:
           docker cp "${{ env.TEST_CTN_NAME }}`:c`:\containerd\bin\containerd-shim-runhcs-v1.exe" ${{ env.BIN_OUT }}\
       -
         name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: build-${{ inputs.os }}
+          name: build-${{ inputs.storage }}-${{ inputs.os }}
           path: ${{ env.BIN_OUT }}/*
           if-no-files-found: error
           retention-days: 2
 
   unit-test:
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 120
+    timeout-minutes: 120 # guardrails timeout for the whole job
     env:
       GOPATH: ${{ github.workspace }}\go
       GOBIN: ${{ github.workspace }}\go\bin
@@ -118,7 +132,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: ${{ env.GOPATH }}/src/github.com/docker/docker
       -
@@ -138,7 +152,7 @@ jobs:
           }
       -
         name: Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\go-build
@@ -172,36 +186,40 @@ jobs:
       -
         name: Send to Codecov
         if: inputs.send_coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           working-directory: ${{ env.GOPATH }}\src\github.com\docker\docker
           directory: bundles
           env_vars: RUNNER_OS
           flags: unit
+          token: ${{ secrets.CODECOV_TOKEN }}  # used to upload coverage reports: https://github.com/moby/buildkit/pull/4660#issue-2142122533
       -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.os }}-unit-reports
+          name: ${{ inputs.os }}-${{ inputs.storage }}-unit-reports
           path: ${{ env.GOPATH }}\src\github.com\docker\docker\bundles\*
+          retention-days: 1
 
   unit-test-report:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120 # guardrails timeout for the whole job
     if: always()
     needs:
       - unit-test
     steps:
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: vendor.sum
       -
         name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.os }}-unit-reports
+          name: ${{ inputs.os }}-${{ inputs.storage }}-unit-reports
           path: /tmp/artifacts
       -
         name: Install teststat
@@ -210,21 +228,23 @@ jobs:
       -
         name: Create summary
         run: |
-          teststat -markdown $(find /tmp/artifacts -type f -name '*.json' -print0 | xargs -0) >> $GITHUB_STEP_SUMMARY
+          find /tmp/artifacts -type f -name '*-go-test-report.json' -exec teststat -markdown {} \+ >> $GITHUB_STEP_SUMMARY
 
   integration-test-prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120 # guardrails timeout for the whole job
     outputs:
       matrix: ${{ steps.tests.outputs.matrix }}
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: vendor.sum
       -
         name: Install gotestlist
         run:
@@ -247,17 +267,23 @@ jobs:
 
   integration-test:
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 120
+    timeout-minutes: 120 # guardrails timeout for the whole job
+    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
     needs:
       - build
       - integration-test-prepare
     strategy:
       fail-fast: false
       matrix:
+        storage:
+          - ${{ inputs.storage }}
         runtime:
           - builtin
           - containerd
         test: ${{ fromJson(needs.integration-test-prepare.outputs.matrix) }}
+        exclude:
+          - storage: snapshotter
+            runtime: builtin
     env:
       GOPATH: ${{ github.workspace }}\go
       GOBIN: ${{ github.workspace }}\go\bin
@@ -268,18 +294,28 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: ${{ env.GOPATH }}/src/github.com/docker/docker
+      -
+        name: Set up Jaeger
+        run: |
+          # Jaeger is set up on Linux through the setup-tracing action. If you update Jaeger here, don't forget to
+          # update the version set in .github/actions/setup-tracing/action.yml.
+          Invoke-WebRequest -Uri "https://github.com/jaegertracing/jaeger/releases/download/v1.46.0/jaeger-1.46.0-windows-amd64.tar.gz" -OutFile ".\jaeger-1.46.0-windows-amd64.tar.gz"
+          tar -zxvf ".\jaeger-1.46.0-windows-amd64.tar.gz"
+          Start-Process '.\jaeger-1.46.0-windows-amd64\jaeger-all-in-one.exe'
+          echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+        shell: pwsh
       -
         name: Env
         run: |
           Get-ChildItem Env: | Out-String
       -
         name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: build-${{ inputs.os }}
+          name: build-${{ inputs.storage }}-${{ inputs.os }}
           path: ${{ env.BIN_OUT }}
       -
         name: Init
@@ -291,6 +327,9 @@ jobs:
             echo "WINDOWS_BASE_IMAGE_TAG=${{ env.WINDOWS_BASE_TAG_2022 }}" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
           }
           Write-Output "${{ env.BIN_OUT }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          
+          $testName = ([System.BitConverter]::ToString((New-Object System.Security.Cryptography.SHA256Managed).ComputeHash([System.Text.Encoding]::UTF8.GetBytes("${{ matrix.test }}"))) -replace '-').ToLower()
+          echo "TESTREPORTS_NAME=$testName" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
       -
         # removes docker service that is currently installed on the runner. we
         # could use Uninstall-Package but not yet available on Windows runners.
@@ -311,32 +350,11 @@ jobs:
             Write-Host "Service removed"
           }
       -
-        name: Starting containerd
-        if: matrix.runtime == 'containerd'
-        run: |
-          Write-Host "Generating config"
-          & "${{ env.BIN_OUT }}\containerd.exe" config default | Out-File "$env:TEMP\ctn.toml" -Encoding ascii
-          Write-Host "Creating service"
-          New-Item -ItemType Directory "$env:TEMP\ctn-root" -ErrorAction SilentlyContinue | Out-Null
-          New-Item -ItemType Directory "$env:TEMP\ctn-state" -ErrorAction SilentlyContinue | Out-Null
-          Start-Process -Wait "${{ env.BIN_OUT }}\containerd.exe" `
-            -ArgumentList "--log-level=debug", `
-              "--config=$env:TEMP\ctn.toml", `
-              "--address=\\.\pipe\containerd-containerd", `
-              "--root=$env:TEMP\ctn-root", `
-              "--state=$env:TEMP\ctn-state", `
-              "--log-file=$env:TEMP\ctn.log", `
-              "--register-service"
-          Write-Host "Starting service"
-          Start-Service -Name containerd
-          Start-Sleep -Seconds 5
-          Write-Host "Service started successfully!"
-      -
         name: Starting test daemon
         run: |
           Write-Host "Creating service"
           If ("${{ matrix.runtime }}" -eq "containerd") {
-            $runtimeArg="--containerd=\\.\pipe\containerd-containerd"
+            $runtimeArg="--default-runtime=io.containerd.runhcs.v1"
             echo "DOCKER_WINDOWS_CONTAINERD_RUNTIME=1" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
           }
           New-Item -ItemType Directory "$env:TEMP\moby-root" -ErrorAction SilentlyContinue | Out-Null
@@ -348,6 +366,11 @@ jobs:
               "--exec-root=$env:TEMP\moby-exec", `
               "--pidfile=$env:TEMP\docker.pid", `
               "--register-service"
+          If ("${{ inputs.storage }}" -eq "snapshotter") {
+            # Make the env-var visible to the service-managed dockerd, as there's no CLI flag for this option.
+            & reg add "HKLM\SYSTEM\CurrentControlSet\Services\docker" /v Environment /t REG_MULTI_SZ /s '@' /d TEST_INTEGRATION_USE_SNAPSHOTTER=1 
+            echo "TEST_INTEGRATION_USE_SNAPSHOTTER=1" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+          }
           Write-Host "Starting service"
           Start-Service -Name docker
           Write-Host "Service started successfully!"
@@ -371,6 +394,17 @@ jobs:
             Start-Sleep -Seconds 1
           }
           Write-Host "Test daemon started and replied!"
+          If ("${{ matrix.runtime }}" -eq "containerd") {
+            $containerdProcesses = Get-Process -Name containerd -ErrorAction:SilentlyContinue
+            If (-not $containerdProcesses) {
+              Throw "containerd process is not running"
+            } else {
+              foreach ($process in $containerdProcesses) {
+                $processPath = (Get-Process -Id $process.Id -FileVersionInfo).FileName
+                Write-Output "Running containerd instance binary Path: $($processPath)"
+              }
+            }
+          }
         env:
           DOCKER_HOST: npipe:////./pipe/docker_engine
       -
@@ -396,9 +430,10 @@ jobs:
           DOCKER_HOST: npipe:////./pipe/docker_engine
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: vendor.sum
       -
         name: Test integration
         if: matrix.test == './...'
@@ -421,31 +456,19 @@ jobs:
       -
         name: Send to Codecov
         if: inputs.send_coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           working-directory: ${{ env.GOPATH }}\src\github.com\docker\docker
           directory: bundles
           env_vars: RUNNER_OS
           flags: integration,${{ matrix.runtime }}
+          token: ${{ secrets.CODECOV_TOKEN }}  # used to upload coverage reports: https://github.com/moby/buildkit/pull/4660#issue-2142122533
       -
         name: Docker info
         run: |
           & "${{ env.BIN_OUT }}\docker" info
         env:
           DOCKER_HOST: npipe:////./pipe/docker_engine
-      -
-        name: Stop containerd
-        if: always() && matrix.runtime == 'containerd'
-        run: |
-          $ErrorActionPreference = "SilentlyContinue"
-          Stop-Service -Force -Name containerd
-          $ErrorActionPreference = "Stop"
-      -
-        name: Containerd logs
-        if: always() && matrix.runtime == 'containerd'
-        run: |
-          Copy-Item "$env:TEMP\ctn.log" -Destination ".\bundles\containerd.log"
-          Get-Content "$env:TEMP\ctn.log" | Out-Host
       -
         name: Stop daemon
         if: always()
@@ -465,36 +488,53 @@ jobs:
               ForEach-Object {"$($_.TimeCreated.ToUniversalTime().ToString("o")) [$($_.LevelDisplayName)] $($_.Message)"} |
               Tee-Object -file ".\bundles\daemon.log"
       -
+        name: Download Jaeger traces
+        if: always()
+        run: |
+          Invoke-WebRequest `
+            -Uri "http://127.0.0.1:16686/api/traces?service=integration-test-client" `
+            -OutFile ".\bundles\jaeger-trace.json"
+      -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.os }}-integration-reports-${{ matrix.runtime }}
+          name: ${{ inputs.os }}-${{ inputs.storage }}-integration-reports-${{ matrix.runtime }}-${{ env.TESTREPORTS_NAME }}
           path: ${{ env.GOPATH }}\src\github.com\docker\docker\bundles\*
+          retention-days: 1
 
   integration-test-report:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120 # guardrails timeout for the whole job
+    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
     if: always()
     needs:
       - integration-test
     strategy:
       fail-fast: false
       matrix:
+        storage:
+          - ${{ inputs.storage }}
         runtime:
           - builtin
           - containerd
+        exclude:
+          - storage: snapshotter
+            runtime: builtin
     steps:
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: vendor.sum
       -
-        name: Download artifacts
-        uses: actions/download-artifact@v3
+        name: Download reports
+        uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.os }}-integration-reports-${{ matrix.runtime }}
-          path: /tmp/artifacts
+          path: /tmp/reports
+          pattern: ${{ inputs.os }}-${{ inputs.storage }}-integration-reports-${{ matrix.runtime }}-*
+          merge-multiple: true
       -
         name: Install teststat
         run: |
@@ -502,4 +542,4 @@ jobs:
       -
         name: Create summary
         run: |
-          teststat -markdown $(find /tmp/artifacts -type f -name '*.json' -print0 | xargs -0) >> $GITHUB_STEP_SUMMARY
+          find /tmp/reports -type f -name '*-go-test-report.json' -exec teststat -markdown {} \+ >> $GITHUB_STEP_SUMMARY

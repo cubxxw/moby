@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sort"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/util/bklog"
 	digest "github.com/opencontainers/go-digest"
-	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
@@ -279,15 +279,16 @@ func marshalRemote(ctx context.Context, r *solver.Remote, state *marshalState) s
 		return ""
 	}
 
-	if cd, ok := r.Provider.(interface {
-		CheckDescriptor(context.Context, ocispecs.Descriptor) error
-	}); ok && len(r.Descriptors) > 0 {
+	if r.Provider != nil {
 		for _, d := range r.Descriptors {
-			if cd.CheckDescriptor(ctx, d) != nil {
-				return ""
+			if _, err := r.Provider.Info(ctx, d.Digest); err != nil {
+				if !cerrdefs.IsNotImplemented(err) {
+					return ""
+				}
 			}
 		}
 	}
+
 	var parentID string
 	if len(r.Descriptors) > 1 {
 		r2 := &solver.Remote{

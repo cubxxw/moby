@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/containerd/v2/pkg/tracing"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	timetypes "github.com/docker/docker/api/types/time"
@@ -24,7 +24,13 @@ import (
 //
 // if it returns nil, the config channel will be active and return log
 // messages until it runs out or the context is canceled.
-func (daemon *Daemon) ContainerLogs(ctx context.Context, containerName string, config *types.ContainerLogsOptions) (messages <-chan *backend.LogMessage, isTTY bool, retErr error) {
+func (daemon *Daemon) ContainerLogs(ctx context.Context, containerName string, config *containertypes.LogsOptions) (messages <-chan *backend.LogMessage, isTTY bool, retErr error) {
+	ctx, span := tracing.StartSpan(ctx, "daemon.ContainerLogs")
+	defer func() {
+		span.SetStatus(retErr)
+		span.End()
+	}()
+
 	lg := log.G(ctx).WithFields(log.Fields{
 		"module":    "daemon",
 		"method":    "(*Daemon).ContainerLogs",
@@ -97,7 +103,7 @@ func (daemon *Daemon) ContainerLogs(ctx context.Context, containerName string, c
 		Follow: follow,
 	}
 
-	logs := logReader.ReadLogs(readConfig)
+	logs := logReader.ReadLogs(ctx, readConfig)
 
 	// past this point, we can't possibly return any errors, so we can just
 	// start a goroutine and return to tell the caller not to expect errors

@@ -34,14 +34,14 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
-	"github.com/docker/docker/pkg/containerfs"
+	"github.com/docker/docker/daemon/internal/fstype"
+	"github.com/docker/docker/internal/containerfs"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/parsers"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	"github.com/moby/sys/mount"
+	"github.com/moby/sys/userns"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -68,12 +68,12 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 		testdir = filepath.Dir(testdir)
 	}
 
-	fsMagic, err := graphdriver.GetFSMagic(testdir)
+	fsMagic, err := fstype.GetFSMagic(testdir)
 	if err != nil {
 		return nil, err
 	}
 
-	if fsMagic != graphdriver.FsMagicBtrfs {
+	if fsMagic != fstype.FsMagicBtrfs {
 		return nil, graphdriver.ErrPrerequisites
 	}
 
@@ -120,7 +120,7 @@ func parseOptions(opt []string) (btrfsOptions, bool, error) {
 	var options btrfsOptions
 	userDiskQuota := false
 	for _, option := range opt {
-		key, val, err := parsers.ParseKeyValueOpt(option)
+		key, val, err := graphdriver.ParseStorageOptKeyValue(option)
 		if err != nil {
 			return options, userDiskQuota, err
 		}
@@ -558,7 +558,7 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
 func (d *Driver) parseStorageOpt(storageOpt map[string]string, driver *Driver) error {
 	// Read size to change the subvolume disk quota per container
 	for key, val := range storageOpt {
-		key := strings.ToLower(key)
+		key = strings.ToLower(key)
 		switch key {
 		case "size":
 			size, err := units.RAMInBytes(val)

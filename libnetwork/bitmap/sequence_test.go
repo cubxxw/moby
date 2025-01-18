@@ -743,15 +743,18 @@ func TestSetInRange(t *testing.T) {
 		t.Fatalf("Unexpected ordinal: %d", o)
 	}
 
-	if o, err := hnd.SetAnyInRange(0, uint64(blockLen), false); err == nil {
+	o, err = hnd.SetAnyInRange(0, uint64(blockLen), false)
+	if err == nil {
 		t.Fatalf("Expected failure. Got success with ordinal:%d", o)
 	}
 
-	if o, err := hnd.SetAnyInRange(0, firstAv-1, false); err == nil {
+	o, err = hnd.SetAnyInRange(0, firstAv-1, false)
+	if err == nil {
 		t.Fatalf("Expected failure. Got success with ordinal:%d", o)
 	}
 
-	if o, err := hnd.SetAnyInRange(111*uint64(blockLen), 161*uint64(blockLen), false); err == nil {
+	o, err = hnd.SetAnyInRange(111*uint64(blockLen), 161*uint64(blockLen), false)
+	if err == nil {
 		t.Fatalf("Expected failure. Got success with ordinal:%d", o)
 	}
 
@@ -790,7 +793,8 @@ func TestSetInRange(t *testing.T) {
 
 	// set all bit in the first range
 	for hnd.Unselected() > 22 {
-		if o, err := hnd.SetAnyInRange(0, 7, false); err != nil {
+		o, err = hnd.SetAnyInRange(0, 7, false)
+		if err != nil {
 			t.Fatalf("Unexpected failure: (%d, %v)", o, err)
 		}
 	}
@@ -805,7 +809,8 @@ func TestSetInRange(t *testing.T) {
 
 	// set all bit in a second range
 	for hnd.Unselected() > 14 {
-		if o, err := hnd.SetAnyInRange(8, 15, false); err != nil {
+		o, err = hnd.SetAnyInRange(8, 15, false)
+		if err != nil {
 			t.Fatalf("Unexpected failure: (%d, %v)", o, err)
 		}
 	}
@@ -821,7 +826,8 @@ func TestSetInRange(t *testing.T) {
 
 	// set all bit in a range which includes the last bit
 	for hnd.Unselected() > 12 {
-		if o, err := hnd.SetAnyInRange(28, 29, false); err != nil {
+		o, err = hnd.SetAnyInRange(28, 29, false)
+		if err != nil {
 			t.Fatalf("Unexpected failure: (%d, %v)", o, err)
 		}
 	}
@@ -1109,7 +1115,7 @@ func testSetRollover(t *testing.T, serial bool) {
 			t.Fatalf("Unexpected failure on allocation %d: %v\nSeed: %d\n%s", i, err, seed, hnd)
 		}
 	}
-	// Now requesting to allocate the unallocated random bits (qurter of the number of bits) should
+	// Now requesting to allocate the unallocated random bits (quarter of the number of bits) should
 	// leave no more bits that can be allocated.
 	if hnd.Unselected() != 0 {
 		t.Fatalf("Unexpected number of unselected bits %d, Expected %d", hnd.Unselected(), 0)
@@ -1194,17 +1200,16 @@ func TestMarshalJSON(t *testing.T) {
 		t.Errorf("MarshalJSON() output differs from golden. Please add a new golden case to this test.")
 	}
 
-	for _, tt := range []struct {
+	for _, tc := range []struct {
 		name string
 		data []byte
 	}{
 		{name: "Live", data: marshaled},
 		{name: "Golden-v0", data: []byte(goldenV0)},
 	} {
-		tt := tt
-		t.Run("UnmarshalJSON="+tt.name, func(t *testing.T) {
+		t.Run("UnmarshalJSON="+tc.name, func(t *testing.T) {
 			hnd2 := New(0)
-			if err := hnd2.UnmarshalJSON(tt.data); err != nil {
+			if err := hnd2.UnmarshalJSON(tc.data); err != nil {
 				t.Errorf("UnmarshalJSON() err = %v", err)
 			}
 

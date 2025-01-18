@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/names"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/atomicwriter"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/quota"
 	"github.com/docker/docker/volume"
@@ -334,8 +336,15 @@ func (v *localVolume) Unmount(id string) error {
 	// ultimately there's nothing that can be done. If we don't decrement the count
 	// this volume can never be removed until a daemon restart occurs.
 	if v.needsMount() {
-		v.active.count--
-		logger.WithField("active mounts", v.active).Debug("Decremented active mount count")
+		// TODO: Remove once the real bug is fixed: https://github.com/moby/moby/issues/46508
+		if v.active.count > 0 {
+			v.active.count--
+			logger.WithField("active mounts", v.active).Debug("Decremented active mount count")
+		} else {
+			logger.Error("An attempt to decrement a zero mount count")
+			logger.Error(string(debug.Stack()))
+			return nil
+		}
 	}
 
 	if v.active.count > 0 {
@@ -380,7 +389,7 @@ func (v *localVolume) saveOpts() error {
 	if err != nil {
 		return err
 	}
-	err = os.WriteFile(filepath.Join(v.rootPath, "opts.json"), b, 0o600)
+	err = atomicwriter.WriteFile(filepath.Join(v.rootPath, "opts.json"), b, 0o600)
 	if err != nil {
 		return errdefs.System(errors.Wrap(err, "error while persisting volume options"))
 	}

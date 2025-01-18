@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,14 +15,6 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var (
-	// ErrMultipleEndpointsUnsupported is thrown when multiple endpoints specified for
-	// BoltDB. Endpoint has to be a local file path
-	ErrMultipleEndpointsUnsupported = errors.New("boltdb supports one endpoint and should be a file path")
-	// ErrBoltBucketOptionMissing is thrown when boltBcuket config option is missing
-	ErrBoltBucketOptionMissing = errors.New("boltBucket config option missing")
-)
-
 const filePerm = 0o644
 
 // BoltDB type implements the Store interface
@@ -29,122 +22,44 @@ type BoltDB struct {
 	mu         sync.Mutex
 	client     *bolt.DB
 	boltBucket []byte
-	dbIndex    uint64
+	dbIndex    atomic.Uint64
 	path       string
-	timeout    time.Duration
-	// By default libkv opens and closes the bolt DB connection  for every
-	// get/put operation. This allows multiple apps to use a Bolt DB at the
-	// same time.
-	// PersistConnection flag provides an option to override ths behavior.
-	// ie: open the connection in New and use it till Close is called.
-	PersistConnection bool
 }
 
-const (
-	libkvmetadatalen = 8
-	transientTimeout = time.Duration(10) * time.Second
-)
+const libkvmetadatalen = 8
 
 // New opens a new BoltDB connection to the specified path and bucket
-func New(endpoints []string, options *store.Config) (store.Store, error) {
-	if len(endpoints) > 1 {
-		return nil, ErrMultipleEndpointsUnsupported
-	}
-
-	if (options == nil) || (len(options.Bucket) == 0) {
-		return nil, ErrBoltBucketOptionMissing
-	}
-
-	dir, _ := filepath.Split(endpoints[0])
+func New(path, bucket string) (store.Store, error) {
+	dir, _ := filepath.Split(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
 
-	var db *bolt.DB
-	if options.PersistConnection {
-		var err error
-		db, err = bolt.Open(endpoints[0], filePerm, &bolt.Options{
-			Timeout: options.ConnectionTimeout,
-		})
-		if err != nil {
-			return nil, err
+	db, err := bolt.Open(path, filePerm, &bolt.Options{
+		// The bbolt package opens the underlying db file and then issues an
+		// exclusive flock to ensures that it can safely write to the db. If
+		// it fails, it'll re-issue flocks every few ms until Timeout is
+		// reached.
+		// This nanosecond timeout bypasses that retry loop and make sure the
+		// bbolt package returns an ErrTimeout straight away. That way, the
+		// daemon, and unit tests, will fail fast and loudly instead of
+		// silently introducing delays.
+		Timeout: time.Nanosecond,
+	})
+	if err != nil {
+		if errors.Is(err, bolt.ErrTimeout) {
+			return nil, fmt.Errorf("boltdb file %s is already open", path)
 		}
-	}
-
-	timeout := transientTimeout
-	if options.ConnectionTimeout != 0 {
-		timeout = options.ConnectionTimeout
+		return nil, err
 	}
 
 	b := &BoltDB{
-		client:            db,
-		path:              endpoints[0],
-		boltBucket:        []byte(options.Bucket),
-		timeout:           timeout,
-		PersistConnection: options.PersistConnection,
+		client:     db,
+		path:       path,
+		boltBucket: []byte(bucket),
 	}
 
 	return b, nil
-}
-
-func (b *BoltDB) reset() {
-	b.path = ""
-	b.boltBucket = []byte{}
-}
-
-func (b *BoltDB) getDBhandle() (*bolt.DB, error) {
-	if !b.PersistConnection {
-		db, err := bolt.Open(b.path, filePerm, &bolt.Options{Timeout: b.timeout})
-		if err != nil {
-			return nil, err
-		}
-		b.client = db
-	}
-	return b.client, nil
-}
-
-func (b *BoltDB) releaseDBhandle() {
-	if !b.PersistConnection {
-		b.client.Close()
-	}
-}
-
-// Get the value at "key". BoltDB doesn't provide an inbuilt last modified index with every kv pair. Its implemented by
-// by a atomic counter maintained by the libkv and appened to the value passed by the client.
-func (b *BoltDB) Get(key string) (*store.KVPair, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	db, err := b.getDBhandle()
-	if err != nil {
-		return nil, err
-	}
-	defer b.releaseDBhandle()
-
-	var val []byte
-	err = db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(b.boltBucket)
-		if bucket == nil {
-			return store.ErrKeyNotFound
-		}
-
-		v := bucket.Get([]byte(key))
-		val = make([]byte, len(v))
-		copy(val, v)
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(val) == 0 {
-		return nil, store.ErrKeyNotFound
-	}
-
-	dbIndex := binary.LittleEndian.Uint64(val[:libkvmetadatalen])
-	val = val[libkvmetadatalen:]
-
-	return &store.KVPair{Key: key, Value: val, LastIndex: dbIndex}, nil
 }
 
 // Put the key, value pair. index number metadata is prepended to the value
@@ -152,19 +67,13 @@ func (b *BoltDB) Put(key string, value []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	db, err := b.getDBhandle()
-	if err != nil {
-		return err
-	}
-	defer b.releaseDBhandle()
-
-	return db.Update(func(tx *bolt.Tx) error {
+	return b.client.Update(func(tx *bolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists(b.boltBucket)
 		if err != nil {
 			return err
 		}
 
-		dbIndex := atomic.AddUint64(&b.dbIndex, 1)
+		dbIndex := b.dbIndex.Add(1)
 		dbval := make([]byte, libkvmetadatalen)
 		binary.LittleEndian.PutUint64(dbval, dbIndex)
 		dbval = append(dbval, value...)
@@ -178,14 +87,8 @@ func (b *BoltDB) Exists(key string) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	db, err := b.getDBhandle()
-	if err != nil {
-		return false, err
-	}
-	defer b.releaseDBhandle()
-
 	var exists bool
-	err = db.View(func(tx *bolt.Tx) error {
+	err := b.client.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(b.boltBucket)
 		if bucket == nil {
 			return store.ErrKeyNotFound
@@ -208,14 +111,8 @@ func (b *BoltDB) List(keyPrefix string) ([]*store.KVPair, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	db, err := b.getDBhandle()
-	if err != nil {
-		return nil, err
-	}
-	defer b.releaseDBhandle()
-
 	var kv []*store.KVPair
-	err = db.View(func(tx *bolt.Tx) error {
+	err := b.client.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(b.boltBucket)
 		if bucket == nil {
 			return store.ErrKeyNotFound
@@ -257,13 +154,8 @@ func (b *BoltDB) AtomicDelete(key string, previous *store.KVPair) error {
 	if previous == nil {
 		return store.ErrPreviousNotSpecified
 	}
-	db, err := b.getDBhandle()
-	if err != nil {
-		return err
-	}
-	defer b.releaseDBhandle()
 
-	return db.Update(func(tx *bolt.Tx) error {
+	return b.client.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(b.boltBucket)
 		if bucket == nil {
 			return store.ErrKeyNotFound
@@ -281,21 +173,30 @@ func (b *BoltDB) AtomicDelete(key string, previous *store.KVPair) error {
 	})
 }
 
+// Delete deletes a value at "key". Unlike AtomicDelete it doesn't check
+// whether the deleted key is at a specific version before deleting.
+func (b *BoltDB) Delete(key string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.client.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(b.boltBucket)
+		if bucket == nil || bucket.Get([]byte(key)) == nil {
+			return store.ErrKeyNotFound
+		}
+		return bucket.Delete([]byte(key))
+	})
+}
+
 // AtomicPut puts a value at "key" if the key has not been
 // modified since the last Put, throws an error if this is the case
 func (b *BoltDB) AtomicPut(key string, value []byte, previous *store.KVPair) (*store.KVPair, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	db, err := b.getDBhandle()
-	if err != nil {
-		return nil, err
-	}
-	defer b.releaseDBhandle()
-
 	var dbIndex uint64
 	dbval := make([]byte, libkvmetadatalen)
-	err = db.Update(func(tx *bolt.Tx) error {
+	err := b.client.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(b.boltBucket)
 		if bucket == nil {
 			if previous != nil {
@@ -322,8 +223,8 @@ func (b *BoltDB) AtomicPut(key string, value []byte, previous *store.KVPair) (*s
 				return store.ErrKeyModified
 			}
 		}
-		dbIndex = atomic.AddUint64(&b.dbIndex, 1)
-		binary.LittleEndian.PutUint64(dbval, b.dbIndex)
+		dbIndex = b.dbIndex.Add(1)
+		binary.LittleEndian.PutUint64(dbval, dbIndex)
 		dbval = append(dbval, value...)
 		return bucket.Put([]byte(key), dbval)
 	})
@@ -338,9 +239,5 @@ func (b *BoltDB) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if !b.PersistConnection {
-		b.reset()
-	} else {
-		b.client.Close()
-	}
+	b.client.Close()
 }

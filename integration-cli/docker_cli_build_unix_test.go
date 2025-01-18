@@ -15,18 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
 	"github.com/docker/docker/testutil/fakecontext"
-	units "github.com/docker/go-units"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/icmd"
 )
 
 func (s *DockerCLIBuildSuite) TestBuildResourceConstraintsAreUsed(c *testing.T) {
 	testRequires(c, cpuCfsQuota)
-	name := "testbuildresourceconstraints"
-	buildLabel := "DockerCLIBuildSuite.TestBuildResourceConstraintsAreUsed"
+	const name = "testbuildresourceconstraints"
+	const buildLabel = "DockerCLIBuildSuite.TestBuildResourceConstraintsAreUsed"
 
 	ctx := fakecontext.New(c, "", fakecontext.WithDockerfile(`
 	FROM hello-world:frozen
@@ -47,7 +47,7 @@ func (s *DockerCLIBuildSuite) TestBuildResourceConstraintsAreUsed(c *testing.T) 
 		CpusetMems string
 		CPUShares  int64
 		CPUQuota   int64
-		Ulimits    []*units.Ulimit
+		Ulimits    []*container.Ulimit
 	}
 
 	cfg := inspectFieldJSON(c, cID, "HostConfig")
@@ -85,7 +85,7 @@ func (s *DockerCLIBuildSuite) TestBuildResourceConstraintsAreUsed(c *testing.T) 
 
 func (s *DockerCLIBuildSuite) TestBuildAddChangeOwnership(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
-	name := "testbuildaddown"
+	const name = "testbuildaddown"
 
 	ctx := func() *fakecontext.Fake {
 		dockerfile := `
@@ -131,7 +131,7 @@ func (s *DockerCLIBuildSuite) TestBuildAddChangeOwnership(c *testing.T) {
 // Potential issue: newEventObserver uses docker events, which is not hooked up to buildkit.
 func (s *DockerCLIBuildSuite) TestBuildCancellationKillsSleep(c *testing.T) {
 	testRequires(c, DaemonIsLinux, TODOBuildkit)
-	name := "testbuildcancellation"
+	const name = "testbuildcancellation"
 
 	observer, err := newEventObserver(c)
 	assert.NilError(c, err)

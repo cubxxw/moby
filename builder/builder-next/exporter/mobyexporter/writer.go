@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/util/system"
 	"github.com/opencontainers/go-digest"
@@ -17,14 +18,14 @@ import (
 
 func emptyImageConfig() ([]byte, error) {
 	pl := platforms.Normalize(platforms.DefaultSpec())
-	img := ocispec.Image{}
-	img.Architecture = pl.Architecture
-	img.OS = pl.OS
-	img.Variant = pl.Variant
-	img.RootFS.Type = "layers"
-	img.Config.WorkingDir = "/"
-	img.Config.Env = []string{"PATH=" + system.DefaultPathEnv(pl.OS)}
-	dt, err := json.Marshal(img)
+	dt, err := json.Marshal(ocispec.Image{
+		Platform: pl,
+		Config: ocispec.ImageConfig{
+			WorkingDir: "/",
+			Env:        []string{"PATH=" + system.DefaultPathEnv(pl.OS)},
+		},
+		RootFS: ocispec.RootFS{Type: "layers"},
+	})
 	return dt, errors.Wrap(err, "failed to create empty image config")
 }
 
@@ -38,10 +39,14 @@ func parseHistoryFromConfig(dt []byte) ([]ocispec.History, error) {
 	return config.History, nil
 }
 
-func patchImageConfig(dt []byte, dps []digest.Digest, history []ocispec.History, cache []byte) ([]byte, error) {
+func patchImageConfig(dt []byte, dps []digest.Digest, history []ocispec.History, cache *exptypes.InlineCacheEntry) ([]byte, error) {
 	m := map[string]json.RawMessage{}
 	if err := json.Unmarshal(dt, &m); err != nil {
 		return nil, errors.Wrap(err, "failed to parse image config for patch")
+	}
+
+	if m == nil {
+		return nil, errors.New("null image config")
 	}
 
 	var rootFS ocispec.RootFS
@@ -75,7 +80,7 @@ func patchImageConfig(dt []byte, dps []digest.Digest, history []ocispec.History,
 	}
 
 	if cache != nil {
-		dt, err := json.Marshal(cache)
+		dt, err = json.Marshal(cache.Data)
 		if err != nil {
 			return nil, err
 		}

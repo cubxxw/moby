@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/registry"
 	progressutils "github.com/docker/docker/distribution/utils"
@@ -57,9 +57,9 @@ func setupProgressOutput(outStream io.Writer, cancel func()) (progress.Output, f
 	return out, f
 }
 
-// fetch the content related to the passed in reference into the blob store and appends the provided images.Handlers
+// fetch the content related to the passed in reference into the blob store and appends the provided c8dimages.Handlers
 // There is no need to use remotes.FetchHandler since it already gets set
-func (pm *Manager) fetch(ctx context.Context, ref reference.Named, auth *registry.AuthConfig, out progress.Output, metaHeader http.Header, handlers ...images.Handler) (err error) {
+func (pm *Manager) fetch(ctx context.Context, ref reference.Named, auth *registry.AuthConfig, out progress.Output, metaHeader http.Header, handlers ...c8dimages.Handler) (err error) {
 	// We need to make sure we have a domain on the reference
 	withDomain, err := reference.ParseNormalizedNamed(ref.String())
 	if err != nil {
@@ -86,8 +86,8 @@ func (pm *Manager) fetch(ctx context.Context, ref reference.Named, auth *registr
 		//   fallback does not support plugin configs...
 		log.G(ctx).WithError(err).WithField("ref", withDomain).Debug("Error while resolving reference, falling back to backwards compatible accept header format")
 		headers := http.Header{}
-		headers.Add("Accept", images.MediaTypeDockerSchema2Manifest)
-		headers.Add("Accept", images.MediaTypeDockerSchema2ManifestList)
+		headers.Add("Accept", c8dimages.MediaTypeDockerSchema2Manifest)
+		headers.Add("Accept", c8dimages.MediaTypeDockerSchema2ManifestList)
 		headers.Add("Accept", ocispec.MediaTypeImageManifest)
 		headers.Add("Accept", ocispec.MediaTypeImageIndex)
 		resolver, _ = pm.newResolver(ctx, nil, auth, headers, false)
@@ -108,23 +108,23 @@ func (pm *Manager) fetch(ctx context.Context, ref reference.Named, auth *registr
 	}
 
 	fp := withFetchProgress(pm.blobStore, out, ref)
-	handlers = append([]images.Handler{fp, remotes.FetchHandler(pm.blobStore, fetcher)}, handlers...)
-	return images.Dispatch(ctx, images.Handlers(handlers...), nil, desc)
+	handlers = append([]c8dimages.Handler{fp, remotes.FetchHandler(pm.blobStore, fetcher)}, handlers...)
+	return c8dimages.Dispatch(ctx, c8dimages.Handlers(handlers...), nil, desc)
 }
 
-// applyLayer makes an images.HandlerFunc which applies a fetched image rootfs layer to a directory.
+// applyLayer makes an c8dimages.HandlerFunc which applies a fetched image rootfs layer to a directory.
 //
 // TODO(@cpuguy83) This gets run sequentially after layer pull (makes sense), however
 // if there are multiple layers to fetch we may end up extracting layers in the wrong
 // order.
-func applyLayer(cs content.Store, dir string, out progress.Output) images.HandlerFunc {
+func applyLayer(cs content.Store, dir string, out progress.Output) c8dimages.HandlerFunc {
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		switch desc.MediaType {
 		case
 			ocispec.MediaTypeImageLayer,
-			images.MediaTypeDockerSchema2Layer,
+			c8dimages.MediaTypeDockerSchema2Layer,
 			ocispec.MediaTypeImageLayerGzip,
-			images.MediaTypeDockerSchema2LayerGzip:
+			c8dimages.MediaTypeDockerSchema2LayerGzip:
 		default:
 			return nil, nil
 		}
@@ -148,8 +148,8 @@ func applyLayer(cs content.Store, dir string, out progress.Output) images.Handle
 	}
 }
 
-func childrenHandler(cs content.Store) images.HandlerFunc {
-	ch := images.ChildrenHandler(cs)
+func childrenHandler(cs content.Store) c8dimages.HandlerFunc {
+	ch := c8dimages.ChildrenHandler(cs)
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		switch desc.MediaType {
 		case mediaTypePluginConfig:
@@ -166,16 +166,16 @@ type fetchMeta struct {
 	manifest digest.Digest
 }
 
-func storeFetchMetadata(m *fetchMeta) images.HandlerFunc {
+func storeFetchMetadata(m *fetchMeta) c8dimages.HandlerFunc {
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		switch desc.MediaType {
 		case
-			images.MediaTypeDockerSchema2LayerForeignGzip,
-			images.MediaTypeDockerSchema2Layer,
+			c8dimages.MediaTypeDockerSchema2LayerForeignGzip,
+			c8dimages.MediaTypeDockerSchema2Layer,
 			ocispec.MediaTypeImageLayer,
 			ocispec.MediaTypeImageLayerGzip:
 			m.blobs = append(m.blobs, desc.Digest)
-		case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
+		case ocispec.MediaTypeImageManifest, c8dimages.MediaTypeDockerSchema2Manifest:
 			m.manifest = desc.Digest
 		case mediaTypePluginConfig:
 			m.config = desc.Digest
@@ -195,18 +195,23 @@ func validateFetchedMetadata(md fetchMeta) error {
 }
 
 // withFetchProgress is a fetch handler which registers a descriptor with a progress
-func withFetchProgress(cs content.Store, out progress.Output, ref reference.Named) images.HandlerFunc {
+func withFetchProgress(cs content.Store, out progress.Output, ref reference.Named) c8dimages.HandlerFunc {
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		switch desc.MediaType {
-		case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
+		case ocispec.MediaTypeImageManifest, c8dimages.MediaTypeDockerSchema2Manifest:
 			tn := reference.TagNameOnly(ref)
-			tagged := tn.(reference.Tagged)
-			progress.Messagef(out, tagged.Tag(), "Pulling from %s", reference.FamiliarName(ref))
+			var tagOrDigest string
+			if tagged, ok := tn.(reference.Tagged); ok {
+				tagOrDigest = tagged.Tag()
+			} else {
+				tagOrDigest = tn.String()
+			}
+			progress.Messagef(out, tagOrDigest, "Pulling from %s", reference.FamiliarName(ref))
 			progress.Messagef(out, "", "Digest: %s", desc.Digest.String())
 			return nil, nil
 		case
-			images.MediaTypeDockerSchema2LayerGzip,
-			images.MediaTypeDockerSchema2Layer,
+			c8dimages.MediaTypeDockerSchema2LayerGzip,
+			c8dimages.MediaTypeDockerSchema2Layer,
 			ocispec.MediaTypeImageLayer,
 			ocispec.MediaTypeImageLayerGzip:
 		default:

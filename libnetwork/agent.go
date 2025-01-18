@@ -10,7 +10,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/cluster"
 	"github.com/docker/docker/libnetwork/discoverapi"
 	"github.com/docker/docker/libnetwork/driverapi"
@@ -42,12 +42,12 @@ type nwAgent struct {
 	dataPathAddr      string
 	coreCancelFuncs   []func()
 	driverCancelFuncs map[string][]func()
-	sync.Mutex
+	mu                sync.Mutex
 }
 
 func (a *nwAgent) dataPathAddress() string {
-	a.Lock()
-	defer a.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.dataPathAddr != "" {
 		return a.dataPathAddr
 	}
@@ -266,37 +266,43 @@ func (c *Controller) agentSetup(clusterProvider cluster.Provider) error {
 
 // For a given subsystem getKeys sorts the keys by lamport time and returns
 // slice of keys and lamport time which can used as a unique tag for the keys
-func (c *Controller) getKeys(subsys string) ([][]byte, []uint64) {
+func (c *Controller) getKeys(subsystem string) (keys [][]byte, tags []uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	sort.Sort(ByTime(c.keys))
 
-	keys := [][]byte{}
-	tags := []uint64{}
+	keys = make([][]byte, 0, len(c.keys))
+	tags = make([]uint64, 0, len(c.keys))
 	for _, key := range c.keys {
-		if key.Subsystem == subsys {
+		if key.Subsystem == subsystem {
 			keys = append(keys, key.Key)
 			tags = append(tags, key.LamportTime)
 		}
 	}
 
-	keys[0], keys[1] = keys[1], keys[0]
-	tags[0], tags[1] = tags[1], tags[0]
+	if len(keys) > 1 {
+		// TODO(thaJeztah): why are we swapping order here? This code was added in https://github.com/moby/libnetwork/commit/e83d68b7d1fd9c479120914024242238f791b4dc
+		keys[0], keys[1] = keys[1], keys[0]
+		tags[0], tags[1] = tags[1], tags[0]
+	}
 	return keys, tags
 }
 
 // getPrimaryKeyTag returns the primary key for a given subsystem from the
 // list of sorted key and the associated tag
-func (c *Controller) getPrimaryKeyTag(subsys string) ([]byte, uint64, error) {
+func (c *Controller) getPrimaryKeyTag(subsystem string) (key []byte, lamportTime uint64, _ error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sort.Sort(ByTime(c.keys))
-	keys := []*types.EncryptionKey{}
-	for _, key := range c.keys {
-		if key.Subsystem == subsys {
-			keys = append(keys, key)
+	keys := make([]*types.EncryptionKey, 0, len(c.keys))
+	for _, k := range c.keys {
+		if k.Subsystem == subsystem {
+			keys = append(keys, k)
 		}
+	}
+	if len(keys) < 2 {
+		return nil, 0, fmt.Errorf("no primary key found for %s subsystem: %d keys found on controller, expected at least 2", subsystem, len(keys))
 	}
 	return keys[1].Key, keys[1].LamportTime, nil
 }
@@ -326,7 +332,7 @@ func (c *Controller) agentInit(listenAddr, bindAddrOrInterface, advertiseAddr, d
 	}
 
 	// Register the diagnostic handlers
-	c.DiagnosticServer.RegisterHandler(nDB, networkdb.NetDbPaths2Func)
+	nDB.RegisterDiagnosticHandlers(c.DiagnosticServer)
 
 	var cancelList []func()
 	ch, cancel := nDB.Watch(libnetworkEPTable, "")
@@ -348,14 +354,13 @@ func (c *Controller) agentInit(listenAddr, bindAddrOrInterface, advertiseAddr, d
 	go c.handleTableEvents(ch, c.handleEpTableEvent)
 	go c.handleTableEvents(nodeCh, c.handleNodeTableEvent)
 
-	drvEnc := discoverapi.DriverEncryptionConfig{}
 	keys, tags := c.getKeys(subsysIPSec)
-	drvEnc.Keys = keys
-	drvEnc.Tags = tags
-
 	c.drvRegistry.WalkDrivers(func(name string, driver driverapi.Driver, capability driverapi.Capability) bool {
 		if dr, ok := driver.(discoverapi.Discover); ok {
-			if err := dr.DiscoverNew(discoverapi.EncryptionKeysConfig, drvEnc); err != nil {
+			if err := dr.DiscoverNew(discoverapi.EncryptionKeysConfig, discoverapi.DriverEncryptionConfig{
+				Keys: keys,
+				Tags: tags,
+			}); err != nil {
 				log.G(context.TODO()).Warnf("Failed to set datapath keys in driver %s: %v", name, err)
 			}
 		}
@@ -389,12 +394,11 @@ func (c *Controller) agentDriverNotify(d discoverapi.Discover) {
 		log.G(context.TODO()).Warnf("Failed the node discovery in driver: %v", err)
 	}
 
-	drvEnc := discoverapi.DriverEncryptionConfig{}
 	keys, tags := c.getKeys(subsysIPSec)
-	drvEnc.Keys = keys
-	drvEnc.Tags = tags
-
-	if err := d.DiscoverNew(discoverapi.EncryptionKeysConfig, drvEnc); err != nil {
+	if err := d.DiscoverNew(discoverapi.EncryptionKeysConfig, discoverapi.DriverEncryptionConfig{
+		Keys: keys,
+		Tags: tags,
+	}); err != nil {
 		log.G(context.TODO()).Warnf("Failed to set datapath keys in driver: %v", err)
 	}
 }
@@ -416,14 +420,14 @@ func (c *Controller) agentClose() {
 
 	var cancelList []func()
 
-	agent.Lock()
+	agent.mu.Lock()
 	for _, cancelFuncs := range agent.driverCancelFuncs {
 		cancelList = append(cancelList, cancelFuncs...)
 	}
 
 	// Add also the cancel functions for the network db
 	cancelList = append(cancelList, agent.coreCancelFuncs...)
-	agent.Unlock()
+	agent.mu.Unlock()
 
 	for _, cancel := range cancelList {
 		cancel()
@@ -594,7 +598,7 @@ func (ep *Endpoint) deleteDriverInfoFromCluster() error {
 }
 
 func (ep *Endpoint) addServiceInfoToCluster(sb *Sandbox) error {
-	if len(ep.myAliases) == 0 && ep.isAnonymous() || ep.Iface() == nil || ep.Iface().Address() == nil {
+	if len(ep.dnsNames) == 0 || ep.Iface() == nil || ep.Iface().Address() == nil {
 		return nil
 	}
 
@@ -619,15 +623,13 @@ func (ep *Endpoint) addServiceInfoToCluster(sb *Sandbox) error {
 	// In case the deleteServiceInfoToCluster arrives first, this one is happening after the endpoint is
 	// removed from the list, in this situation the delete will bail out not finding any data to cleanup
 	// and the add will bail out not finding the endpoint on the sandbox.
-	if err := sb.getEndpoint(ep.ID()); err == nil {
+	if err := sb.GetEndpoint(ep.ID()); err == nil {
 		log.G(context.TODO()).Warnf("addServiceInfoToCluster suppressing service resolution ep is not anymore in the sandbox %s", ep.ID())
 		return nil
 	}
 
-	name := ep.Name()
-	if ep.isAnonymous() {
-		name = ep.MyAliases()[0]
-	}
+	dnsNames := ep.getDNSNames()
+	primaryDNSName, dnsAliases := dnsNames[0], dnsNames[1:]
 
 	var ingressPorts []*PortConfig
 	if ep.svcID != "" {
@@ -636,24 +638,24 @@ func (ep *Endpoint) addServiceInfoToCluster(sb *Sandbox) error {
 		if n.ingress {
 			ingressPorts = ep.ingressPorts
 		}
-		if err := n.getController().addServiceBinding(ep.svcName, ep.svcID, n.ID(), ep.ID(), name, ep.virtualIP, ingressPorts, ep.svcAliases, ep.myAliases, ep.Iface().Address().IP, "addServiceInfoToCluster"); err != nil {
+		if err := n.getController().addServiceBinding(ep.svcName, ep.svcID, n.ID(), ep.ID(), primaryDNSName, ep.virtualIP, ingressPorts, ep.svcAliases, dnsAliases, ep.Iface().Address().IP, "addServiceInfoToCluster"); err != nil {
 			return err
 		}
 	} else {
 		// This is a container simply attached to an attachable network
-		if err := n.getController().addContainerNameResolution(n.ID(), ep.ID(), name, ep.myAliases, ep.Iface().Address().IP, "addServiceInfoToCluster"); err != nil {
+		if err := n.getController().addContainerNameResolution(n.ID(), ep.ID(), primaryDNSName, dnsAliases, ep.Iface().Address().IP, "addServiceInfoToCluster"); err != nil {
 			return err
 		}
 	}
 
 	buf, err := proto.Marshal(&EndpointRecord{
-		Name:            name,
+		Name:            primaryDNSName,
 		ServiceName:     ep.svcName,
 		ServiceID:       ep.svcID,
 		VirtualIP:       ep.virtualIP.String(),
 		IngressPorts:    ingressPorts,
 		Aliases:         ep.svcAliases,
-		TaskAliases:     ep.myAliases,
+		TaskAliases:     dnsAliases,
 		EndpointIP:      ep.Iface().Address().IP.String(),
 		ServiceDisabled: false,
 	})
@@ -672,7 +674,7 @@ func (ep *Endpoint) addServiceInfoToCluster(sb *Sandbox) error {
 }
 
 func (ep *Endpoint) deleteServiceInfoFromCluster(sb *Sandbox, fullRemove bool, method string) error {
-	if len(ep.myAliases) == 0 && ep.isAnonymous() {
+	if len(ep.dnsNames) == 0 {
 		return nil
 	}
 
@@ -687,18 +689,16 @@ func (ep *Endpoint) deleteServiceInfoFromCluster(sb *Sandbox, fullRemove bool, m
 	log.G(context.TODO()).Debugf("deleteServiceInfoFromCluster from %s START for %s %s", method, ep.svcName, ep.ID())
 
 	// Avoid a race w/ with a container that aborts preemptively.  This would
-	// get caught in disableServceInNetworkDB, but we check here to make the
+	// get caught in disableServiceInNetworkDB, but we check here to make the
 	// nature of the condition more clear.
 	// See comment in addServiceInfoToCluster()
-	if err := sb.getEndpoint(ep.ID()); err == nil {
+	if err := sb.GetEndpoint(ep.ID()); err == nil {
 		log.G(context.TODO()).Warnf("deleteServiceInfoFromCluster suppressing service resolution ep is not anymore in the sandbox %s", ep.ID())
 		return nil
 	}
 
-	name := ep.Name()
-	if ep.isAnonymous() {
-		name = ep.MyAliases()[0]
-	}
+	dnsNames := ep.getDNSNames()
+	primaryDNSName, dnsAliases := dnsNames[0], dnsNames[1:]
 
 	// First update the networkDB then locally
 	if fullRemove {
@@ -716,12 +716,12 @@ func (ep *Endpoint) deleteServiceInfoFromCluster(sb *Sandbox, fullRemove bool, m
 			if n.ingress {
 				ingressPorts = ep.ingressPorts
 			}
-			if err := n.getController().rmServiceBinding(ep.svcName, ep.svcID, n.ID(), ep.ID(), name, ep.virtualIP, ingressPorts, ep.svcAliases, ep.myAliases, ep.Iface().Address().IP, "deleteServiceInfoFromCluster", true, fullRemove); err != nil {
+			if err := n.getController().rmServiceBinding(ep.svcName, ep.svcID, n.ID(), ep.ID(), primaryDNSName, ep.virtualIP, ingressPorts, ep.svcAliases, dnsAliases, ep.Iface().Address().IP, "deleteServiceInfoFromCluster", true, fullRemove); err != nil {
 				return err
 			}
 		} else {
 			// This is a container simply attached to an attachable network
-			if err := n.getController().delContainerNameResolution(n.ID(), ep.ID(), name, ep.myAliases, ep.Iface().Address().IP, "deleteServiceInfoFromCluster"); err != nil {
+			if err := n.getController().delContainerNameResolution(n.ID(), ep.ID(), primaryDNSName, dnsAliases, ep.Iface().Address().IP, "deleteServiceInfoFromCluster"); err != nil {
 				return err
 			}
 		}
@@ -773,13 +773,13 @@ func (n *Network) addDriverWatches() {
 	c := n.getController()
 	for _, table := range n.driverTables {
 		ch, cancel := agent.networkDB.Watch(table.name, n.ID())
-		agent.Lock()
+		agent.mu.Lock()
 		agent.driverCancelFuncs[n.ID()] = append(agent.driverCancelFuncs[n.ID()], cancel)
-		agent.Unlock()
+		agent.mu.Unlock()
 		go c.handleTableEvents(ch, n.handleDriverTableEvent)
 		d, err := n.driver(false)
 		if err != nil {
-			log.G(context.TODO()).Errorf("Could not resolve driver %s while walking driver tabl: %v", n.networkType, err)
+			log.G(context.TODO()).Errorf("Could not resolve driver %s while walking driver table: %v", n.networkType, err)
 			return
 		}
 
@@ -803,10 +803,10 @@ func (n *Network) cancelDriverWatches() {
 		return
 	}
 
-	agent.Lock()
+	agent.mu.Lock()
 	cancelFuncs := agent.driverCancelFuncs[n.ID()]
 	delete(agent.driverCancelFuncs, n.ID())
-	agent.Unlock()
+	agent.mu.Unlock()
 
 	for _, cancel := range cancelFuncs {
 		cancel()

@@ -1,6 +1,8 @@
 package container
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -18,6 +20,13 @@ func WithName(name string) func(*TestContainerConfig) {
 	}
 }
 
+// WithHostname sets the hostname of the container
+func WithHostname(name string) func(*TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.Config.Hostname = name
+	}
+}
+
 // WithLinks sets the links of the container
 func WithLinks(links ...string) func(*TestContainerConfig) {
 	return func(c *TestContainerConfig) {
@@ -32,7 +41,7 @@ func WithImage(image string) func(*TestContainerConfig) {
 	}
 }
 
-// WithCmd sets the comannds of the container
+// WithCmd sets the commands of the container
 func WithCmd(cmds ...string) func(*TestContainerConfig) {
 	return func(c *TestContainerConfig) {
 		c.Config.Cmd = strslice.StrSlice(cmds)
@@ -46,12 +55,36 @@ func WithNetworkMode(mode string) func(*TestContainerConfig) {
 	}
 }
 
+// WithDNS sets external DNS servers for the container
+func WithDNS(dns []string) func(*TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.HostConfig.DNS = append([]string(nil), dns...)
+	}
+}
+
+// WithSysctls sets sysctl options for the container
+func WithSysctls(sysctls map[string]string) func(*TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.HostConfig.Sysctls = maps.Clone(sysctls)
+	}
+}
+
 // WithExposedPorts sets the exposed ports of the container
 func WithExposedPorts(ports ...string) func(*TestContainerConfig) {
 	return func(c *TestContainerConfig) {
 		c.Config.ExposedPorts = map[nat.Port]struct{}{}
 		for _, port := range ports {
 			c.Config.ExposedPorts[nat.Port(port)] = struct{}{}
+		}
+	}
+}
+
+// WithPortMap sets/replaces port mappings.
+func WithPortMap(pm nat.PortMap) func(*TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.HostConfig.PortBindings = nat.PortMap{}
+		for p, b := range pm {
+			c.HostConfig.PortBindings[p] = slices.Clone(b)
 		}
 	}
 }
@@ -111,6 +144,18 @@ func WithTmpfs(targetAndOpts string) func(config *TestContainerConfig) {
 
 		target, opts, _ := strings.Cut(targetAndOpts, ":")
 		c.HostConfig.Tmpfs[target] = opts
+	}
+}
+
+func WithMacAddress(networkName, mac string) func(config *TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		if c.NetworkingConfig.EndpointsConfig == nil {
+			c.NetworkingConfig.EndpointsConfig = map[string]*network.EndpointSettings{}
+		}
+		if v, ok := c.NetworkingConfig.EndpointsConfig[networkName]; !ok || v == nil {
+			c.NetworkingConfig.EndpointsConfig[networkName] = &network.EndpointSettings{}
+		}
+		c.NetworkingConfig.EndpointsConfig[networkName].MacAddress = mac
 	}
 }
 
@@ -193,6 +238,13 @@ func WithUser(user string) func(c *TestContainerConfig) {
 	}
 }
 
+// WithAdditionalGroups sets the additional groups for the container
+func WithAdditionalGroups(groups ...string) func(c *TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.HostConfig.GroupAdd = groups
+	}
+}
+
 // WithPrivileged sets privileged mode for the container
 func WithPrivileged(privileged bool) func(*TestContainerConfig) {
 	return func(c *TestContainerConfig) {
@@ -249,6 +301,13 @@ func WithConsoleSize(width, height uint) func(*TestContainerConfig) {
 	}
 }
 
+// WithAnnotations set the annotations for the container.
+func WithAnnotations(annotations map[string]string) func(*TestContainerConfig) {
+	return func(c *TestContainerConfig) {
+		c.HostConfig.Annotations = annotations
+	}
+}
+
 // WithRuntime sets the runtime to use to start the container
 func WithRuntime(name string) func(*TestContainerConfig) {
 	return func(c *TestContainerConfig) {
@@ -298,8 +357,8 @@ func WithStopSignal(stopSignal string) func(c *TestContainerConfig) {
 	}
 }
 
-func WithMacAddress(address string) func(c *TestContainerConfig) {
+func WithContainerWideMacAddress(address string) func(c *TestContainerConfig) {
 	return func(c *TestContainerConfig) {
-		c.Config.MacAddress = address
+		c.Config.MacAddress = address //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
 	}
 }

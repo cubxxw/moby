@@ -1,32 +1,22 @@
 package libnetwork
 
 import (
+	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/docker/docker/libnetwork/config"
-	"github.com/docker/docker/libnetwork/datastore"
 	store "github.com/docker/docker/libnetwork/internal/kvstore"
 )
 
 func TestBoltdbBackend(t *testing.T) {
-	defer os.Remove(datastore.DefaultScope("").Client.Address)
-	testLocalBackend(t, "", "", nil)
 	tmpPath := filepath.Join(t.TempDir(), "boltdb.db")
-	testLocalBackend(t, "boltdb", tmpPath, &store.Config{
-		Bucket: "testBackend",
-	})
+	testLocalBackend(t, tmpPath, "testBackend")
 }
 
 func TestNoPersist(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "bolt.db")
-	configOption := func(c *config.Config) {
-		c.Scope.Client.Provider = "boltdb"
-		c.Scope.Client.Address = dbFile
-		c.Scope.Client.Config = &store.Config{Bucket: "testBackend"}
-	}
+	configOption := config.OptionDataDir(t.TempDir())
 	testController, err := New(configOption)
 	if err != nil {
 		t.Fatalf("Error creating new controller: %v", err)
@@ -36,7 +26,7 @@ func TestNoPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf(`Error creating default "host" network: %v`, err)
 	}
-	ep, err := nw.CreateEndpoint("newendpoint", []EndpointOption{}...)
+	ep, err := nw.CreateEndpoint(context.Background(), "newendpoint", []EndpointOption{}...)
 	if err != nil {
 		t.Fatalf("Error creating endpoint: %v", err)
 	}
@@ -50,9 +40,8 @@ func TestNoPersist(t *testing.T) {
 	}
 	defer testController.Stop()
 
-	// FIXME(thaJeztah): GetObject uses the given key for lookups if no cache-store is present, but the KvObject's Key() to look up in cache....
 	nwKVObject := &Network{id: nw.ID()}
-	err = testController.getStore().GetObject(datastore.Key(datastore.NetworkKeyPrefix, nw.ID()), nwKVObject)
+	err = testController.store.GetObject(nwKVObject)
 	if !errors.Is(err, store.ErrKeyNotFound) {
 		t.Errorf("Expected %q error when retrieving network from store, got: %q", store.ErrKeyNotFound, err)
 	}
@@ -61,7 +50,7 @@ func TestNoPersist(t *testing.T) {
 	}
 
 	epKVObject := &Endpoint{network: nw, id: ep.ID()}
-	err = testController.getStore().GetObject(datastore.Key(datastore.EndpointKeyPrefix, nw.ID(), ep.ID()), epKVObject)
+	err = testController.store.GetObject(epKVObject)
 	if !errors.Is(err, store.ErrKeyNotFound) {
 		t.Errorf("Expected %v error when retrieving endpoint from store, got: %v", store.ErrKeyNotFound, err)
 	}

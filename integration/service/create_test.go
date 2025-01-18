@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/strslice"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/network"
@@ -50,7 +50,7 @@ func testServiceCreateInit(ctx context.Context, daemonEnabled bool) func(t *test
 		poll.WaitOn(t, swarm.RunningTasksCount(ctx, client, serviceID, 1), swarm.ServicePoll)
 		i := inspectServiceContainer(ctx, t, client, serviceID)
 		// HostConfig.Init == nil means that it delegates to daemon configuration
-		assert.Check(t, i.HostConfig.Init == nil)
+		assert.Check(t, is.Nil(i.HostConfig.Init))
 
 		serviceID = swarm.CreateService(ctx, t, d, swarm.ServiceWithInit(&booleanTrue))
 		poll.WaitOn(t, swarm.RunningTasksCount(ctx, client, serviceID, 1), swarm.ServicePoll)
@@ -64,9 +64,9 @@ func testServiceCreateInit(ctx context.Context, daemonEnabled bool) func(t *test
 	}
 }
 
-func inspectServiceContainer(ctx context.Context, t *testing.T, client client.APIClient, serviceID string) types.ContainerJSON {
+func inspectServiceContainer(ctx context.Context, t *testing.T, client client.APIClient, serviceID string) container.InspectResponse {
 	t.Helper()
-	containers, err := client.ContainerList(ctx, types.ContainerListOptions{
+	containers, err := client.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("label", "com.docker.swarm.service.id="+serviceID)),
 	})
 	assert.NilError(t, err)
@@ -118,9 +118,9 @@ func TestCreateServiceMultipleTimes(t *testing.T) {
 	assert.NilError(t, err)
 
 	// we can't just wait on no tasks for the service, counter-intuitively.
-	// Tasks may briefly exist but not show up, if they are are in the process
+	// Tasks may briefly exist but not show up, if they are in the process
 	// of being deallocated. To avoid this case, we should retry network remove
-	// a few times, to give tasks time to be deallcoated
+	// a few times, to give tasks time to be deallocated
 	poll.WaitOn(t, swarm.NoTasksForService(ctx, client, serviceID2), swarm.ServicePoll)
 
 	for retry := 0; retry < 5; retry++ {
@@ -230,7 +230,7 @@ func TestCreateServiceSecretFileMode(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, client, serviceID, instances), swarm.ServicePoll)
 
-	body, err := client.ServiceLogs(ctx, serviceID, types.ContainerLogsOptions{
+	body, err := client.ServiceLogs(ctx, serviceID, container.LogsOptions{
 		Tail:       "1",
 		ShowStdout: true,
 	})
@@ -287,7 +287,7 @@ func TestCreateServiceConfigFileMode(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, client, serviceID, instances))
 
-	body, err := client.ServiceLogs(ctx, serviceID, types.ContainerLogsOptions{
+	body, err := client.ServiceLogs(ctx, serviceID, container.LogsOptions{
 		Tail:       "1",
 		ShowStdout: true,
 	})
@@ -306,7 +306,7 @@ func TestCreateServiceConfigFileMode(t *testing.T) {
 	assert.NilError(t, err)
 }
 
-// TestServiceCreateSysctls tests that a service created with sysctl options in
+// TestCreateServiceSysctls tests that a service created with sysctl options in
 // the ContainerSpec correctly applies those options.
 //
 // To test this, we're going to create a service with the sysctl option
@@ -329,11 +329,6 @@ func TestCreateServiceConfigFileMode(t *testing.T) {
 // confident won't be modified by the container runtime, and won't blow
 // anything up in the test environment
 func TestCreateServiceSysctls(t *testing.T) {
-	skip.If(
-		t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"),
-		"setting service sysctls is unsupported before api v1.40",
-	)
-
 	ctx := setupTest(t)
 
 	d := swarm.NewSwarm(ctx, t, testEnv)
@@ -341,7 +336,7 @@ func TestCreateServiceSysctls(t *testing.T) {
 	client := d.NewClientT(t)
 	defer client.Close()
 
-	// run thie block twice, so that no matter what the default value of
+	// run this block twice, so that no matter what the default value of
 	// net.ipv4.ip_nonlocal_bind is, we can verify that setting the sysctl
 	// options works
 	for _, expected := range []string{"0", "1"} {
@@ -397,7 +392,7 @@ func TestCreateServiceSysctls(t *testing.T) {
 	}
 }
 
-// TestServiceCreateCapabilities tests that a service created with capabilities options in
+// TestCreateServiceCapabilities tests that a service created with capabilities options in
 // the ContainerSpec correctly applies those options.
 //
 // To test this, we're going to create a service with the capabilities option
@@ -409,11 +404,6 @@ func TestCreateServiceSysctls(t *testing.T) {
 // capabilities option with the correct value, we can assume that the capabilities has been
 // plumbed correctly.
 func TestCreateServiceCapabilities(t *testing.T) {
-	skip.If(
-		t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.41"),
-		"setting service capabilities is unsupported before api v1.41",
-	)
-
 	ctx := setupTest(t)
 
 	d := swarm.NewSwarm(ctx, t, testEnv)

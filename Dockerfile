@@ -1,29 +1,35 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 
-ARG GO_VERSION=1.20.8
-ARG BASE_DEBIAN_DISTRO="bullseye"
+ARG GO_VERSION=1.23.4
+ARG BASE_DEBIAN_DISTRO="bookworm"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
-ARG XX_VERSION=1.2.1
+ARG XX_VERSION=1.6.1
 
 ARG VPNKIT_VERSION=0.5.0
 
 ARG DOCKERCLI_REPOSITORY="https://github.com/docker/cli.git"
-ARG DOCKERCLI_VERSION=v24.0.2
+ARG DOCKERCLI_VERSION=v27.3.1
 # cli version used for integration-cli tests
 ARG DOCKERCLI_INTEGRATION_REPOSITORY="https://github.com/docker/cli.git"
 ARG DOCKERCLI_INTEGRATION_VERSION=v17.06.2-ce
-ARG BUILDX_VERSION=0.11.2
-ARG COMPOSE_VERSION=v2.20.1
+ARG BUILDX_VERSION=0.18.0
+ARG COMPOSE_VERSION=v2.30.3
 
 ARG SYSTEMD="false"
-ARG DEBIAN_FRONTEND=noninteractive
+ARG FIREWALLD="false"
 ARG DOCKER_STATIC=1
 
 # REGISTRY_VERSION specifies the version of the registry to download from
 # https://hub.docker.com/r/distribution/distribution. This version of
 # the registry is used to test schema 2 manifests. Generally,  the version
 # specified here should match a current release.
-ARG REGISTRY_VERSION=2.8.2
+ARG REGISTRY_VERSION=3.0.0-rc.1
+
+# delve is currently only supported on linux/amd64 and linux/arm64;
+# https://github.com/go-delve/delve/blob/v1.8.1/pkg/proc/native/support_sentinel.go#L1-L6
+ARG DELVE_SUPPORTED=${TARGETPLATFORM#linux/amd64} DELVE_SUPPORTED=${DELVE_SUPPORTED#linux/arm64}
+ARG DELVE_SUPPORTED=${DELVE_SUPPORTED:+"unsupported"}
+ARG DELVE_SUPPORTED=${DELVE_SUPPORTED:-"supported"}
 
 # cross compilation helper
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:${XX_VERSION} AS xx
@@ -39,21 +45,19 @@ COPY --from=build-dummy /build /build
 FROM --platform=$BUILDPLATFORM ${GOLANG_IMAGE} AS base
 COPY --from=xx / /
 RUN echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-ARG APT_MIRROR
-RUN test -n "$APT_MIRROR" && sed -ri "s#(httpredir|deb|security).debian.org#${APT_MIRROR}#g" /etc/apt/sources.list || true
-ARG DEBIAN_FRONTEND
 RUN apt-get update && apt-get install --no-install-recommends -y file
 ENV GO111MODULE=off
+ENV GOTOOLCHAIN=local
 
 FROM base AS criu
-ARG DEBIAN_FRONTEND
 ADD --chmod=0644 https://download.opensuse.org/repositories/devel:/tools:/criu/Debian_11/Release.key /etc/apt/trusted.gpg.d/criu.gpg.asc
 RUN --mount=type=cache,sharing=locked,id=moby-criu-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-criu-aptcache,target=/var/cache/apt \
-        echo 'deb https://download.opensuse.org/repositories/devel:/tools:/criu/Debian_11/ /' > /etc/apt/sources.list.d/criu.list \
+        echo 'deb https://download.opensuse.org/repositories/devel:/tools:/criu/Debian_12/ /' > /etc/apt/sources.list.d/criu.list \
         && apt-get update \
         && apt-get install -y --no-install-recommends criu \
-        && install -D /usr/sbin/criu /build/criu
+        && install -D /usr/sbin/criu /build/criu \
+        && /build/criu --version
 
 # registry
 FROM base AS registry-src
@@ -119,7 +123,6 @@ EOT
 # See also frozenImages in "testutil/environment/protect.go" (which needs to
 # be updated when adding images to this list)
 FROM debian:${BASE_DEBIAN_DISTRO} AS frozen-images
-ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-frozen-images-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-frozen-images-aptcache,target=/var/cache/apt \
        apt-get update && apt-get install -y --no-install-recommends \
@@ -133,9 +136,11 @@ ARG TARGETVARIANT
 RUN /download-frozen-image-v2.sh /build \
         busybox:latest@sha256:95cf004f559831017cdf4628aaf1bb30133677be8702a8c5f2994629f637a209 \
         busybox:glibc@sha256:1f81263701cddf6402afe9f33fca0266d9fff379e59b1748f33d3072da71ee85 \
-        debian:bullseye-slim@sha256:dacf278785a4daa9de07596ec739dbc07131e189942772210709c5c0777e8437 \
+        debian:bookworm-slim@sha256:2bc5c236e9b262645a323e9088dfa3bb1ecb16cc75811daf40a23a824d665be9 \
         hello-world:latest@sha256:d58e752213a51785838f9eed2b7a498ffa1cb3aa7f946dda11af39286c3db9a9 \
-        arm32v7/hello-world:latest@sha256:50b8560ad574c779908da71f7ce370c0a2471c098d44d1c8f6b513c5a55eeeb1
+        arm32v7/hello-world:latest@sha256:50b8560ad574c779908da71f7ce370c0a2471c098d44d1c8f6b513c5a55eeeb1 \
+        hello-world:amd64@sha256:90659bf80b44ce6be8234e6ff90a1ac34acbeb826903b02cfa0da11c82cbc042 \
+        hello-world:arm64@sha256:963612c5503f3f1674f315c67089dee577d8cc6afc18565e0b4183ae355fb343
 
 # delve
 FROM base AS delve-src
@@ -145,10 +150,10 @@ RUN git init . && git remote add origin "https://github.com/go-delve/delve.git"
 # from the https://github.com/go-delve/delve repository.
 # It can be used to run Docker with a possibility of
 # attaching debugger to it.
-ARG DELVE_VERSION=v1.20.1
+ARG DELVE_VERSION=v1.23.0
 RUN git fetch -q --depth 1 origin "${DELVE_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
-FROM base AS delve-build
+FROM base AS delve-supported
 WORKDIR /usr/src/delve
 ARG TARGETPLATFORM
 RUN --mount=from=delve-src,src=/usr/src/delve,rw \
@@ -159,16 +164,8 @@ RUN --mount=from=delve-src,src=/usr/src/delve,rw \
   xx-verify /build/dlv
 EOT
 
-# delve is currently only supported on linux/amd64 and linux/arm64;
-# https://github.com/go-delve/delve/blob/v1.8.1/pkg/proc/native/support_sentinel.go#L1-L6
-FROM binary-dummy AS delve-windows
-FROM binary-dummy AS delve-linux-arm
-FROM binary-dummy AS delve-linux-ppc64le
-FROM binary-dummy AS delve-linux-s390x
-FROM delve-build AS delve-linux-amd64
-FROM delve-build AS delve-linux-arm64
-FROM delve-linux-${TARGETARCH} AS delve-linux
-FROM delve-${TARGETOS} AS delve
+FROM binary-dummy AS delve-unsupported
+FROM delve-${DELVE_SUPPORTED} AS delve
 
 FROM base AS tomll
 # GOTOML_VERSION specifies the version of the tomll binary to build and install
@@ -185,7 +182,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM base AS gowinres
 # GOWINRES_VERSION defines go-winres tool version
-ARG GOWINRES_VERSION=v0.3.0
+ARG GOWINRES_VERSION=v0.3.1
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "github.com/tc-hib/go-winres@${GOWINRES_VERSION}" \
@@ -202,17 +199,17 @@ RUN git init . && git remote add origin "https://github.com/containerd/container
 # When updating the binary version you may also need to update the vendor
 # version to pick up bug fixes or new APIs, however, usually the Go packages
 # are built from a commit from the master branch.
-ARG CONTAINERD_VERSION=v1.7.6
+ARG CONTAINERD_VERSION=v1.7.25
 RUN git fetch -q --depth 1 origin "${CONTAINERD_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS containerd-build
 WORKDIR /go/src/github.com/containerd/containerd
-ARG DEBIAN_FRONTEND
 ARG TARGETPLATFORM
 RUN --mount=type=cache,sharing=locked,id=moby-containerd-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-containerd-aptcache,target=/var/cache/apt \
         apt-get update && xx-apt-get install -y --no-install-recommends \
-            gcc libbtrfs-dev libsecret-1-dev
+            gcc \
+            pkg-config
 ARG DOCKER_STATIC
 RUN --mount=from=containerd-src,src=/usr/src/containerd,rw \
     --mount=type=cache,target=/root/.cache/go-build,id=containerd-build-$TARGETPLATFORM <<EOT
@@ -233,7 +230,7 @@ FROM binary-dummy AS containerd-windows
 FROM containerd-${TARGETOS} AS containerd
 
 FROM base AS golangci_lint
-ARG GOLANGCI_LINT_VERSION=v1.54.2
+ARG GOLANGCI_LINT_VERSION=v1.62.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
@@ -247,11 +244,17 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
      && /build/gotestsum --version
 
 FROM base AS shfmt
-ARG SHFMT_VERSION=v3.6.0
+ARG SHFMT_VERSION=v3.8.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}" \
      && /build/shfmt --version
+
+FROM base AS gopls
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+        GOBIN=/build/ GO111MODULE=on go install "golang.org/x/tools/gopls@latest" \
+     && /build/gopls version
 
 FROM base AS dockercli
 WORKDIR /go/src/github.com/docker/cli
@@ -285,17 +288,19 @@ RUN git init . && git remote add origin "https://github.com/opencontainers/runc.
 # that is used. If you need to update runc, open a pull request in the containerd
 # project first, and update both after that is merged. When updating RUNC_VERSION,
 # consider updating runc in vendor.mod accordingly.
-ARG RUNC_VERSION=v1.1.9
+ARG RUNC_VERSION=v1.2.4
 RUN git fetch -q --depth 1 origin "${RUNC_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS runc-build
 WORKDIR /go/src/github.com/opencontainers/runc
-ARG DEBIAN_FRONTEND
 ARG TARGETPLATFORM
 RUN --mount=type=cache,sharing=locked,id=moby-runc-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-runc-aptcache,target=/var/cache/apt \
         apt-get update && xx-apt-get install -y --no-install-recommends \
-            dpkg-dev gcc libc6-dev libseccomp-dev
+            gcc \
+            libc6-dev \
+            libseccomp-dev \
+            pkg-config
 ARG DOCKER_STATIC
 RUN --mount=from=runc-src,src=/usr/src/runc,rw \
     --mount=type=cache,target=/root/.cache/go-build,id=runc-build-$TARGETPLATFORM <<EOT
@@ -322,7 +327,6 @@ RUN git fetch -q --depth 1 origin "${TINI_VERSION}" +refs/tags/*:refs/tags/* && 
 
 FROM base AS tini-build
 WORKDIR /go/src/github.com/krallin/tini
-ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-tini-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-tini-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install -y --no-install-recommends cmake
@@ -330,7 +334,9 @@ ARG TARGETPLATFORM
 RUN --mount=type=cache,sharing=locked,id=moby-tini-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-tini-aptcache,target=/var/cache/apt \
         xx-apt-get install -y --no-install-recommends \
-            gcc libc6-dev
+            gcc \
+            libc6-dev \
+            pkg-config
 RUN --mount=from=tini-src,src=/usr/src/tini,rw \
     --mount=type=cache,target=/root/.cache/go-build,id=tini-build-$TARGETPLATFORM <<EOT
   set -e
@@ -349,18 +355,19 @@ FROM tini-${TARGETOS} AS tini
 FROM base AS rootlesskit-src
 WORKDIR /usr/src/rootlesskit
 RUN git init . && git remote add origin "https://github.com/rootless-containers/rootlesskit.git"
-# When updating, also update rootlesskit commit in vendor.mod accordingly.
-ARG ROOTLESSKIT_VERSION=v1.1.0
+# When updating, also update vendor.mod and hack/dockerfile/install/rootlesskit.installer accordingly.
+ARG ROOTLESSKIT_VERSION=v2.3.1
 RUN git fetch -q --depth 1 origin "${ROOTLESSKIT_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS rootlesskit-build
 WORKDIR /go/src/github.com/rootless-containers/rootlesskit
-ARG DEBIAN_FRONTEND
 ARG TARGETPLATFORM
 RUN --mount=type=cache,sharing=locked,id=moby-rootlesskit-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-rootlesskit-aptcache,target=/var/cache/apt \
         apt-get update && xx-apt-get install -y --no-install-recommends \
-            gcc libc6-dev
+            gcc \
+            libc6-dev \
+            pkg-config
 ENV GO111MODULE=on
 ARG DOCKER_STATIC
 RUN --mount=from=rootlesskit-src,src=/usr/src/rootlesskit,rw \
@@ -370,8 +377,6 @@ RUN --mount=from=rootlesskit-src,src=/usr/src/rootlesskit,rw \
   export CGO_ENABLED=$([ "$DOCKER_STATIC" = "1" ] && echo "0" || echo "1")
   xx-go build -o /build/rootlesskit -ldflags="$([ "$DOCKER_STATIC" != "1" ] && echo "-linkmode=external")" ./cmd/rootlesskit
   xx-verify $([ "$DOCKER_STATIC" = "1" ] && echo "--static") /build/rootlesskit
-  xx-go build -o /build/rootlesskit-docker-proxy -ldflags="$([ "$DOCKER_STATIC" != "1" ] && echo "-linkmode=external")" ./cmd/rootlesskit-docker-proxy
-  xx-verify $([ "$DOCKER_STATIC" = "1" ] && echo "--static") /build/rootlesskit-docker-proxy
 EOT
 COPY --link ./contrib/dockerd-rootless.sh /build/
 COPY --link ./contrib/dockerd-rootless-setuptool.sh /build/
@@ -381,7 +386,7 @@ FROM binary-dummy AS rootlesskit-windows
 FROM rootlesskit-${TARGETOS} AS rootlesskit
 
 FROM base AS crun
-ARG CRUN_VERSION=1.8.7
+ARG CRUN_VERSION=1.12
 RUN --mount=type=cache,sharing=locked,id=moby-crun-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-crun-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install -y --no-install-recommends \
@@ -393,7 +398,6 @@ RUN --mount=type=cache,sharing=locked,id=moby-crun-aptlib,target=/var/lib/apt \
             libseccomp-dev \
             libsystemd-dev \
             libtool \
-            libudev-dev \
             libyajl-dev \
             python3 \
             ;
@@ -428,7 +432,11 @@ RUN git fetch -q --depth 1 origin "${CONTAINERUTILITY_VERSION}" +refs/tags/*:ref
 FROM base AS containerutil-build
 WORKDIR /usr/src/containerutil
 ARG TARGETPLATFORM
-RUN xx-apt-get install -y --no-install-recommends gcc g++ libc6-dev
+RUN xx-apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        libc6-dev \
+        pkg-config
 RUN --mount=from=containerutil-src,src=/usr/src/containerutil,rw \
     --mount=type=cache,target=/root/.cache/go-build,id=containerutil-build-$TARGETPLATFORM <<EOT
   set -e
@@ -493,8 +501,16 @@ RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
             systemd-sysv
 ENTRYPOINT ["hack/dind-systemd"]
 
-FROM dev-systemd-${SYSTEMD} AS dev-base
-ARG DEBIAN_FRONTEND
+FROM dev-systemd-${SYSTEMD} AS dev-firewalld-false
+
+FROM dev-systemd-true AS dev-firewalld-true
+RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
+    --mount=type=cache,sharing=locked,id=moby-dev-aptcache,target=/var/cache/apt \
+        apt-get update && apt-get install -y --no-install-recommends \
+            firewalld
+RUN sed -i 's/FirewallBackend=nftables/FirewallBackend=iptables/' /etc/firewalld/firewalld.conf
+
+FROM dev-firewalld-${FIREWALLD} AS dev-base
 RUN groupadd -r docker
 RUN useradd --create-home --gid docker unprivilegeduser \
  && mkdir -p /home/unprivilegeduser/.local/share/docker \
@@ -526,11 +542,9 @@ RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
             libprotobuf-c1 \
             libyajl2 \
             net-tools \
+            netcat-openbsd \
             patch \
             pigz \
-            python3-pip \
-            python3-setuptools \
-            python3-wheel \
             sudo \
             systemd-journal-remote \
             thin-provisioning-tools \
@@ -546,19 +560,14 @@ RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
 RUN update-alternatives --set iptables  /usr/sbin/iptables-legacy  || true \
  && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy || true \
  && update-alternatives --set arptables /usr/sbin/arptables-legacy || true
-ARG YAMLLINT_VERSION=1.27.1
-RUN pip3 install yamllint==${YAMLLINT_VERSION}
 RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-dev-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install --no-install-recommends -y \
             gcc \
             pkg-config \
-            dpkg-dev \
-            libapparmor-dev \
             libseccomp-dev \
-            libsecret-1-dev \
             libsystemd-dev \
-            libudev-dev
+            yamllint
 COPY --link --from=dockercli             /build/ /usr/local/cli
 COPY --link --from=dockercli-integration /build/ /usr/local/cli-integration
 
@@ -567,7 +576,6 @@ COPY --from=gowinres /build/ /usr/local/bin/
 WORKDIR /go/src/github.com/docker/docker
 ENV GO111MODULE=off
 ENV CGO_ENABLED=1
-ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-build-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-build-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install --no-install-recommends -y \
@@ -578,14 +586,11 @@ ARG TARGETPLATFORM
 RUN --mount=type=cache,sharing=locked,id=moby-build-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-build-aptcache,target=/var/cache/apt \
         xx-apt-get install --no-install-recommends -y \
-            dpkg-dev \
             gcc \
-            libapparmor-dev \
             libc6-dev \
             libseccomp-dev \
-            libsecret-1-dev \
             libsystemd-dev \
-            libudev-dev
+            pkg-config
 ARG DOCKER_BUILDTAGS
 ARG DOCKER_DEBUG
 ARG DOCKER_GITCOMMIT=HEAD
@@ -607,14 +612,13 @@ RUN <<EOT
 EOT
 RUN --mount=type=bind,target=.,rw \
     --mount=type=tmpfs,target=cli/winresources/dockerd \
-    --mount=type=tmpfs,target=cli/winresources/docker-proxy \
     --mount=type=cache,target=/root/.cache/go-build,id=moby-build-$TARGETPLATFORM <<EOT
   set -e
   target=$([ "$DOCKER_STATIC" = "1" ] && echo "binary" || echo "dynbinary")
   xx-go --wrap
   PKG_CONFIG=$(xx-go env PKG_CONFIG) ./hack/make.sh $target
   xx-verify $([ "$DOCKER_STATIC" = "1" ] && echo "--static") /tmp/bundles/${target}-daemon/dockerd$([ "$(xx-info os)" = "windows" ] && echo ".exe")
-  xx-verify $([ "$DOCKER_STATIC" = "1" ] && echo "--static") /tmp/bundles/${target}-daemon/docker-proxy$([ "$(xx-info os)" = "windows" ] && echo ".exe")
+  [ "$(xx-info os)" != "linux" ] || xx-verify $([ "$DOCKER_STATIC" = "1" ] && echo "--static") /tmp/bundles/${target}-daemon/docker-proxy
   mkdir /build
   mv /tmp/bundles/${target}-daemon/* /build/
 EOT
@@ -652,6 +656,11 @@ RUN <<EOT
   file docker-proxy
   docker-proxy --version
 EOT
+
+# devcontainer is a stage used by .devcontainer/devcontainer.json
+FROM dev-base AS devcontainer
+COPY --link . .
+COPY --link --from=gopls         /build/ /usr/local/bin/
 
 # usage:
 # > make shell

@@ -3,19 +3,20 @@ package cache
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/pkg/userns"
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/labels"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/hashicorp/go-multierror"
 	"github.com/moby/buildkit/cache/config"
@@ -32,6 +33,7 @@ import (
 	rootlessmountopts "github.com/moby/buildkit/util/rootless/mountopts"
 	"github.com/moby/buildkit/util/winlayers"
 	"github.com/moby/sys/mountinfo"
+	"github.com/moby/sys/userns"
 	digest "github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -39,7 +41,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var additionalAnnotations = append(compression.EStargzAnnotations, containerdUncompressed)
+var additionalAnnotations = append(compression.EStargzAnnotations, labels.LabelUncompressed)
 
 // Ref is a reference to cacheable objects.
 type Ref interface {
@@ -291,7 +293,7 @@ func (cr *cacheRecord) isLazy(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	_, err := cr.cm.ContentStore.Info(ctx, dgst)
-	if errors.Is(err, errdefs.ErrNotFound) {
+	if errors.Is(err, cerrdefs.ErrNotFound) {
 		return true, nil
 	} else if err != nil {
 		return false, err
@@ -348,7 +350,7 @@ func (cr *cacheRecord) size(ctx context.Context) (int64, error) {
 				if isDead {
 					return 0, nil
 				}
-				if !errors.Is(err, errdefs.ErrNotFound) {
+				if !errors.Is(err, cerrdefs.ErrNotFound) {
 					return s, errors.Wrapf(err, "failed to get usage for %s", cr.ID())
 				}
 			}
@@ -382,7 +384,7 @@ func (cr *cacheRecord) size(ctx context.Context) (int64, error) {
 }
 
 // caller must hold cr.mu
-func (cr *cacheRecord) mount(ctx context.Context, s session.Group) (_ snapshot.Mountable, rerr error) {
+func (cr *cacheRecord) mount(ctx context.Context) (_ snapshot.Mountable, rerr error) {
 	if cr.mountCache != nil {
 		return cr.mountCache, nil
 	}
@@ -400,7 +402,7 @@ func (cr *cacheRecord) mount(ctx context.Context, s session.Group) (_ snapshot.M
 				"containerd.io/gc.flat": time.Now().UTC().Format(time.RFC3339Nano),
 			}
 			return nil
-		}, leaseutil.MakeTemporary); err != nil && !errdefs.IsAlreadyExists(err) {
+		}, leaseutil.MakeTemporary); err != nil && !cerrdefs.IsAlreadyExists(err) {
 			return nil, err
 		}
 		defer func() {
@@ -411,14 +413,14 @@ func (cr *cacheRecord) mount(ctx context.Context, s session.Group) (_ snapshot.M
 		if err := cr.cm.LeaseManager.AddResource(ctx, leases.Lease{ID: cr.viewLeaseID()}, leases.Resource{
 			ID:   mountSnapshotID,
 			Type: "snapshots/" + cr.cm.Snapshotter.Name(),
-		}); err != nil && !errdefs.IsAlreadyExists(err) {
+		}); err != nil && !cerrdefs.IsAlreadyExists(err) {
 			return nil, err
 		}
 		// Return the mount direct from View rather than setting it using the Mounts call below.
 		// The two are equivalent for containerd snapshotters but the moby snapshotter requires
 		// the use of the mountable returned by View in this case.
 		mnts, err := cr.cm.Snapshotter.View(ctx, mountSnapshotID, cr.getSnapshotID())
-		if err != nil && !errdefs.IsAlreadyExists(err) {
+		if err != nil && !cerrdefs.IsAlreadyExists(err) {
 			return nil, err
 		}
 		cr.mountCache = mnts
@@ -443,7 +445,7 @@ func (cr *cacheRecord) remove(ctx context.Context, removeSnapshot bool) (rerr er
 			"id":             cr.ID(),
 			"refCount":       len(cr.refs),
 			"removeSnapshot": removeSnapshot,
-			"stack":          bklog.LazyStackTrace{},
+			"stack":          bklog.TraceLevelOnlyStack(),
 		})
 		if rerr != nil {
 			l = l.WithError(rerr)
@@ -454,12 +456,12 @@ func (cr *cacheRecord) remove(ctx context.Context, removeSnapshot bool) (rerr er
 	if removeSnapshot {
 		if err := cr.cm.LeaseManager.Delete(ctx, leases.Lease{
 			ID: cr.ID(),
-		}); err != nil && !errdefs.IsNotFound(err) {
+		}); err != nil && !cerrdefs.IsNotFound(err) {
 			return errors.Wrapf(err, "failed to delete lease for %s", cr.ID())
 		}
 		if err := cr.cm.LeaseManager.Delete(ctx, leases.Lease{
 			ID: cr.compressionVariantsLeaseID(),
-		}); err != nil && !errdefs.IsNotFound(err) {
+		}); err != nil && !cerrdefs.IsNotFound(err) {
 			return errors.Wrapf(err, "failed to delete compression variant lease for %s", cr.ID())
 		}
 	}
@@ -487,7 +489,7 @@ func (sr *immutableRef) traceLogFields() logrus.Fields {
 		"refID":       fmt.Sprintf("%p", sr),
 		"newRefCount": len(sr.refs),
 		"mutable":     false,
-		"stack":       bklog.LazyStackTrace{},
+		"stack":       bklog.TraceLevelOnlyStack(),
 	}
 	if sr.equalMutable != nil {
 		m["equalMutableID"] = sr.equalMutable.ID()
@@ -627,7 +629,7 @@ func (sr *mutableRef) traceLogFields() logrus.Fields {
 		"refID":       fmt.Sprintf("%p", sr),
 		"newRefCount": len(sr.refs),
 		"mutable":     true,
-		"stack":       bklog.LazyStackTrace{},
+		"stack":       bklog.TraceLevelOnlyStack(),
 	}
 	if sr.equalMutable != nil {
 		m["equalMutableID"] = sr.equalMutable.ID()
@@ -653,7 +655,7 @@ func (sr *immutableRef) Clone() ImmutableRef {
 	return sr.clone()
 }
 
-// layertoDistributable changes the passed in media type to the "distributable" version of the media type.
+// layerToDistributable changes the passed in media type to the "distributable" version of the media type.
 func layerToDistributable(mt string) string {
 	if !images.IsNonDistributable(mt) {
 		// Layer is already a distributable media type (or this is not even a layer).
@@ -726,14 +728,12 @@ func (sr *immutableRef) ociDesc(ctx context.Context, dhs DescHandlers, preferNon
 		}
 	} else if dh, ok := dhs[desc.Digest]; ok {
 		// No blob metadtata is stored in the content store. Try to get annotations from desc handlers.
-		for k, v := range filterAnnotationsForSave(dh.Annotations) {
-			desc.Annotations[k] = v
-		}
+		maps.Copy(desc.Annotations, filterAnnotationsForSave(dh.Annotations))
 	}
 
 	diffID := sr.getDiffID()
 	if diffID != "" {
-		desc.Annotations["containerd.io/uncompressed"] = string(diffID)
+		desc.Annotations[labels.LabelUncompressed] = string(diffID)
 	}
 
 	createdAt := sr.GetCreatedAt()
@@ -763,7 +763,7 @@ func (sr *immutableRef) linkBlob(ctx context.Context, desc ocispecs.Descriptor) 
 		l.ID = sr.compressionVariantsLeaseID()
 		// do not make it flat lease to allow linking blobs using gc label
 		return nil
-	}); err != nil && !errdefs.IsAlreadyExists(err) {
+	}); err != nil && !cerrdefs.IsAlreadyExists(err) {
 		return err
 	}
 	if err := sr.cm.LeaseManager.AddResource(ctx, leases.Lease{ID: sr.compressionVariantsLeaseID()}, leases.Resource{
@@ -827,7 +827,7 @@ func getBlobWithCompression(ctx context.Context, cs content.Store, desc ocispecs
 		}
 		return true
 	}); err != nil || target == nil {
-		return ocispecs.Descriptor{}, errdefs.ErrNotFound
+		return ocispecs.Descriptor{}, cerrdefs.ErrNotFound
 	}
 	return *target, nil
 }
@@ -848,7 +848,7 @@ func walkBlobVariantsOnly(ctx context.Context, cs content.Store, dgst digest.Dig
 	}
 	visited[dgst] = struct{}{}
 	info, err := cs.Info(ctx, dgst)
-	if errors.Is(err, errdefs.ErrNotFound) {
+	if errors.Is(err, cerrdefs.ErrNotFound) {
 		return true, nil
 	} else if err != nil {
 		return false, err
@@ -974,12 +974,12 @@ func (sr *immutableRef) Mount(ctx context.Context, readonly bool, s session.Grou
 	var mnt snapshot.Mountable
 	if sr.cm.Snapshotter.Name() == "stargz" {
 		if err := sr.withRemoteSnapshotLabelsStargzMode(ctx, s, func() {
-			mnt, rerr = sr.mount(ctx, s)
+			mnt, rerr = sr.mount(ctx)
 		}); err != nil {
 			return nil, err
 		}
 	} else {
-		mnt, rerr = sr.mount(ctx, s)
+		mnt, rerr = sr.mount(ctx)
 	}
 	if rerr != nil {
 		return nil, rerr
@@ -989,6 +989,14 @@ func (sr *immutableRef) Mount(ctx context.Context, readonly bool, s session.Grou
 		mnt = setReadonly(mnt)
 	}
 	return mnt, nil
+}
+
+func (sr *immutableRef) ensureLocalContentBlob(ctx context.Context, s session.Group) error {
+	if (sr.kind() == Layer || sr.kind() == BaseLayer) && !sr.getBlobOnly() {
+		return nil
+	}
+
+	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, true)
 }
 
 func (sr *immutableRef) Extract(ctx context.Context, s session.Group) (rerr error) {
@@ -1001,14 +1009,14 @@ func (sr *immutableRef) Extract(ctx context.Context, s session.Group) (rerr erro
 			if rerr = sr.prepareRemoteSnapshotsStargzMode(ctx, s); rerr != nil {
 				return
 			}
-			rerr = sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true)
+			rerr = sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
 		}); err != nil {
 			return err
 		}
 		return rerr
 	}
 
-	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true)
+	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
 }
 
 func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, s session.Group, f func()) error {
@@ -1016,9 +1024,9 @@ func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, 
 	for _, r := range sr.layerChain() {
 		r := r
 		info, err := r.cm.Snapshotter.Stat(ctx, r.getSnapshotID())
-		if err != nil && !errdefs.IsNotFound(err) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			return err
-		} else if errdefs.IsNotFound(err) {
+		} else if cerrdefs.IsNotFound(err) {
 			continue // This snpashot doesn't exist; skip
 		} else if _, ok := info.Labels["containerd.io/snapshot/remote"]; !ok {
 			continue // This isn't a remote snapshot; skip
@@ -1036,6 +1044,7 @@ func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, 
 			return errors.Wrapf(err, "failed to add tmp remote labels for remote snapshot")
 		}
 		defer func() {
+			ctx := context.WithoutCancel(ctx)
 			for k := range info.Labels {
 				info.Labels[k] = "" // Remove labels appended in this call
 			}
@@ -1053,7 +1062,7 @@ func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, 
 }
 
 func (sr *immutableRef) prepareRemoteSnapshotsStargzMode(ctx context.Context, s session.Group) error {
-	_, err := g.Do(ctx, sr.ID()+"-prepare-remote-snapshot", func(ctx context.Context) (_ struct{}, rerr error) {
+	_, err := g.Do(ctx, sr.ID()+"-prepare-remote-snapshot", func(ctx context.Context) (_ *leaseutil.LeaseRef, rerr error) {
 		dhs := sr.descHandlers
 		for _, r := range sr.layerChain() {
 			r := r
@@ -1065,7 +1074,7 @@ func (sr *immutableRef) prepareRemoteSnapshotsStargzMode(ctx context.Context, s 
 			dh := dhs[digest.Digest(r.getBlob())]
 			if dh == nil {
 				// We cannot prepare remote snapshots without descHandler.
-				return struct{}{}, nil
+				return nil, nil
 			}
 
 			// tmpLabels contains dh.SnapshotLabels + session IDs. All keys contain
@@ -1091,15 +1100,25 @@ func (sr *immutableRef) prepareRemoteSnapshotsStargzMode(ctx context.Context, s 
 				parentID = r.layerParent.getSnapshotID()
 			}
 			if err := r.cm.Snapshotter.Prepare(ctx, key, parentID, opts...); err != nil {
-				if errdefs.IsAlreadyExists(err) {
+				if cerrdefs.IsAlreadyExists(err) {
 					// Check if the targeting snapshot ID has been prepared as
 					// a remote snapshot in the snapshotter.
 					info, err := r.cm.Snapshotter.Stat(ctx, snapshotID)
 					if err == nil { // usable as remote snapshot without unlazying.
 						defer func() {
+							ctx := context.WithoutCancel(ctx)
 							// Remove tmp labels appended in this func
-							for k := range tmpLabels {
-								info.Labels[k] = ""
+							if info.Labels != nil {
+								for k := range tmpLabels {
+									info.Labels[k] = ""
+								}
+							} else {
+								// We are logging here to track to try to debug when and why labels are nil.
+								// Log can be removed when not happening anymore.
+								bklog.G(ctx).
+									WithField("snapshotID", snapshotID).
+									WithField("name", info.Name).
+									Debug("snapshots exist but labels are nil")
 							}
 							if _, err := r.cm.Snapshotter.Update(ctx, info, tmpFields...); err != nil {
 								bklog.G(ctx).Warn(errors.Wrapf(err,
@@ -1117,7 +1136,7 @@ func (sr *immutableRef) prepareRemoteSnapshotsStargzMode(ctx context.Context, s 
 			break
 		}
 
-		return struct{}{}, nil
+		return nil, nil
 	})
 	return err
 }
@@ -1139,25 +1158,36 @@ func makeTmpLabelsStargzMode(labels map[string]string, s session.Group) (fields 
 	return
 }
 
-func (sr *immutableRef) unlazy(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, topLevel bool) error {
-	_, err := g.Do(ctx, sr.ID()+"-unlazy", func(ctx context.Context) (_ struct{}, rerr error) {
+func (sr *immutableRef) unlazy(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, topLevel bool, ensureContentStore bool) error {
+	_, err := g.Do(ctx, sr.ID()+"-unlazy", func(ctx context.Context) (_ *leaseutil.LeaseRef, rerr error) {
 		if _, err := sr.cm.Snapshotter.Stat(ctx, sr.getSnapshotID()); err == nil {
-			return struct{}{}, nil
+			if !ensureContentStore {
+				return nil, nil
+			}
+			if blob := sr.getBlob(); blob == "" {
+				return nil, nil
+			}
+			if _, err := sr.cm.ContentStore.Info(ctx, sr.getBlob()); err == nil {
+				return nil, nil
+			}
 		}
 
 		switch sr.kind() {
 		case Merge, Diff:
-			return struct{}{}, sr.unlazyDiffMerge(ctx, dhs, pg, s, topLevel)
+			return nil, sr.unlazyDiffMerge(ctx, dhs, pg, s, topLevel, ensureContentStore)
 		case Layer, BaseLayer:
-			return struct{}{}, sr.unlazyLayer(ctx, dhs, pg, s)
+			return nil, sr.unlazyLayer(ctx, dhs, pg, s, ensureContentStore)
 		}
-		return struct{}{}, nil
+		return nil, nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // should be called within sizeG.Do call for this ref's ID
-func (sr *immutableRef) unlazyDiffMerge(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, topLevel bool) (rerr error) {
+func (sr *immutableRef) unlazyDiffMerge(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, topLevel bool, ensureContentStore bool) (rerr error) {
 	eg, egctx := errgroup.WithContext(ctx)
 	var diffs []snapshot.Diff
 	sr.layerWalk(func(sr *immutableRef) {
@@ -1167,13 +1197,13 @@ func (sr *immutableRef) unlazyDiffMerge(ctx context.Context, dhs DescHandlers, p
 			if sr.diffParents.lower != nil {
 				diff.Lower = sr.diffParents.lower.getSnapshotID()
 				eg.Go(func() error {
-					return sr.diffParents.lower.unlazy(egctx, dhs, pg, s, false)
+					return sr.diffParents.lower.unlazy(egctx, dhs, pg, s, false, ensureContentStore)
 				})
 			}
 			if sr.diffParents.upper != nil {
 				diff.Upper = sr.diffParents.upper.getSnapshotID()
 				eg.Go(func() error {
-					return sr.diffParents.upper.unlazy(egctx, dhs, pg, s, false)
+					return sr.diffParents.upper.unlazy(egctx, dhs, pg, s, false, ensureContentStore)
 				})
 			}
 		case Layer:
@@ -1182,7 +1212,7 @@ func (sr *immutableRef) unlazyDiffMerge(ctx context.Context, dhs DescHandlers, p
 		case BaseLayer:
 			diff.Upper = sr.getSnapshotID()
 			eg.Go(func() error {
-				return sr.unlazy(egctx, dhs, pg, s, false)
+				return sr.unlazy(egctx, dhs, pg, s, false, ensureContentStore)
 			})
 		}
 		diffs = append(diffs, diff)
@@ -1213,7 +1243,7 @@ func (sr *immutableRef) unlazyDiffMerge(ctx context.Context, dhs DescHandlers, p
 }
 
 // should be called within sizeG.Do call for this ref's ID
-func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group) (rerr error) {
+func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg progress.Controller, s session.Group, ensureContentStore bool) (rerr error) {
 	if !sr.getBlobOnly() {
 		return nil
 	}
@@ -1240,7 +1270,7 @@ func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg pr
 	parentID := ""
 	if sr.layerParent != nil {
 		eg.Go(func() error {
-			if err := sr.layerParent.unlazy(egctx, dhs, pg, s, false); err != nil {
+			if err := sr.layerParent.unlazy(egctx, dhs, pg, s, false, ensureContentStore); err != nil {
 				return err
 			}
 			parentID = sr.layerParent.getSnapshotID()
@@ -1303,7 +1333,7 @@ func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg pr
 		return err
 	}
 	if err := sr.cm.Snapshotter.Commit(ctx, sr.getSnapshotID(), key); err != nil {
-		if !errors.Is(err, errdefs.ErrAlreadyExists) {
+		if !errors.Is(err, cerrdefs.ErrAlreadyExists) {
 			return err
 		}
 	}
@@ -1362,7 +1392,7 @@ func (sr *immutableRef) release(ctx context.Context) (rerr error) {
 		if sr.equalMutable != nil {
 			sr.equalMutable.release(ctx)
 		} else {
-			if err := sr.cm.LeaseManager.Delete(ctx, leases.Lease{ID: sr.viewLeaseID()}); err != nil && !errdefs.IsNotFound(err) {
+			if err := sr.cm.LeaseManager.Delete(ctx, leases.Lease{ID: sr.viewLeaseID()}); err != nil && !cerrdefs.IsNotFound(err) {
 				return err
 			}
 			sr.mountCache = nil
@@ -1393,7 +1423,7 @@ func (cr *cacheRecord) finalize(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
-		if !errors.Is(err, errdefs.ErrAlreadyExists) { // migrator adds leases for everything
+		if !errors.Is(err, cerrdefs.ErrAlreadyExists) { // migrator adds leases for everything
 			return errors.Wrap(err, "failed to create lease")
 		}
 	}
@@ -1430,7 +1460,7 @@ func (sr *mutableRef) shouldUpdateLastUsed() bool {
 	return sr.triggerLastUsed
 }
 
-func (sr *mutableRef) commit(ctx context.Context) (_ *immutableRef, rerr error) {
+func (sr *mutableRef) commit() (_ *immutableRef, rerr error) {
 	if !sr.mutable || len(sr.refs) == 0 {
 		return nil, errors.Wrapf(errInvalid, "invalid mutable ref %p", sr)
 	}
@@ -1489,12 +1519,12 @@ func (sr *mutableRef) Mount(ctx context.Context, readonly bool, s session.Group)
 	var mnt snapshot.Mountable
 	if sr.cm.Snapshotter.Name() == "stargz" && sr.layerParent != nil {
 		if err := sr.layerParent.withRemoteSnapshotLabelsStargzMode(ctx, s, func() {
-			mnt, rerr = sr.mount(ctx, s)
+			mnt, rerr = sr.mount(ctx)
 		}); err != nil {
 			return nil, err
 		}
 	} else {
-		mnt, rerr = sr.mount(ctx, s)
+		mnt, rerr = sr.mount(ctx)
 	}
 	if rerr != nil {
 		return nil, rerr
@@ -1517,7 +1547,7 @@ func (sr *mutableRef) Commit(ctx context.Context) (ImmutableRef, error) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
-	return sr.commit(ctx)
+	return sr.commit()
 }
 
 func (sr *mutableRef) Release(ctx context.Context) error {

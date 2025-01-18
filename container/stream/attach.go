@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/pkg/pools"
 	"github.com/moby/term"
 	"github.com/pkg/errors"
@@ -148,6 +148,14 @@ func (c *Config) CopyStreams(ctx context.Context, cfg *AttachConfig) <-chan erro
 			}
 			if cfg.CStderr != nil {
 				cfg.CStderr.Close()
+			}
+
+			if cfg.Stdin != nil {
+				// In this case, `cfg.Stdin` is a stream from the client.
+				// The way `io.Copy` works we may get stuck waiting to read from `cfg.Stdin` even if the container has exited.
+				// This will cause the `io.Copy` to never return and the `group.Wait()` to never return.
+				// By closing cfg.Stdin we will cause the `io.Copy` to return and the `group.Wait()` to return.
+				cfg.Stdin.Close()
 			}
 
 			// Now with these closed, wait should return.

@@ -3,9 +3,10 @@ package libnetwork
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/scope"
@@ -121,11 +122,7 @@ func (sbs *sbState) CopyTo(o datastore.KVObject) error {
 	return nil
 }
 
-func (sbs *sbState) DataScope() string {
-	return scope.Local
-}
-
-func (sb *Sandbox) storeUpdate() error {
+func (sb *Sandbox) storeUpdate(ctx context.Context) error {
 	sbs := &sbState{
 		c:          sb.controller,
 		ID:         sb.id,
@@ -143,15 +140,13 @@ retry:
 			continue
 		}
 
-		eps := epState{
+		sbs.Eps = append(sbs.Eps, epState{
 			Nid: ep.getNetwork().ID(),
 			Eid: ep.ID(),
-		}
-
-		sbs.Eps = append(sbs.Eps, eps)
+		})
 	}
 
-	err := sb.controller.updateToStore(sbs)
+	err := sb.controller.updateToStore(ctx, sbs)
 	if err == datastore.ErrKeyModified {
 		// When we get ErrKeyModified it is sufficient to just
 		// go back and retry.  No need to get the object from
@@ -164,42 +159,32 @@ retry:
 }
 
 func (sb *Sandbox) storeDelete() error {
-	sbs := &sbState{
+	return sb.controller.store.DeleteObject(&sbState{
 		c:        sb.controller,
 		ID:       sb.id,
 		Cid:      sb.containerID,
-		dbIndex:  sb.dbIndex,
 		dbExists: sb.dbExists,
-	}
-
-	return sb.controller.deleteFromStore(sbs)
+	})
 }
 
-func (c *Controller) sandboxCleanup(activeSandboxes map[string]interface{}) {
-	store := c.getStore()
-	if store == nil {
-		log.G(context.TODO()).Error("Could not find local scope store while trying to cleanup sandboxes")
-		return
+// sandboxRestore restores Sandbox objects from the store, deleting them if they're not active.
+func (c *Controller) sandboxRestore(activeSandboxes map[string]interface{}) error {
+	sandboxStates, err := c.store.List(&sbState{c: c})
+	if err != nil {
+		if err == datastore.ErrKeyNotFound {
+			// It's normal for no sandboxes to be found. Just bail out.
+			return nil
+		}
+		return fmt.Errorf("failed to get sandboxes: %v", err)
 	}
 
-	kvol, err := store.List(datastore.Key(sandboxPrefix), &sbState{c: c})
-	if err != nil && err != datastore.ErrKeyNotFound {
-		log.G(context.TODO()).Errorf("failed to get sandboxes for scope %s: %v", store.Scope(), err)
-		return
-	}
-
-	// It's normal for no sandboxes to be found. Just bail out.
-	if err == datastore.ErrKeyNotFound {
-		return
-	}
-
-	for _, kvo := range kvol {
-		sbs := kvo.(*sbState)
-
+	for _, s := range sandboxStates {
+		sbs := s.(*sbState)
 		sb := &Sandbox{
 			id:                 sbs.ID,
 			controller:         sbs.c,
 			containerID:        sbs.Cid,
+			epPriority:         sbs.EpPriority,
 			extDNS:             sbs.ExtDNS,
 			endpoints:          []*Endpoint{},
 			populatedEndpoints: map[string]struct{}{},
@@ -217,7 +202,8 @@ func (c *Controller) sandboxCleanup(activeSandboxes map[string]interface{}) {
 			isRestore = true
 			opts := val.([]SandboxOption)
 			sb.processOptions(opts...)
-			sb.restorePath()
+			sb.restoreHostsPath()
+			sb.restoreResolvConfPath()
 			create = !sb.config.useDefaultSandBox
 		}
 		sb.osSbox, err = osl.NewSandbox(sb.Key(), create, isRestore)
@@ -235,13 +221,25 @@ func (c *Controller) sandboxCleanup(activeSandboxes map[string]interface{}) {
 			var ep *Endpoint
 			if err != nil {
 				log.G(context.TODO()).Errorf("getNetworkFromStore for nid %s failed while trying to build sandbox for cleanup: %v", eps.Nid, err)
-				n = &Network{id: eps.Nid, ctrlr: c, drvOnce: &sync.Once{}, persist: true}
-				ep = &Endpoint{id: eps.Eid, network: n, sandboxID: sbs.ID}
+				ep = &Endpoint{
+					id: eps.Eid,
+					network: &Network{
+						id:      eps.Nid,
+						ctrlr:   c,
+						drvOnce: &sync.Once{},
+						persist: true,
+					},
+					sandboxID: sbs.ID,
+				}
 			} else {
 				ep, err = n.getEndpointFromStore(eps.Eid)
 				if err != nil {
 					log.G(context.TODO()).Errorf("getEndpointFromStore for eid %s failed while trying to build sandbox for cleanup: %v", eps.Eid, err)
-					ep = &Endpoint{id: eps.Eid, network: n, sandboxID: sbs.ID}
+					ep = &Endpoint{
+						id:        eps.Eid,
+						network:   n,
+						sandboxID: sbs.ID,
+					}
 				}
 			}
 			if _, ok := activeSandboxes[sb.ID()]; ok && err != nil {
@@ -253,10 +251,14 @@ func (c *Controller) sandboxCleanup(activeSandboxes map[string]interface{}) {
 
 		if _, ok := activeSandboxes[sb.ID()]; !ok {
 			log.G(context.TODO()).Infof("Removing stale sandbox %s (%s)", sb.id, sb.containerID)
-			if err := sb.delete(true); err != nil {
+			if err := sb.delete(context.WithoutCancel(context.TODO()), true); err != nil {
 				log.G(context.TODO()).Errorf("Failed to delete sandbox %s while trying to cleanup: %v", sb.id, err)
 			}
 			continue
+		}
+
+		for _, ep := range sb.endpoints {
+			sb.populatedEndpoints[ep.id] = struct{}{}
 		}
 
 		// reconstruct osl sandbox field
@@ -273,10 +275,14 @@ func (c *Controller) sandboxCleanup(activeSandboxes map[string]interface{}) {
 		}
 
 		for _, ep := range sb.endpoints {
-			// Watch for service records
 			if !c.isAgent() {
-				c.watchSvcRecord(ep)
+				n := ep.getNetwork()
+				if !c.isSwarmNode() || n.Scope() != scope.Swarm || !n.driverIsMultihost() {
+					n.updateSvcRecord(context.WithoutCancel(context.TODO()), ep, true)
+				}
 			}
 		}
 	}
+
+	return nil
 }

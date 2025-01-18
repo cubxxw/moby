@@ -2,16 +2,16 @@ package container // import "github.com/docker/docker/daemon/cluster/executor/co
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
-	enginecontainer "github.com/docker/docker/api/types/container"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	enginemount "github.com/docker/docker/api/types/mount"
@@ -22,7 +22,6 @@ import (
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
 	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/go-connections/nat"
-	"github.com/docker/go-units"
 	gogotypes "github.com/gogo/protobuf/types"
 	"github.com/moby/swarmkit/v2/agent/exec"
 	"github.com/moby/swarmkit/v2/api"
@@ -160,7 +159,7 @@ func (c *containerConfig) portBindings() nat.PortMap {
 	return portBindings
 }
 
-func (c *containerConfig) isolation() enginecontainer.Isolation {
+func (c *containerConfig) isolation() containertypes.Isolation {
 	return convert.IsolationFromGRPC(c.spec().Isolation)
 }
 
@@ -190,11 +189,11 @@ func (c *containerConfig) exposedPorts() map[nat.Port]struct{} {
 	return exposedPorts
 }
 
-func (c *containerConfig) config() *enginecontainer.Config {
+func (c *containerConfig) config() *containertypes.Config {
 	genericEnvs := genericresource.EnvFormat(c.task.AssignedGenericResources, "DOCKER_RESOURCE")
 	env := append(c.spec().Env, genericEnvs...)
 
-	config := &enginecontainer.Config{
+	config := &containertypes.Config{
 		Labels:       c.labels(),
 		StopSignal:   c.spec().StopSignal,
 		Tty:          c.spec().TTY,
@@ -338,7 +337,8 @@ func convertMount(m api.Mount) enginemount.Mount {
 
 	if m.VolumeOptions != nil {
 		mount.VolumeOptions = &enginemount.VolumeOptions{
-			NoCopy: m.VolumeOptions.NoCopy,
+			NoCopy:  m.VolumeOptions.NoCopy,
+			Subpath: m.VolumeOptions.Subpath,
 		}
 		if m.VolumeOptions.Labels != nil {
 			mount.VolumeOptions.Labels = make(map[string]string, len(m.VolumeOptions.Labels))
@@ -360,16 +360,21 @@ func convertMount(m api.Mount) enginemount.Mount {
 	}
 
 	if m.TmpfsOptions != nil {
+		var options [][]string
+		// see daemon/cluster/convert/container.go, tmpfsOptionsFromGRPC for
+		// details on error handling.
+		_ = json.Unmarshal([]byte(m.TmpfsOptions.Options), &options)
 		mount.TmpfsOptions = &enginemount.TmpfsOptions{
 			SizeBytes: m.TmpfsOptions.SizeBytes,
 			Mode:      m.TmpfsOptions.Mode,
+			Options:   options,
 		}
 	}
 
 	return mount
 }
 
-func (c *containerConfig) healthcheck() *enginecontainer.HealthConfig {
+func (c *containerConfig) healthcheck() *containertypes.HealthConfig {
 	hcSpec := c.spec().Healthcheck
 	if hcSpec == nil {
 		return nil
@@ -377,17 +382,19 @@ func (c *containerConfig) healthcheck() *enginecontainer.HealthConfig {
 	interval, _ := gogotypes.DurationFromProto(hcSpec.Interval)
 	timeout, _ := gogotypes.DurationFromProto(hcSpec.Timeout)
 	startPeriod, _ := gogotypes.DurationFromProto(hcSpec.StartPeriod)
-	return &enginecontainer.HealthConfig{
-		Test:        hcSpec.Test,
-		Interval:    interval,
-		Timeout:     timeout,
-		Retries:     int(hcSpec.Retries),
-		StartPeriod: startPeriod,
+	startInterval, _ := gogotypes.DurationFromProto(hcSpec.StartInterval)
+	return &containertypes.HealthConfig{
+		Test:          hcSpec.Test,
+		Interval:      interval,
+		Timeout:       timeout,
+		Retries:       int(hcSpec.Retries),
+		StartPeriod:   startPeriod,
+		StartInterval: startInterval,
 	}
 }
 
-func (c *containerConfig) hostConfig(deps exec.VolumeGetter) *enginecontainer.HostConfig {
-	hc := &enginecontainer.HostConfig{
+func (c *containerConfig) hostConfig(deps exec.VolumeGetter) *containertypes.HostConfig {
+	hc := &containertypes.HostConfig{
 		Resources:      c.resources(),
 		GroupAdd:       c.spec().Groups,
 		PortBindings:   c.portBindings(),
@@ -398,6 +405,7 @@ func (c *containerConfig) hostConfig(deps exec.VolumeGetter) *enginecontainer.Ho
 		Sysctls:        c.spec().Sysctls,
 		CapAdd:         c.spec().CapabilityAdd,
 		CapDrop:        c.spec().CapabilityDrop,
+		OomScoreAdj:    int(c.spec().OomScoreAdj),
 	}
 
 	if c.spec().DNSConfig != nil {
@@ -423,7 +431,7 @@ func (c *containerConfig) hostConfig(deps exec.VolumeGetter) *enginecontainer.Ho
 	}
 
 	if c.task.LogDriver != nil {
-		hc.LogConfig = enginecontainer.LogConfig{
+		hc.LogConfig = containertypes.LogConfig{
 			Type:   c.task.LogDriver.Name,
 			Config: c.task.LogDriver.Options,
 		}
@@ -433,7 +441,7 @@ func (c *containerConfig) hostConfig(deps exec.VolumeGetter) *enginecontainer.Ho
 		labels := c.task.Networks[0].Network.Spec.Annotations.Labels
 		name := c.task.Networks[0].Network.Spec.Annotations.Name
 		if v, ok := labels["com.docker.swarm.predefined"]; ok && v == "true" {
-			hc.NetworkMode = enginecontainer.NetworkMode(name)
+			hc.NetworkMode = containertypes.NetworkMode(name)
 		}
 	}
 
@@ -465,8 +473,8 @@ func (c *containerConfig) volumeCreateRequest(mount *api.Mount) *volume.CreateOp
 	return nil
 }
 
-func (c *containerConfig) resources() enginecontainer.Resources {
-	resources := enginecontainer.Resources{}
+func (c *containerConfig) resources() containertypes.Resources {
+	resources := containertypes.Resources{}
 
 	// set pids limit
 	pidsLimit := c.spec().PidsLimit
@@ -474,9 +482,9 @@ func (c *containerConfig) resources() enginecontainer.Resources {
 		resources.PidsLimit = &pidsLimit
 	}
 
-	resources.Ulimits = make([]*units.Ulimit, len(c.spec().Ulimits))
+	resources.Ulimits = make([]*containertypes.Ulimit, len(c.spec().Ulimits))
 	for i, ulimit := range c.spec().Ulimits {
-		resources.Ulimits[i] = &units.Ulimit{
+		resources.Ulimits[i] = &containertypes.Ulimit{
 			Name: ulimit.Name,
 			Soft: ulimit.Soft,
 			Hard: ulimit.Hard,
@@ -618,13 +626,16 @@ func (c *containerConfig) networkCreateRequest(name string) (clustertypes.Networ
 		return clustertypes.NetworkCreateRequest{}, errors.New("container: unknown network referenced")
 	}
 
-	options := types.NetworkCreate{
+	ipv4Enabled := true
+	ipv6Enabled := na.Network.Spec.Ipv6Enabled
+	options := network.CreateOptions{
 		// ID:     na.Network.ID,
 		Labels:     na.Network.Spec.Annotations.Labels,
 		Internal:   na.Network.Spec.Internal,
 		Attachable: na.Network.Spec.Attachable,
 		Ingress:    convert.IsIngressNetwork(na.Network),
-		EnableIPv6: na.Network.Spec.Ipv6Enabled,
+		EnableIPv4: &ipv4Enabled,
+		EnableIPv6: &ipv6Enabled,
 		Scope:      scope.Swarm,
 	}
 
@@ -655,14 +666,14 @@ func (c *containerConfig) networkCreateRequest(name string) (clustertypes.Networ
 
 	return clustertypes.NetworkCreateRequest{
 		ID: na.Network.ID,
-		NetworkCreateRequest: types.NetworkCreateRequest{
+		CreateRequest: network.CreateRequest{
 			Name:          name,
-			NetworkCreate: options,
+			CreateOptions: options,
 		},
 	}, nil
 }
 
-func (c *containerConfig) applyPrivileges(hc *enginecontainer.HostConfig) {
+func (c *containerConfig) applyPrivileges(hc *containertypes.HostConfig) {
 	privileges := c.spec().Privileges
 	if privileges == nil {
 		return
@@ -697,6 +708,32 @@ func (c *containerConfig) applyPrivileges(hc *enginecontainer.HostConfig) {
 		if selinux.Type != "" {
 			hc.SecurityOpt = append(hc.SecurityOpt, "label=type:"+selinux.Type)
 		}
+	}
+
+	// variable to make the lines shorter and easier to read
+	if seccomp := privileges.Seccomp; seccomp != nil {
+		switch seccomp.Mode {
+		// case api.Privileges_SeccompOpts_DEFAULT:
+		//   if the setting is default, nothing needs to be set here. we leave
+		//   the option empty.
+		case api.Privileges_SeccompOpts_UNCONFINED:
+			hc.SecurityOpt = append(hc.SecurityOpt, "seccomp=unconfined")
+		case api.Privileges_SeccompOpts_CUSTOM:
+			// Profile is bytes, but those bytes are actually a string. This is
+			// basically verbatim what happens in the cli after a file is read.
+			hc.SecurityOpt = append(hc.SecurityOpt, fmt.Sprintf("seccomp=%s", seccomp.Profile))
+		}
+	}
+
+	// if the setting is DEFAULT, then nothing to be done. If it's DISABLED,
+	// we set that. Custom not supported yet. When custom *is* supported, make
+	// it look like the above.
+	if apparmor := privileges.Apparmor; apparmor != nil && apparmor.Mode == api.Privileges_AppArmorOpts_DISABLED {
+		hc.SecurityOpt = append(hc.SecurityOpt, "apparmor=unconfined")
+	}
+
+	if privileges.NoNewPrivileges {
+		hc.SecurityOpt = append(hc.SecurityOpt, "no-new-privileges=true")
 	}
 }
 

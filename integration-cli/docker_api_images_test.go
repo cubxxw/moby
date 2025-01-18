@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
@@ -26,7 +26,7 @@ func (s *DockerAPISuite) TestAPIImagesSaveAndLoad(c *testing.T) {
 	defer body.Close()
 	assert.Equal(c, res.StatusCode, http.StatusOK)
 
-	dockerCmd(c, "rmi", id)
+	cli.DockerCmd(c, "rmi", id)
 
 	res, loadBody, err := request.Post(ctx, "/images/load", request.RawContent(body), request.ContentType("application/x-tar"))
 	assert.NilError(c, err)
@@ -49,15 +49,15 @@ func (s *DockerAPISuite) TestAPIImagesDelete(c *testing.T) {
 	buildImageSuccessfully(c, name, build.WithDockerfile("FROM busybox\nENV FOO bar"))
 	id := getIDByName(c, name)
 
-	dockerCmd(c, "tag", name, "test:tag1")
+	cli.DockerCmd(c, "tag", name, "test:tag1")
 
-	_, err = apiClient.ImageRemove(testutil.GetContext(c), id, types.ImageRemoveOptions{})
+	_, err = apiClient.ImageRemove(testutil.GetContext(c), id, image.RemoveOptions{})
 	assert.ErrorContains(c, err, "unable to delete")
 
-	_, err = apiClient.ImageRemove(testutil.GetContext(c), "test:noexist", types.ImageRemoveOptions{})
+	_, err = apiClient.ImageRemove(testutil.GetContext(c), "test:noexist", image.RemoveOptions{})
 	assert.ErrorContains(c, err, "No such image")
 
-	_, err = apiClient.ImageRemove(testutil.GetContext(c), "test:tag1", types.ImageRemoveOptions{})
+	_, err = apiClient.ImageRemove(testutil.GetContext(c), "test:tag1", image.RemoveOptions{})
 	assert.NilError(c, err)
 }
 
@@ -73,7 +73,7 @@ func (s *DockerAPISuite) TestAPIImagesHistory(c *testing.T) {
 	buildImageSuccessfully(c, name, build.WithDockerfile("FROM busybox\nENV FOO bar"))
 	id := getIDByName(c, name)
 
-	historydata, err := apiClient.ImageHistory(testutil.GetContext(c), id)
+	historydata, err := apiClient.ImageHistory(testutil.GetContext(c), id, image.HistoryOptions{})
 	assert.NilError(c, err)
 
 	assert.Assert(c, len(historydata) != 0)
@@ -129,21 +129,21 @@ func (s *DockerAPISuite) TestAPIImagesSizeCompatibility(c *testing.T) {
 	apiclient := testEnv.APIClient()
 	defer apiclient.Close()
 
-	images, err := apiclient.ImageList(testutil.GetContext(c), types.ImageListOptions{})
+	images, err := apiclient.ImageList(testutil.GetContext(c), image.ListOptions{})
 	assert.NilError(c, err)
 	assert.Assert(c, len(images) != 0)
-	for _, image := range images {
-		assert.Assert(c, image.Size != int64(-1))
+	for _, img := range images {
+		assert.Assert(c, img.Size != int64(-1))
 	}
 
 	apiclient, err = client.NewClientWithOpts(client.FromEnv, client.WithVersion("v1.24"))
 	assert.NilError(c, err)
 	defer apiclient.Close()
 
-	v124Images, err := apiclient.ImageList(testutil.GetContext(c), types.ImageListOptions{})
+	v124Images, err := apiclient.ImageList(testutil.GetContext(c), image.ListOptions{})
 	assert.NilError(c, err)
 	assert.Assert(c, len(v124Images) != 0)
-	for _, image := range v124Images {
-		assert.Assert(c, image.Size != int64(-1))
+	for _, img := range v124Images {
+		assert.Assert(c, img.Size != int64(-1))
 	}
 }

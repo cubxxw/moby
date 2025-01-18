@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/log"
-	coci "github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/v2/core/containers"
+	coci "github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/log"
 	"github.com/docker/docker/container"
 	dconfig "github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/profiles/seccomp"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 const supportsSeccomp = true
@@ -22,7 +22,11 @@ func WithSeccomp(daemon *Daemon, c *container.Container) coci.SpecOpts {
 			return nil
 		}
 		if c.HostConfig.Privileged {
-			return nil
+			var err error
+			if c.SeccompProfile != "" {
+				s.Linux.Seccomp, err = seccomp.LoadProfile(c.SeccompProfile, s)
+			}
+			return err
 		}
 		if !daemon.RawSysInfo().Seccomp {
 			if c.SeccompProfile != "" && c.SeccompProfile != dconfig.SeccompProfileDefault {

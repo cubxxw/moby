@@ -10,16 +10,16 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/network"
+	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/container"
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
 	"github.com/docker/docker/daemon/config"
-	internalnetwork "github.com/docker/docker/daemon/network"
+	"github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libnetwork"
 	lncluster "github.com/docker/docker/libnetwork/cluster"
@@ -28,10 +28,9 @@ import (
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/networkdb"
 	"github.com/docker/docker/libnetwork/options"
-	networktypes "github.com/docker/docker/libnetwork/types"
+	lntypes "github.com/docker/docker/libnetwork/types"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/plugingetter"
-	"github.com/docker/docker/runconfig"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -44,12 +43,6 @@ func (pnr PredefinedNetworkError) Error() string {
 
 // Forbidden denotes the type of this error
 func (pnr PredefinedNetworkError) Forbidden() {}
-
-// NetworkControllerEnabled checks if the networking stack is enabled.
-// This feature depends on OS primitives and it's disabled in systems like Windows.
-func (daemon *Daemon) NetworkControllerEnabled() bool {
-	return daemon.netController != nil
-}
 
 // NetworkController returns the network controller created by the daemon.
 func (daemon *Daemon) NetworkController() *libnetwork.Controller {
@@ -139,7 +132,8 @@ func (daemon *Daemon) getAllNetworks() []*libnetwork.Network {
 	if c == nil {
 		return nil
 	}
-	return c.Networks()
+	ctx := context.TODO()
+	return c.Networks(ctx)
 }
 
 type ingressJob struct {
@@ -209,7 +203,7 @@ func (daemon *Daemon) setupIngress(cfg *config.Config, create *clustertypes.Netw
 		daemon.releaseIngress(staleID)
 	}
 
-	if _, err := daemon.createNetwork(cfg, create.NetworkCreateRequest, create.ID, true); err != nil {
+	if _, err := daemon.createNetwork(cfg, create.CreateRequest, create.ID, true); err != nil {
 		// If it is any other error other than already
 		// exists error log error and return.
 		if _, ok := err.(libnetwork.NetworkNameError); !ok {
@@ -245,17 +239,17 @@ func (daemon *Daemon) releaseIngress(id string) {
 }
 
 // SetNetworkBootstrapKeys sets the bootstrap keys.
-func (daemon *Daemon) SetNetworkBootstrapKeys(keys []*networktypes.EncryptionKey) error {
-	err := daemon.netController.SetKeys(keys)
-	if err == nil {
-		// Upon successful key setting dispatch the keys available event
-		daemon.cluster.SendClusterEvent(lncluster.EventNetworkKeysAvailable)
+func (daemon *Daemon) SetNetworkBootstrapKeys(keys []*lntypes.EncryptionKey) error {
+	if err := daemon.netController.SetKeys(keys); err != nil {
+		return err
 	}
-	return err
+	// Upon successful key setting dispatch the keys available event
+	daemon.cluster.SendClusterEvent(lncluster.EventNetworkKeysAvailable)
+	return nil
 }
 
 // UpdateAttachment notifies the attacher about the attachment config.
-func (daemon *Daemon) UpdateAttachment(networkName, networkID, containerID string, config *network.NetworkingConfig) error {
+func (daemon *Daemon) UpdateAttachment(networkName, networkID, containerID string, config *networktypes.NetworkingConfig) error {
 	if daemon.clusterProvider == nil {
 		return fmt.Errorf("cluster provider is not initialized")
 	}
@@ -279,17 +273,17 @@ func (daemon *Daemon) WaitForDetachment(ctx context.Context, networkName, networ
 
 // CreateManagedNetwork creates an agent network.
 func (daemon *Daemon) CreateManagedNetwork(create clustertypes.NetworkCreateRequest) error {
-	_, err := daemon.createNetwork(&daemon.config().Config, create.NetworkCreateRequest, create.ID, true)
+	_, err := daemon.createNetwork(&daemon.config().Config, create.CreateRequest, create.ID, true)
 	return err
 }
 
 // CreateNetwork creates a network with the given name, driver and other optional parameters
-func (daemon *Daemon) CreateNetwork(create types.NetworkCreateRequest) (*types.NetworkCreateResponse, error) {
+func (daemon *Daemon) CreateNetwork(create networktypes.CreateRequest) (*networktypes.CreateResponse, error) {
 	return daemon.createNetwork(&daemon.config().Config, create, "", false)
 }
 
-func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCreateRequest, id string, agent bool) (*types.NetworkCreateResponse, error) {
-	if runconfig.IsPreDefinedNetwork(create.Name) {
+func (daemon *Daemon) createNetwork(cfg *config.Config, create networktypes.CreateRequest, id string, agent bool) (*networktypes.CreateResponse, error) {
+	if network.IsPredefined(create.Name) {
 		return nil, PredefinedNetworkError(create.Name)
 	}
 
@@ -301,10 +295,6 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 
 	if driver == "overlay" && !daemon.cluster.IsManager() && !agent {
 		return nil, errdefs.Forbidden(errors.New(`This node is not a swarm manager. Use "docker swarm init" or "docker swarm join" to connect this node to swarm and try again.`))
-	}
-
-	if network.HasIPv6Subnets(create.IPAM) {
-		create.EnableIPv6 = true
 	}
 
 	networkOptions := make(map[string]string)
@@ -320,8 +310,34 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		}
 	}
 
+	enableIPv4 := create.ConfigFrom == nil
+	if create.EnableIPv4 != nil {
+		enableIPv4 = *create.EnableIPv4
+	} else if v, ok := networkOptions[netlabel.EnableIPv4]; ok {
+		var err error
+		if enableIPv4, err = strconv.ParseBool(v); err != nil {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("driver-opt %q is not a valid bool", netlabel.EnableIPv4))
+		}
+	}
+	if !enableIPv4 && !daemon.config().Experimental && create.ConfigFrom == nil {
+		return nil, errdefs.InvalidParameter(
+			errors.New("IPv4 can only be disabled if experimental features are enabled"),
+		)
+	}
+
+	var enableIPv6 bool
+	if create.EnableIPv6 != nil {
+		enableIPv6 = *create.EnableIPv6
+	} else if v, ok := networkOptions[netlabel.EnableIPv6]; ok {
+		var err error
+		if enableIPv6, err = strconv.ParseBool(v); err != nil {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("driver-opt %q is not a valid bool", netlabel.EnableIPv6))
+		}
+	}
+
 	nwOptions := []libnetwork.NetworkOption{
-		libnetwork.NetworkOptionEnableIPv6(create.EnableIPv6),
+		libnetwork.NetworkOptionEnableIPv4(enableIPv4),
+		libnetwork.NetworkOptionEnableIPv6(enableIPv6),
 		libnetwork.NetworkOptionDriverOpts(networkOptions),
 		libnetwork.NetworkOptionLabels(create.Labels),
 		libnetwork.NetworkOptionAttachable(create.Attachable),
@@ -333,8 +349,28 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		nwOptions = append(nwOptions, libnetwork.NetworkOptionConfigOnly())
 	}
 
-	if err := network.ValidateIPAM(create.IPAM); err != nil {
-		return nil, errdefs.InvalidParameter(err)
+	if err := networktypes.ValidateIPAM(create.IPAM, enableIPv6); err != nil {
+		if agent {
+			// This function is called with agent=false for all networks. For swarm-scoped
+			// networks, the configuration is validated but ManagerRedirectError is returned
+			// and the network is not created. Then, each time a swarm-scoped network is
+			// needed, this function is called again with agent=true.
+			//
+			// Non-swarm networks created before ValidateIPAM was introduced continue to work
+			// as they did before-upgrade, even if they would fail the new checks on creation
+			// (for example, by having host-bits set in their subnet). Those networks are not
+			// seen again here.
+			//
+			// By dropping errors for agent networks, existing swarm-scoped networks also
+			// continue to behave as they did before upgrade - but new networks are still
+			// validated.
+			log.G(context.TODO()).WithFields(log.Fields{
+				"error":   err,
+				"network": create.Name,
+			}).Warn("Continuing with validation errors in agent IPAM")
+		} else {
+			return nil, errdefs.InvalidParameter(err)
+		}
 	}
 
 	if create.IPAM != nil {
@@ -378,9 +414,7 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 	}
 	daemon.LogNetworkEvent(n, events.ActionCreate)
 
-	return &types.NetworkCreateResponse{
-		ID: n.ID(),
-	}, nil
+	return &networktypes.CreateResponse{ID: n.ID()}, nil
 }
 
 func (daemon *Daemon) pluginRefCount(driver, capability string, mode int) {
@@ -406,7 +440,7 @@ func (daemon *Daemon) pluginRefCount(driver, capability string, mode int) {
 	}
 }
 
-func getIpamConfig(data []network.IPAMConfig) ([]*libnetwork.IpamConf, []*libnetwork.IpamConf, error) {
+func getIpamConfig(data []networktypes.IPAMConfig) ([]*libnetwork.IpamConf, []*libnetwork.IpamConf, error) {
 	ipamV4Cfg := []*libnetwork.IpamConf{}
 	ipamV6Cfg := []*libnetwork.IpamConf{}
 	for _, d := range data {
@@ -442,12 +476,12 @@ func (daemon *Daemon) UpdateContainerServiceConfig(containerName string, service
 // ConnectContainerToNetwork connects the given container to the given
 // network. If either cannot be found, an err is returned. If the
 // network cannot be set up, an err is returned.
-func (daemon *Daemon) ConnectContainerToNetwork(containerName, networkName string, endpointConfig *network.EndpointSettings) error {
+func (daemon *Daemon) ConnectContainerToNetwork(ctx context.Context, containerName, networkName string, endpointConfig *networktypes.EndpointSettings) error {
 	ctr, err := daemon.GetContainer(containerName)
 	if err != nil {
 		return err
 	}
-	return daemon.ConnectToNetwork(ctr, networkName, endpointConfig)
+	return daemon.ConnectToNetwork(ctx, ctr, networkName, endpointConfig)
 }
 
 // DisconnectContainerFromNetwork disconnects the given container from
@@ -460,13 +494,13 @@ func (daemon *Daemon) DisconnectContainerFromNetwork(containerName string, netwo
 		}
 		return err
 	}
-	return daemon.DisconnectFromNetwork(ctr, networkName, force)
+	return daemon.DisconnectFromNetwork(context.TODO(), ctr, networkName, force)
 }
 
 // GetNetworkDriverList returns the list of plugins drivers
 // registered for network.
-func (daemon *Daemon) GetNetworkDriverList() []string {
-	if !daemon.NetworkControllerEnabled() {
+func (daemon *Daemon) GetNetworkDriverList(ctx context.Context) []string {
+	if daemon.netController == nil {
 		return nil
 	}
 
@@ -483,7 +517,7 @@ func (daemon *Daemon) GetNetworkDriverList() []string {
 		pluginMap[plugin] = true
 	}
 
-	networks := daemon.netController.Networks()
+	networks := daemon.netController.Networks(ctx)
 
 	for _, nw := range networks {
 		if !pluginMap[nw.Type()] {
@@ -517,13 +551,13 @@ func (daemon *Daemon) DeleteNetwork(networkID string) error {
 }
 
 func (daemon *Daemon) deleteNetwork(nw *libnetwork.Network, dynamic bool) error {
-	if runconfig.IsPreDefinedNetwork(nw.Name()) && !dynamic {
+	if network.IsPredefined(nw.Name()) && !dynamic {
 		err := fmt.Errorf("%s is a pre-defined network and cannot be removed", nw.Name())
 		return errdefs.Forbidden(err)
 	}
 
 	if dynamic && !nw.Dynamic() {
-		if runconfig.IsPreDefinedNetwork(nw.Name()) {
+		if network.IsPredefined(nw.Name()) {
 			// Predefined networks now support swarm services. Make this
 			// a no-op when cluster requests to remove the predefined network.
 			return nil
@@ -549,14 +583,14 @@ func (daemon *Daemon) deleteNetwork(nw *libnetwork.Network, dynamic bool) error 
 }
 
 // GetNetworks returns a list of all networks
-func (daemon *Daemon) GetNetworks(filter filters.Args, config types.NetworkListConfig) (networks []types.NetworkResource, err error) {
+func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkListConfig) (networks []networktypes.Inspect, err error) {
 	var idx map[string]*libnetwork.Network
 	if config.Detailed {
 		idx = make(map[string]*libnetwork.Network)
 	}
 
 	allNetworks := daemon.getAllNetworks()
-	networks = make([]types.NetworkResource, 0, len(allNetworks))
+	networks = make([]networktypes.Inspect, 0, len(allNetworks))
 	for _, n := range allNetworks {
 		nr := buildNetworkResource(n)
 		networks = append(networks, nr)
@@ -565,7 +599,7 @@ func (daemon *Daemon) GetNetworks(filter filters.Args, config types.NetworkListC
 		}
 	}
 
-	networks, err = internalnetwork.FilterNetworks(networks, filter)
+	networks, err = network.FilterNetworks(networks, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -584,25 +618,26 @@ func (daemon *Daemon) GetNetworks(filter filters.Args, config types.NetworkListC
 
 // buildNetworkResource builds a [types.NetworkResource] from the given
 // [libnetwork.Network], to be returned by the API.
-func buildNetworkResource(nw *libnetwork.Network) types.NetworkResource {
+func buildNetworkResource(nw *libnetwork.Network) networktypes.Inspect {
 	if nw == nil {
-		return types.NetworkResource{}
+		return networktypes.Inspect{}
 	}
 
-	return types.NetworkResource{
+	return networktypes.Inspect{
 		Name:       nw.Name(),
 		ID:         nw.ID(),
 		Created:    nw.Created(),
 		Scope:      nw.Scope(),
 		Driver:     nw.Type(),
+		EnableIPv4: nw.IPv4Enabled(),
 		EnableIPv6: nw.IPv6Enabled(),
 		IPAM:       buildIPAMResources(nw),
 		Internal:   nw.Internal(),
 		Attachable: nw.Attachable(),
 		Ingress:    nw.Ingress(),
-		ConfigFrom: network.ConfigReference{Network: nw.ConfigFrom()},
+		ConfigFrom: networktypes.ConfigReference{Network: nw.ConfigFrom()},
 		ConfigOnly: nw.ConfigOnly(),
-		Containers: map[string]types.EndpointResource{},
+		Containers: map[string]networktypes.EndpointResource{},
 		Options:    nw.DriverOptions(),
 		Labels:     nw.Labels(),
 		Peers:      buildPeerInfoResources(nw.Peers()),
@@ -612,8 +647,8 @@ func buildNetworkResource(nw *libnetwork.Network) types.NetworkResource {
 // buildContainerAttachments creates a [types.EndpointResource] map of all
 // containers attached to the network. It is used when listing networks in
 // detailed mode.
-func buildContainerAttachments(nw *libnetwork.Network) map[string]types.EndpointResource {
-	containers := make(map[string]types.EndpointResource)
+func buildContainerAttachments(nw *libnetwork.Network) map[string]networktypes.EndpointResource {
+	containers := make(map[string]networktypes.EndpointResource)
 	for _, e := range nw.Endpoints() {
 		ei := e.Info()
 		if ei == nil {
@@ -630,19 +665,19 @@ func buildContainerAttachments(nw *libnetwork.Network) map[string]types.Endpoint
 
 // buildServiceAttachments creates a [network.ServiceInfo] map of all services
 // attached to the network. It is used when listing networks in "verbose" mode.
-func buildServiceAttachments(nw *libnetwork.Network) map[string]network.ServiceInfo {
-	services := make(map[string]network.ServiceInfo)
+func buildServiceAttachments(nw *libnetwork.Network) map[string]networktypes.ServiceInfo {
+	services := make(map[string]networktypes.ServiceInfo)
 	for name, service := range nw.Services() {
-		tasks := make([]network.Task, 0, len(service.Tasks))
+		tasks := make([]networktypes.Task, 0, len(service.Tasks))
 		for _, t := range service.Tasks {
-			tasks = append(tasks, network.Task{
+			tasks = append(tasks, networktypes.Task{
 				Name:       t.Name,
 				EndpointID: t.EndpointID,
 				EndpointIP: t.EndpointIP,
 				Info:       t.Info,
 			})
 		}
-		services[name] = network.ServiceInfo{
+		services[name] = networktypes.ServiceInfo{
 			VIP:          service.VIP,
 			Ports:        service.Ports,
 			Tasks:        tasks,
@@ -655,21 +690,21 @@ func buildServiceAttachments(nw *libnetwork.Network) map[string]network.ServiceI
 // buildPeerInfoResources converts a list of [networkdb.PeerInfo] to a
 // [network.PeerInfo] for inclusion in API responses. It returns nil if
 // the list of peers is empty.
-func buildPeerInfoResources(peers []networkdb.PeerInfo) []network.PeerInfo {
+func buildPeerInfoResources(peers []networkdb.PeerInfo) []networktypes.PeerInfo {
 	if len(peers) == 0 {
 		return nil
 	}
-	peerInfo := make([]network.PeerInfo, 0, len(peers))
+	peerInfo := make([]networktypes.PeerInfo, 0, len(peers))
 	for _, peer := range peers {
-		peerInfo = append(peerInfo, network.PeerInfo(peer))
+		peerInfo = append(peerInfo, networktypes.PeerInfo(peer))
 	}
 	return peerInfo
 }
 
 // buildIPAMResources constructs a [network.IPAM] from the network's
 // IPAM information for inclusion in API responses.
-func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
-	var ipamConfig []network.IPAMConfig
+func buildIPAMResources(nw *libnetwork.Network) networktypes.IPAM {
+	var ipamConfig []networktypes.IPAMConfig
 
 	ipamDriver, ipamOptions, ipv4Conf, ipv6Conf := nw.IpamConfig()
 
@@ -679,7 +714,7 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 			continue
 		}
 		hasIPv4Config = true
-		ipamConfig = append(ipamConfig, network.IPAMConfig{
+		ipamConfig = append(ipamConfig, networktypes.IPAMConfig{
 			Subnet:     cfg.PreferredPool,
 			IPRange:    cfg.SubPool,
 			Gateway:    cfg.Gateway,
@@ -693,7 +728,7 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 			continue
 		}
 		hasIPv6Config = true
-		ipamConfig = append(ipamConfig, network.IPAMConfig{
+		ipamConfig = append(ipamConfig, networktypes.IPAMConfig{
 			Subnet:     cfg.PreferredPool,
 			IPRange:    cfg.SubPool,
 			Gateway:    cfg.Gateway,
@@ -709,7 +744,7 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 				if info.IPAMData.Gateway != nil {
 					gw = info.IPAMData.Gateway.IP.String()
 				}
-				ipamConfig = append(ipamConfig, network.IPAMConfig{
+				ipamConfig = append(ipamConfig, networktypes.IPAMConfig{
 					Subnet:  info.IPAMData.Pool.String(),
 					Gateway: gw,
 				})
@@ -721,7 +756,7 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 				if info.IPAMData.Pool == nil {
 					continue
 				}
-				ipamConfig = append(ipamConfig, network.IPAMConfig{
+				ipamConfig = append(ipamConfig, networktypes.IPAMConfig{
 					Subnet:  info.IPAMData.Pool.String(),
 					Gateway: info.IPAMData.Gateway.String(),
 				})
@@ -729,7 +764,7 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 		}
 	}
 
-	return network.IPAM{
+	return networktypes.IPAM{
 		Driver:  ipamDriver,
 		Options: ipamOptions,
 		Config:  ipamConfig,
@@ -738,8 +773,8 @@ func buildIPAMResources(nw *libnetwork.Network) network.IPAM {
 
 // buildEndpointResource combines information from the endpoint and additional
 // endpoint-info into a [types.EndpointResource].
-func buildEndpointResource(ep *libnetwork.Endpoint, info libnetwork.EndpointInfo) types.EndpointResource {
-	er := types.EndpointResource{
+func buildEndpointResource(ep *libnetwork.Endpoint, info libnetwork.EndpointInfo) networktypes.EndpointResource {
+	er := networktypes.EndpointResource{
 		EndpointID: ep.ID(),
 		Name:       ep.Name(),
 	}
@@ -788,12 +823,9 @@ func (daemon *Daemon) clearAttachableNetworks() {
 // buildCreateEndpointOptions builds endpoint options from a given network.
 func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, epConfig *network.EndpointSettings, sb *libnetwork.Sandbox, daemonDNS []string) ([]libnetwork.EndpointOption, error) {
 	var createOptions []libnetwork.EndpointOption
+	genericOptions := make(options.Generic)
 
 	nwName := n.Name()
-	defaultNetName := runconfig.DefaultDaemonNetworkMode().NetworkName()
-	if c.NetworkSettings.IsAnonymousEndpoint || (nwName == defaultNetName && !serviceDiscoveryOnDefaultNetwork()) {
-		createOptions = append(createOptions, libnetwork.CreateOptionAnonymous())
-	}
 
 	if epConfig != nil {
 		if ipam := epConfig.IPAMConfig; ipam != nil {
@@ -819,11 +851,18 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 			createOptions = append(createOptions, libnetwork.CreateOptionIpam(ip, ip6, ipList, nil))
 		}
 
-		for _, alias := range epConfig.Aliases {
-			createOptions = append(createOptions, libnetwork.CreateOptionMyAlias(alias))
-		}
+		createOptions = append(createOptions, libnetwork.CreateOptionDNSNames(epConfig.DNSNames))
+
 		for k, v := range epConfig.DriverOpts {
 			createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(options.Generic{k: v}))
+		}
+
+		if epConfig.DesiredMacAddress != "" {
+			mac, err := net.ParseMAC(epConfig.DesiredMacAddress)
+			if err != nil {
+				return nil, err
+			}
+			genericOptions[netlabel.MacAddress] = mac
 		}
 	}
 
@@ -852,28 +891,43 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 		createOptions = append(createOptions, libnetwork.CreateOptionDisableResolution())
 	}
 
-	// configs that are applicable only for the endpoint in the network
-	// to which container was connected to on docker run.
-	// Ideally all these network-specific endpoint configurations must be moved under
-	// container.NetworkSettings.Networks[n.Name()]
-	netMode := c.HostConfig.NetworkMode
-	if nwName == netMode.NetworkName() || n.ID() == netMode.NetworkName() || (nwName == defaultNetName && netMode.IsDefault()) {
-		if c.Config.MacAddress != "" {
-			mac, err := net.ParseMAC(c.Config.MacAddress)
-			if err != nil {
-				return nil, err
-			}
-			createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(options.Generic{
-				netlabel.MacAddress: mac,
-			}))
+	epOpts, err := buildPortsRelatedCreateEndpointOptions(c, n, sb)
+	if err != nil {
+		return nil, err
+	}
+	createOptions = append(createOptions, epOpts...)
+
+	// On Windows, DNS config is a per-adapter config option whereas on Linux, it's a sandbox-wide parameter; hence why
+	// we're dealing with DNS config both here and in buildSandboxOptions. Following DNS options are only honored by
+	// Windows netdrivers, whereas DNS options in buildSandboxOptions are only honored by Linux netdrivers.
+	if !n.Internal() {
+		if len(c.HostConfig.DNS) > 0 {
+			createOptions = append(createOptions, libnetwork.CreateOptionDNS(c.HostConfig.DNS))
+		} else if len(daemonDNS) > 0 {
+			createOptions = append(createOptions, libnetwork.CreateOptionDNS(daemonDNS))
 		}
 	}
 
+	createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(genericOptions))
+
+	// IPv6 may be enabled on the network, but disabled in the container.
+	if n.IPv6Enabled() {
+		if sbIPv6, ok := sb.IPv6Enabled(); ok && !sbIPv6 {
+			createOptions = append(createOptions, libnetwork.CreateOptionDisableIPv6())
+		}
+	}
+
+	return createOptions, nil
+}
+
+// buildPortsRelatedCreateEndpointOptions returns the appropriate endpoint options to apply config related to port
+// mapping and exposed ports.
+func buildPortsRelatedCreateEndpointOptions(c *container.Container, n *libnetwork.Network, sb *libnetwork.Sandbox) ([]libnetwork.EndpointOption, error) {
 	// Port-mapping rules belong to the container & applicable only to non-internal networks.
 	//
 	// TODO(thaJeztah): Look if we can provide a more minimal function for getPortMapInfo, as it does a lot, and we only need the "length".
 	if n.Internal() || len(getPortMapInfo(sb)) > 0 {
-		return createOptions, nil
+		return nil, nil
 	}
 
 	bindings := make(nat.PortMap)
@@ -897,13 +951,13 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 	nat.SortPortMap(ports, bindings)
 
 	var (
-		exposedPorts   []networktypes.TransportPort
-		publishedPorts []networktypes.PortBinding
+		exposedPorts   []lntypes.TransportPort
+		publishedPorts []lntypes.PortBinding
 	)
 	for _, port := range ports {
-		portProto := networktypes.ParseProtocol(port.Proto())
+		portProto := lntypes.ParseProtocol(port.Proto())
 		portNum := uint16(port.Int())
-		exposedPorts = append(exposedPorts, networktypes.TransportPort{
+		exposedPorts = append(exposedPorts, lntypes.TransportPort{
 			Proto: portProto,
 			Port:  portNum,
 		})
@@ -917,7 +971,7 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 			if err != nil {
 				return nil, fmt.Errorf("error parsing HostPort value (%s): %w", binding.HostPort, err)
 			}
-			publishedPorts = append(publishedPorts, networktypes.PortBinding{
+			publishedPorts = append(publishedPorts, lntypes.PortBinding{
 				Proto:       portProto,
 				Port:        portNum,
 				HostIP:      net.ParseIP(binding.HostIP),
@@ -927,22 +981,17 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 		}
 
 		if c.HostConfig.PublishAllPorts && len(bindings[port]) == 0 {
-			publishedPorts = append(publishedPorts, networktypes.PortBinding{
+			publishedPorts = append(publishedPorts, lntypes.PortBinding{
 				Proto: portProto,
 				Port:  portNum,
 			})
 		}
 	}
 
-	if len(c.HostConfig.DNS) > 0 {
-		createOptions = append(createOptions, libnetwork.CreateOptionDNS(c.HostConfig.DNS))
-	} else if len(daemonDNS) > 0 {
-		createOptions = append(createOptions, libnetwork.CreateOptionDNS(daemonDNS))
-	}
-
-	createOptions = append(createOptions, libnetwork.CreateOptionPortMapping(publishedPorts), libnetwork.CreateOptionExposedPorts(exposedPorts))
-
-	return createOptions, nil
+	return []libnetwork.EndpointOption{
+		libnetwork.CreateOptionPortMapping(publishedPorts),
+		libnetwork.CreateOptionExposedPorts(exposedPorts),
+	}, nil
 }
 
 // getPortMapInfo retrieves the current port-mapping programmed for the given sandbox
@@ -974,7 +1023,7 @@ func getEndpointPortMapInfo(ep *libnetwork.Endpoint) (nat.PortMap, error) {
 	}
 
 	if expData, ok := driverInfo[netlabel.ExposedPorts]; ok {
-		if exposedPorts, ok := expData.([]networktypes.TransportPort); ok {
+		if exposedPorts, ok := expData.([]lntypes.TransportPort); ok {
 			for _, tp := range exposedPorts {
 				natPort, err := nat.NewPort(tp.Proto.String(), strconv.Itoa(int(tp.Port)))
 				if err != nil {
@@ -990,13 +1039,18 @@ func getEndpointPortMapInfo(ep *libnetwork.Endpoint) (nat.PortMap, error) {
 		return pm, nil
 	}
 
-	if portMapping, ok := mapData.([]networktypes.PortBinding); ok {
+	if portMapping, ok := mapData.([]lntypes.PortBinding); ok {
 		for _, pp := range portMapping {
+			// Use an empty string for the host port if there's no port assigned.
 			natPort, err := nat.NewPort(pp.Proto.String(), strconv.Itoa(int(pp.Port)))
 			if err != nil {
 				return pm, err
 			}
-			natBndg := nat.PortBinding{HostIP: pp.HostIP.String(), HostPort: strconv.Itoa(int(pp.HostPort))}
+			var hp string
+			if pp.HostPort > 0 {
+				hp = strconv.Itoa(int(pp.HostPort))
+			}
+			natBndg := nat.PortBinding{HostIP: pp.HostIP.String(), HostPort: hp}
 			pm[natPort] = append(pm[natPort], natBndg)
 		}
 	}
@@ -1005,7 +1059,7 @@ func getEndpointPortMapInfo(ep *libnetwork.Endpoint) (nat.PortMap, error) {
 }
 
 // buildEndpointInfo sets endpoint-related fields on container.NetworkSettings based on the provided network and endpoint.
-func buildEndpointInfo(networkSettings *internalnetwork.Settings, n *libnetwork.Network, ep *libnetwork.Endpoint) error {
+func buildEndpointInfo(networkSettings *network.Settings, n *libnetwork.Network, ep *libnetwork.Endpoint) error {
 	if ep == nil {
 		return errors.New("endpoint cannot be nil")
 	}
@@ -1022,8 +1076,8 @@ func buildEndpointInfo(networkSettings *internalnetwork.Settings, n *libnetwork.
 
 	nwName := n.Name()
 	if _, ok := networkSettings.Networks[nwName]; !ok {
-		networkSettings.Networks[nwName] = &internalnetwork.EndpointSettings{
-			EndpointSettings: &network.EndpointSettings{},
+		networkSettings.Networks[nwName] = &network.EndpointSettings{
+			EndpointSettings: &networktypes.EndpointSettings{},
 		}
 	}
 	networkSettings.Networks[nwName].NetworkID = n.ID()
@@ -1054,19 +1108,25 @@ func buildEndpointInfo(networkSettings *internalnetwork.Settings, n *libnetwork.
 }
 
 // buildJoinOptions builds endpoint Join options from a given network.
-func buildJoinOptions(networkSettings *internalnetwork.Settings, n interface{ Name() string }) ([]libnetwork.EndpointOption, error) {
-	var joinOptions []libnetwork.EndpointOption
-	if epConfig, ok := networkSettings.Networks[n.Name()]; ok {
-		for _, str := range epConfig.Links {
-			name, alias, err := opts.ParseLink(str)
-			if err != nil {
-				return nil, err
-			}
-			joinOptions = append(joinOptions, libnetwork.CreateOptionAlias(name, alias))
+func buildJoinOptions(settings *network.Settings, n interface{ Name() string }) ([]libnetwork.EndpointOption, error) {
+	epConfig, ok := settings.Networks[n.Name()]
+	if !ok {
+		return []libnetwork.EndpointOption{}, nil
+	}
+
+	joinOptions := []libnetwork.EndpointOption{
+		libnetwork.JoinOptionPriority(epConfig.GwPriority),
+	}
+
+	for _, str := range epConfig.Links {
+		name, alias, err := opts.ParseLink(str)
+		if err != nil {
+			return nil, err
 		}
-		for k, v := range epConfig.DriverOpts {
-			joinOptions = append(joinOptions, libnetwork.EndpointOptionGeneric(options.Generic{k: v}))
-		}
+		joinOptions = append(joinOptions, libnetwork.CreateOptionAlias(name, alias))
+	}
+	for k, v := range epConfig.DriverOpts {
+		joinOptions = append(joinOptions, libnetwork.EndpointOptionGeneric(options.Generic{k: v}))
 	}
 
 	return joinOptions, nil

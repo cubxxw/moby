@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.22
+
 package containerimage
 
 import (
@@ -6,22 +9,23 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/gc"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
-	cdreference "github.com/containerd/containerd/reference"
-	ctdreference "github.com/containerd/containerd/reference"
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/remotes/docker/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/containerd/containerd/remotes/docker/schema1" is deprecated: use images formatted in Docker Image Manifest v2, Schema 2, or OCI Image Spec v1.
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/core/remotes/docker/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/containerd/containerd/remotes/docker/schema1" is deprecated: use images formatted in Docker Image Manifest v2, Schema 2, or OCI Image Spec v1.
+	"github.com/containerd/containerd/v2/pkg/gc"
+	cdreference "github.com/containerd/containerd/v2/pkg/reference"
+	ctdreference "github.com/containerd/containerd/v2/pkg/reference"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	distreference "github.com/distribution/reference"
 	dimages "github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/distribution/metadata"
@@ -31,14 +35,15 @@ import (
 	pkgprogress "github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/reference"
 	"github.com/moby/buildkit/cache"
-	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
+	"github.com/moby/buildkit/source/containerimage"
 	srctypes "github.com/moby/buildkit/source/types"
 	"github.com/moby/buildkit/sourcepolicy"
-	policy "github.com/moby/buildkit/sourcepolicy/pb"
 	spb "github.com/moby/buildkit/sourcepolicy/pb"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/imageutil"
@@ -77,9 +82,77 @@ func NewSource(opt SourceOpt) (*Source, error) {
 	return &Source{SourceOpt: opt}, nil
 }
 
-// ID returns image scheme identifier
-func (is *Source) ID() string {
-	return srctypes.DockerImageScheme
+// Schemes returns a list of SourceOp identifier schemes that this source
+// should match.
+func (is *Source) Schemes() []string {
+	return []string{srctypes.DockerImageScheme}
+}
+
+// Identifier constructs an Identifier from the given scheme, ref, and attrs,
+// all of which come from a SourceOp.
+func (is *Source) Identifier(scheme, ref string, attrs map[string]string, platform *pb.Platform) (source.Identifier, error) {
+	return is.registryIdentifier(ref, attrs, platform)
+}
+
+// Copied from github.com/moby/buildkit/source/containerimage/source.go
+func (is *Source) registryIdentifier(ref string, attrs map[string]string, platform *pb.Platform) (source.Identifier, error) {
+	id, err := containerimage.NewImageIdentifier(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	if platform != nil {
+		id.Platform = &ocispec.Platform{
+			OS:           platform.OS,
+			Architecture: platform.Architecture,
+			Variant:      platform.Variant,
+			OSVersion:    platform.OSVersion,
+		}
+		if platform.OSFeatures != nil {
+			id.Platform.OSFeatures = append([]string{}, platform.OSFeatures...)
+		}
+	}
+
+	for k, v := range attrs {
+		switch k {
+		case pb.AttrImageResolveMode:
+			rm, err := resolver.ParseImageResolveMode(v)
+			if err != nil {
+				return nil, err
+			}
+			id.ResolveMode = rm
+		case pb.AttrImageRecordType:
+			rt, err := parseImageRecordType(v)
+			if err != nil {
+				return nil, err
+			}
+			id.RecordType = rt
+		case pb.AttrImageLayerLimit:
+			l, err := strconv.Atoi(v)
+			if err != nil {
+				return nil, errors.Wrapf(err, "invalid layer limit %s", v)
+			}
+			if l <= 0 {
+				return nil, errors.Errorf("invalid layer limit %s", v)
+			}
+			id.LayerLimit = &l
+		}
+	}
+
+	return id, nil
+}
+
+func parseImageRecordType(v string) (client.UsageRecordType, error) {
+	switch client.UsageRecordType(v) {
+	case "", client.UsageRecordTypeRegular:
+		return client.UsageRecordTypeRegular, nil
+	case client.UsageRecordTypeInternal:
+		return client.UsageRecordTypeInternal, nil
+	case client.UsageRecordTypeFrontend:
+		return client.UsageRecordTypeFrontend, nil
+	default:
+		return "", errors.Errorf("invalid record type %s", v)
+	}
 }
 
 func (is *Source) resolveLocal(refStr string) (*image.Image, error) {
@@ -104,7 +177,7 @@ type resolveRemoteResult struct {
 	dt   []byte
 }
 
-func (is *Source) resolveRemote(ctx context.Context, ref string, platform *ocispec.Platform, sm *session.Manager, g session.Group) (string, digest.Digest, []byte, error) {
+func (is *Source) resolveRemote(ctx context.Context, ref string, platform *ocispec.Platform, sm *session.Manager, g session.Group) (digest.Digest, []byte, error) {
 	p := platforms.DefaultSpec()
 	if platform != nil {
 		p = *platform
@@ -113,34 +186,36 @@ func (is *Source) resolveRemote(ctx context.Context, ref string, platform *ocisp
 	key := "getconfig::" + ref + "::" + platforms.Format(p)
 	res, err := is.g.Do(ctx, key, func(ctx context.Context) (*resolveRemoteResult, error) {
 		res := resolver.DefaultPool.GetResolver(is.RegistryHosts, ref, "pull", sm, g)
-		ref, dgst, dt, err := imageutil.Config(ctx, ref, res, is.ContentStore, is.LeaseManager, platform, []*policy.Policy{})
+		dgst, dt, err := imageutil.Config(ctx, ref, res, is.ContentStore, is.LeaseManager, platform)
 		if err != nil {
 			return nil, err
 		}
 		return &resolveRemoteResult{ref: ref, dgst: dgst, dt: dt}, nil
 	})
 	if err != nil {
-		return ref, "", nil, err
+		return "", nil, err
 	}
-	return res.ref, res.dgst, res.dt, nil
+	return res.dgst, res.dt, nil
 }
 
 // ResolveImageConfig returns image config for an image
-func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager, g session.Group) (string, digest.Digest, []byte, error) {
+func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt sourceresolver.Opt, sm *session.Manager, g session.Group) (digest.Digest, []byte, error) {
+	if opt.ImageOpt == nil {
+		return "", nil, fmt.Errorf("can only resolve an image: %v, opt: %v", ref, opt)
+	}
 	ref, err := applySourcePolicies(ctx, ref, opt.SourcePolicies)
 	if err != nil {
-		return "", "", nil, err
+		return "", nil, err
 	}
-	resolveMode, err := source.ParseImageResolveMode(opt.ResolveMode)
+	resolveMode, err := resolver.ParseImageResolveMode(opt.ImageOpt.ResolveMode)
 	if err != nil {
-		return ref, "", nil, err
+		return "", nil, err
 	}
 	switch resolveMode {
-	case source.ResolveModeForcePull:
-		ref, dgst, dt, err := is.resolveRemote(ctx, ref, opt.Platform, sm, g)
+	case resolver.ResolveModeForcePull:
+		return is.resolveRemote(ctx, ref, opt.Platform, sm, g)
 		// TODO: pull should fallback to local in case of failure to allow offline behavior
 		// the fallback doesn't work currently
-		return ref, dgst, dt, err
 		/*
 			if err == nil {
 				return dgst, dt, err
@@ -150,10 +225,10 @@ func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt llb.Re
 			return "", dt, err
 		*/
 
-	case source.ResolveModeDefault:
+	case resolver.ResolveModeDefault:
 		// default == prefer local, but in the future could be smarter
 		fallthrough
-	case source.ResolveModePreferLocal:
+	case resolver.ResolveModePreferLocal:
 		img, err := is.resolveLocal(ref)
 		if err == nil {
 			if opt.Platform != nil && !platformMatches(img, opt.Platform) {
@@ -162,19 +237,19 @@ func (is *Source) ResolveImageConfig(ctx context.Context, ref string, opt llb.Re
 					path.Join(img.OS, img.Architecture, img.Variant),
 				)
 			} else {
-				return ref, "", img.RawJSON(), err
+				return "", img.RawJSON(), err
 			}
 		}
 		// fallback to remote
 		return is.resolveRemote(ctx, ref, opt.Platform, sm, g)
 	}
 	// should never happen
-	return ref, "", nil, fmt.Errorf("builder cannot resolve image %s: invalid mode %q", ref, opt.ResolveMode)
+	return "", nil, fmt.Errorf("builder cannot resolve image %s: invalid mode %q", ref, opt.ImageOpt.ResolveMode)
 }
 
 // Resolve returns access to pulling for an identifier
 func (is *Source) Resolve(ctx context.Context, id source.Identifier, sm *session.Manager, vtx solver.Vertex) (source.SourceInstance, error) {
-	imageIdentifier, ok := id.(*source.ImageIdentifier)
+	imageIdentifier, ok := id.(*containerimage.ImageIdentifier)
 	if !ok {
 		return nil, errors.Errorf("invalid image identifier %v", id)
 	}
@@ -198,7 +273,7 @@ type puller struct {
 	is               *Source
 	resolveLocalOnce sync.Once
 	g                flightcontrol.Group[struct{}]
-	src              *source.ImageIdentifier
+	src              *containerimage.ImageIdentifier
 	desc             ocispec.Descriptor
 	ref              string
 	config           []byte
@@ -250,7 +325,7 @@ func (p *puller) resolveLocal() {
 			}
 		}
 
-		if p.src.ResolveMode == source.ResolveModeDefault || p.src.ResolveMode == source.ResolveModePreferLocal {
+		if p.src.ResolveMode == resolver.ResolveModeDefault || p.src.ResolveMode == resolver.ResolveModePreferLocal {
 			ref := p.src.Reference.String()
 			img, err := p.is.resolveLocal(ref)
 			if err == nil {
@@ -294,17 +369,22 @@ func (p *puller) resolve(ctx context.Context, g session.Group) error {
 		// has been read.
 		// It may be possible to have a mapping between schema 1 manifests
 		// and the schema 2 manifests they are converted to.
-		if p.config == nil && p.desc.MediaType != images.MediaTypeDockerSchema1Manifest {
+		if p.config == nil && p.desc.MediaType != c8dimages.MediaTypeDockerSchema1Manifest {
 			ref, err := distreference.WithDigest(ref, p.desc.Digest)
 			if err != nil {
 				return struct{}{}, err
 			}
-			newRef, _, dt, err := p.is.ResolveImageConfig(ctx, ref.String(), llb.ResolveImageConfigOpt{Platform: &p.platform, ResolveMode: p.src.ResolveMode.String()}, p.sm, g)
+			_, dt, err := p.is.ResolveImageConfig(ctx, ref.String(), sourceresolver.Opt{
+				Platform: &p.platform,
+				ImageOpt: &sourceresolver.ResolveImageOpt{
+					ResolveMode: p.src.ResolveMode.String(),
+				},
+			}, p.sm, g)
 			if err != nil {
 				return struct{}{}, err
 			}
 
-			p.ref = newRef
+			p.ref = ref.String()
 			p.config = dt
 		}
 		return struct{}{}, nil
@@ -343,12 +423,12 @@ func (p *puller) CacheKey(ctx context.Context, g session.Group, index int) (stri
 		return dgst.String(), p.desc.Digest.String(), nil, false, nil
 	}
 
-	if len(p.config) == 0 && p.desc.MediaType != images.MediaTypeDockerSchema1Manifest {
+	if len(p.config) == 0 && p.desc.MediaType != c8dimages.MediaTypeDockerSchema1Manifest {
 		return "", "", nil, false, errors.Errorf("invalid empty config file resolved for %s", p.src.Reference.String())
 	}
 
 	k := cacheKeyFromConfig(p.config).String()
-	if k == "" || p.desc.MediaType == images.MediaTypeDockerSchema1Manifest {
+	if k == "" || p.desc.MediaType == c8dimages.MediaTypeDockerSchema1Manifest {
 		dgst, err := p.mainManifestKey(p.platform)
 		if err != nil {
 			return "", "", nil, false, err
@@ -441,10 +521,14 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 
 	var (
 		schema1Converter *schema1.Converter
-		handlers         []images.Handler
+		handlers         []c8dimages.Handler
 	)
-	if p.desc.MediaType == images.MediaTypeDockerSchema1Manifest {
-		schema1Converter = schema1.NewConverter(p.is.ContentStore, fetcher)
+	if p.desc.MediaType == c8dimages.MediaTypeDockerSchema1Manifest {
+		schema1Converter, err = schema1.NewConverter(p.is.ContentStore, fetcher)
+		if err != nil {
+			stopProgress()
+			return nil, err
+		}
 		handlers = append(handlers, schema1Converter)
 
 		// TODO: Optimize to do dispatch and integrate pulling with download manager,
@@ -453,25 +537,25 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 		// TODO: need a wrapper snapshot interface that combines content
 		// and snapshots as 1) buildkit shouldn't have a dependency on contentstore
 		// or 2) cachemanager should manage the contentstore
-		handlers = append(handlers, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		handlers = append(handlers, c8dimages.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 			switch desc.MediaType {
-			case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest,
-				images.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex,
-				images.MediaTypeDockerSchema2Config, ocispec.MediaTypeImageConfig:
+			case c8dimages.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest,
+				c8dimages.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex,
+				c8dimages.MediaTypeDockerSchema2Config, ocispec.MediaTypeImageConfig:
 				nonLayers = append(nonLayers, desc.Digest)
 			default:
-				return nil, images.ErrSkipDesc
+				return nil, c8dimages.ErrSkipDesc
 			}
 			ongoing.add(desc)
 			return nil, nil
 		}))
 
 		// Get all the children for a descriptor
-		childrenHandler := images.ChildrenHandler(p.is.ContentStore)
+		childrenHandler := c8dimages.ChildrenHandler(p.is.ContentStore)
 		// Filter the children by the platform
-		childrenHandler = images.FilterPlatforms(childrenHandler, platform)
+		childrenHandler = c8dimages.FilterPlatforms(childrenHandler, platform)
 		// Limit manifests pulled to the best match in an index
-		childrenHandler = images.LimitManifests(childrenHandler, platform, 1)
+		childrenHandler = c8dimages.LimitManifests(childrenHandler, platform, 1)
 
 		handlers = append(handlers,
 			remotes.FetchHandler(p.is.ContentStore, fetcher),
@@ -479,7 +563,7 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 		)
 	}
 
-	if err := images.Dispatch(ctx, images.Handlers(handlers...), nil, p.desc); err != nil {
+	if err := c8dimages.Dispatch(ctx, c8dimages.Handlers(handlers...), nil, p.desc); err != nil {
 		stopProgress()
 		return nil, err
 	}
@@ -492,12 +576,12 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 		}
 	}
 
-	mfst, err := images.Manifest(ctx, p.is.ContentStore, p.desc, platform)
+	mfst, err := c8dimages.Manifest(ctx, p.is.ContentStore, p.desc, platform)
 	if err != nil {
 		return nil, err
 	}
 
-	config, err := images.Config(ctx, p.is.ContentStore, p.desc, platform)
+	config, err := c8dimages.Config(ctx, p.is.ContentStore, p.desc, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -863,12 +947,8 @@ func applySourcePolicies(ctx context.Context, str string, spls []*spb.Policy) (s
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
-	op := &pb.Op{
-		Op: &pb.Op_Source{
-			Source: &pb.SourceOp{
-				Identifier: srctypes.DockerImageScheme + "://" + ref.String(),
-			},
-		},
+	op := &pb.SourceOp{
+		Identifier: srctypes.DockerImageScheme + "://" + ref.String(),
 	}
 
 	mut, err := sourcepolicy.NewEngine(spls).Evaluate(ctx, op)
@@ -877,15 +957,11 @@ func applySourcePolicies(ctx context.Context, str string, spls []*spb.Policy) (s
 	}
 
 	if mut {
-		var (
-			t  string
-			ok bool
-		)
-		t, newRef, ok := strings.Cut(op.GetSource().GetIdentifier(), "://")
+		t, newRef, ok := strings.Cut(op.GetIdentifier(), "://")
 		if !ok {
-			return "", errors.Errorf("could not parse ref: %s", op.GetSource().GetIdentifier())
+			return "", errors.Errorf("could not parse ref: %s", op.GetIdentifier())
 		}
-		if ok && t != srctypes.DockerImageScheme {
+		if t != srctypes.DockerImageScheme {
 			return "", &imageutil.ResolveToNonImageError{Ref: str, Updated: newRef}
 		}
 		ref, err = cdreference.Parse(newRef)

@@ -4,7 +4,7 @@ import (
 	"runtime"
 
 	"github.com/docker/docker/oci/caps"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 func iPtr(i int64) *int64 { return &i }
@@ -113,6 +113,7 @@ func DefaultLinuxSpec() specs.Spec {
 				"/proc/sched_debug",
 				"/proc/scsi",
 				"/sys/firmware",
+				"/sys/devices/virtual/powercap",
 			},
 			ReadonlyPaths: []string{
 				"/proc/bus",

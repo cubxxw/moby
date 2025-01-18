@@ -10,7 +10,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
 	"github.com/docker/docker/testutil/request"
@@ -19,7 +18,6 @@ import (
 )
 
 func TestPingCacheHeaders(t *testing.T) {
-	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"), "skip test from new feature")
 	ctx := setupTest(t)
 
 	res, _, err := request.Get(ctx, "/_ping")
@@ -40,11 +38,10 @@ func TestPingGet(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, string(b), "OK")
 	assert.Equal(t, res.StatusCode, http.StatusOK)
-	assert.Check(t, hdr(res, "API-Version") != "")
+	assert.Check(t, hdr(res, "Api-Version") != "")
 }
 
 func TestPingHead(t *testing.T) {
-	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"), "skip test from new feature")
 	ctx := setupTest(t)
 
 	res, body, err := request.Head(ctx, "/_ping")
@@ -54,7 +51,7 @@ func TestPingHead(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, 0, len(b))
 	assert.Equal(t, res.StatusCode, http.StatusOK)
-	assert.Check(t, hdr(res, "API-Version") != "")
+	assert.Check(t, hdr(res, "Api-Version") != "")
 }
 
 func TestPingSwarmHeader(t *testing.T) {
@@ -65,34 +62,34 @@ func TestPingSwarmHeader(t *testing.T) {
 	d := daemon.New(t)
 	d.Start(t)
 	defer d.Stop(t)
-	client := d.NewClientT(t)
-	defer client.Close()
+	apiClient := d.NewClientT(t)
+	defer apiClient.Close()
 
 	t.Run("before swarm init", func(t *testing.T) {
 		ctx := testutil.StartSpan(ctx, t)
-		p, err := client.Ping(ctx)
+		p, err := apiClient.Ping(ctx)
 		assert.NilError(t, err)
 		assert.Equal(t, p.SwarmStatus.NodeState, swarm.LocalNodeStateInactive)
 		assert.Equal(t, p.SwarmStatus.ControlAvailable, false)
 	})
 
-	_, err := client.SwarmInit(ctx, swarm.InitRequest{ListenAddr: "127.0.0.1", AdvertiseAddr: "127.0.0.1:2377"})
+	_, err := apiClient.SwarmInit(ctx, swarm.InitRequest{ListenAddr: "127.0.0.1", AdvertiseAddr: "127.0.0.1:2377"})
 	assert.NilError(t, err)
 
 	t.Run("after swarm init", func(t *testing.T) {
 		ctx := testutil.StartSpan(ctx, t)
-		p, err := client.Ping(ctx)
+		p, err := apiClient.Ping(ctx)
 		assert.NilError(t, err)
 		assert.Equal(t, p.SwarmStatus.NodeState, swarm.LocalNodeStateActive)
 		assert.Equal(t, p.SwarmStatus.ControlAvailable, true)
 	})
 
-	err = client.SwarmLeave(ctx, true)
+	err = apiClient.SwarmLeave(ctx, true)
 	assert.NilError(t, err)
 
 	t.Run("after swarm leave", func(t *testing.T) {
 		ctx := testutil.StartSpan(ctx, t)
-		p, err := client.Ping(ctx)
+		p, err := apiClient.Ping(ctx)
 		assert.NilError(t, err)
 		assert.Equal(t, p.SwarmStatus.NodeState, swarm.LocalNodeStateInactive)
 		assert.Equal(t, p.SwarmStatus.ControlAvailable, false)
@@ -105,8 +102,8 @@ func TestPingBuilderHeader(t *testing.T) {
 
 	ctx := setupTest(t)
 	d := daemon.New(t)
-	client := d.NewClientT(t)
-	defer client.Close()
+	apiClient := d.NewClientT(t)
+	defer apiClient.Close()
 
 	t.Run("default config", func(t *testing.T) {
 		testutil.StartSpan(ctx, t)
@@ -118,7 +115,7 @@ func TestPingBuilderHeader(t *testing.T) {
 			expected = types.BuilderV1
 		}
 
-		p, err := client.Ping(ctx)
+		p, err := apiClient.Ping(ctx)
 		assert.NilError(t, err)
 		assert.Equal(t, p.BuilderVersion, expected)
 	})
@@ -132,7 +129,7 @@ func TestPingBuilderHeader(t *testing.T) {
 		defer d.Stop(t)
 
 		expected := types.BuilderV1
-		p, err := client.Ping(ctx)
+		p, err := apiClient.Ping(ctx)
 		assert.NilError(t, err)
 		assert.Equal(t, p.BuilderVersion, expected)
 	})

@@ -6,7 +6,7 @@ import (
 	"context"
 	"net"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 )
 
 const maxSetStringLen = 350
@@ -82,7 +82,7 @@ func (c *Controller) deleteEndpointNameResolution(svcName, svcID, nID, eID, cont
 
 	// Delete container resolution mappings
 	if err := c.delContainerNameResolution(nID, eID, containerName, taskAliases, ip, method); err != nil {
-		log.G(context.TODO()).WithError(err).Warn("Error delting container from resolver")
+		log.G(context.TODO()).WithError(err).Warn("Error deleting container from resolver")
 	}
 
 	serviceID := svcID
@@ -216,7 +216,7 @@ func (c *Controller) cleanupServiceBindings(cleanupNID string) {
 func makeServiceCleanupFunc(c *Controller, s *service, nID, eID string, vip net.IP, ip net.IP) func() {
 	// ContainerName and taskAliases are not available here, this is still fine because the Service discovery
 	// cleanup already happened before. The only thing that rmServiceBinding is still doing here a part from the Load
-	// Balancer bookeeping, is to keep consistent the mapping of endpoint to IP.
+	// Balancer bookkeeping, is to keep consistent the mapping of endpoint to IP.
 	return func() {
 		if err := c.rmServiceBinding(s.name, s.id, nID, eID, "", vip, s.ingressPorts, s.aliases, []string{}, ip, "cleanupServiceBindings", false, true); err != nil {
 			log.G(context.TODO()).Errorf("Failed to remove service bindings for service %s network %s endpoint %s while cleanup: %v", s.id, nID, eID, err)

@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	mounttypes "github.com/docker/docker/api/types/mount"
@@ -28,21 +28,22 @@ import (
 	"github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
-	"github.com/docker/docker/layer"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
 	"github.com/docker/docker/oci"
-	"github.com/docker/docker/pkg/containerfs"
+	"github.com/docker/docker/pkg/atomicwriter"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/restartmanager"
 	"github.com/docker/docker/volume"
 	volumemounts "github.com/docker/docker/volume/mounts"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	agentexec "github.com/moby/swarmkit/v2/agent/exec"
 	"github.com/moby/sys/signal"
 	"github.com/moby/sys/symlink"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -62,11 +63,15 @@ type ExitStatus struct {
 // Container holds the structure defining a container object.
 type Container struct {
 	StreamConfig *stream.Config
-	// embed for Container to support states directly.
-	*State          `json:"State"` // Needed for Engine API version <= 1.11
-	Root            string         `json:"-"` // Path to the "home" of the container, including metadata.
-	BaseFS          string         `json:"-"` // Path to the graphdriver mountpoint
-	RWLayer         layer.RWLayer  `json:"-"`
+	// We embed [State] here so that Container supports states directly,
+	// but marshal it as a struct in JSON.
+	//
+	// State also provides a [sync.Mutex] which is used as lock for both
+	// the Container and State.
+	*State          `json:"State"`
+	Root            string  `json:"-"` // Path to the "home" of the container, including metadata.
+	BaseFS          string  `json:"-"` // Path to the graphdriver mountpoint
+	RWLayer         RWLayer `json:"-"`
 	ID              string
 	Created         time.Time
 	Managed         bool
@@ -79,7 +84,12 @@ type Container struct {
 	LogPath         string
 	Name            string
 	Driver          string
-	OS              string
+
+	// Deprecated: use [ImagePlatform.OS] instead.
+	// TODO: Remove, see https://github.com/moby/moby/issues/48892
+	OS string
+
+	ImagePlatform ocispec.Platform
 
 	RestartCount             int
 	HasBeenStartedBefore     bool
@@ -157,11 +167,17 @@ func (container *Container) FromDisk() error {
 		return err
 	}
 
-	// Ensure the operating system is set if blank. Assume it is the OS of the
-	// host OS if not, to ensure containers created before multiple-OS
-	// support are migrated
-	if container.OS == "" {
-		container.OS = runtime.GOOS
+	if container.OS != "" {
+		// OS was deprecated in favor of ImagePlatform
+		// Make sure we migrate the OS to ImagePlatform.OS.
+		if container.ImagePlatform.OS == "" {
+			container.ImagePlatform.OS = container.OS //nolint:staticcheck // ignore SA1019: field is deprecated
+		}
+	} else {
+		// Pre multiple-OS support containers have no OS set.
+		// Assume it is the host platform.
+		container.ImagePlatform = platforms.DefaultSpec()
+		container.OS = container.ImagePlatform.OS //nolint:staticcheck // ignore SA1019: field is deprecated
 	}
 
 	return container.readHostConfig()
@@ -176,7 +192,7 @@ func (container *Container) toDisk() (*Container, error) {
 	}
 
 	// Save container settings
-	f, err := ioutils.NewAtomicFileWriter(pth, 0o600)
+	f, err := atomicwriter.New(pth, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +217,12 @@ func (container *Container) toDisk() (*Container, error) {
 
 // CheckpointTo makes the Container's current state visible to queries, and persists state.
 // Callers must hold a Container lock.
-func (container *Container) CheckpointTo(store *ViewDB) error {
+func (container *Container) CheckpointTo(ctx context.Context, store *ViewDB) error {
+	ctx, span := otel.Tracer("").Start(ctx, "container.CheckpointTo", trace.WithAttributes(
+		attribute.String("container.ID", container.ID),
+		attribute.String("container.Name", container.Name)))
+	defer span.End()
+
 	deepCopy, err := container.toDisk()
 	if err != nil {
 		return err
@@ -251,7 +272,7 @@ func (container *Container) WriteHostConfig() (*containertypes.HostConfig, error
 		return nil, err
 	}
 
-	f, err := ioutils.NewAtomicFileWriter(pth, 0o600)
+	f, err := atomicwriter.New(pth, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -268,14 +289,40 @@ func (container *Container) WriteHostConfig() (*containertypes.HostConfig, error
 	return &deepCopy, nil
 }
 
+// CommitInMemory makes the Container's current state visible to queries,
+// but does not persist state.
+//
+// Callers must hold a Container lock.
+func (container *Container) CommitInMemory(store *ViewDB) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(container); err != nil {
+		return err
+	}
+
+	var deepCopy Container
+	if err := json.NewDecoder(&buf).Decode(&deepCopy); err != nil {
+		return err
+	}
+
+	buf.Reset()
+	if err := json.NewEncoder(&buf).Encode(container.HostConfig); err != nil {
+		return err
+	}
+	if err := json.NewDecoder(&buf).Decode(&deepCopy.HostConfig); err != nil {
+		return err
+	}
+
+	return store.Save(&deepCopy)
+}
+
 // SetupWorkingDirectory sets up the container's working directory as set in container.Config.WorkingDir
 func (container *Container) SetupWorkingDirectory(rootIdentity idtools.Identity) error {
 	if container.Config.WorkingDir == "" {
 		return nil
 	}
 
-	container.Config.WorkingDir = filepath.Clean(container.Config.WorkingDir)
-	pth, err := container.GetResourcePath(container.Config.WorkingDir)
+	workdir := filepath.Clean(container.Config.WorkingDir)
+	pth, err := container.GetResourcePath(workdir)
 	if err != nil {
 		return err
 	}
@@ -293,7 +340,7 @@ func (container *Container) SetupWorkingDirectory(rootIdentity idtools.Identity)
 }
 
 // GetResourcePath evaluates `path` in the scope of the container's BaseFS, with proper path
-// sanitisation. Symlinks are all scoped to the BaseFS of the container, as
+// sanitization. Symlinks are all scoped to the BaseFS of the container, as
 // though the container's BaseFS was `/`.
 //
 // The BaseFS of a container is the host-facing path which is bind-mounted as
@@ -311,8 +358,8 @@ func (container *Container) GetResourcePath(path string) (string, error) {
 		return "", errors.New("GetResourcePath: BaseFS of container " + container.ID + " is unexpectedly empty")
 	}
 	// IMPORTANT - These are paths on the OS where the daemon is running, hence
-	// any filepath operations must be done in an OS agnostic way.
-	r, e := containerfs.ResolveScopedPath(container.BaseFS, containerfs.CleanScopedPath(path))
+	// any filepath operations must be done in an OS-agnostic way.
+	r, e := symlink.FollowSymlinkInScope(filepath.Join(container.BaseFS, cleanScopedPath(path)), container.BaseFS)
 
 	// Log this here on the daemon side as there's otherwise no indication apart
 	// from the error being propagated all the way back to the client. This makes
@@ -323,8 +370,20 @@ func (container *Container) GetResourcePath(path string) (string, error) {
 	return r, e
 }
 
+// cleanScopedPath prepares the given path to be combined with a mount path or
+// a drive-letter. On Windows, it removes any existing driveletter (e.g. "C:").
+// The returned path is always prefixed with a [filepath.Separator].
+func cleanScopedPath(path string) string {
+	if len(path) >= 2 {
+		if v := filepath.VolumeName(path); len(v) > 0 {
+			path = path[len(v):]
+		}
+	}
+	return filepath.Join(string(filepath.Separator), path)
+}
+
 // GetRootResourcePath evaluates `path` in the scope of the container's root, with proper path
-// sanitisation. Symlinks are all scoped to the root of the container, as
+// sanitization. Symlinks are all scoped to the root of the container, as
 // though the container's root was `/`.
 //
 // The root of a container is the host-facing configuration metadata directory.
@@ -489,14 +548,14 @@ func (container *Container) AddMountPointWithVolume(destination string, vol volu
 }
 
 // UnmountVolumes unmounts all volumes
-func (container *Container) UnmountVolumes(volumeEventLog func(name string, action events.Action, attributes map[string]string)) error {
+func (container *Container) UnmountVolumes(ctx context.Context, volumeEventLog func(name string, action events.Action, attributes map[string]string)) error {
 	var errs []string
 	for _, volumeMount := range container.MountPoints {
 		if volumeMount.Volume == nil {
 			continue
 		}
 
-		if err := volumeMount.Cleanup(); err != nil {
+		if err := volumeMount.Cleanup(ctx); err != nil {
 			errs = append(errs, err.Error())
 			continue
 		}
@@ -594,32 +653,15 @@ func (container *Container) ResetRestartManager(resetCount bool) {
 	container.restartManager = nil
 }
 
-type attachContext struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	mu     sync.Mutex
-}
-
-// InitAttachContext initializes or returns existing context for attach calls to
-// track container liveness.
-func (container *Container) InitAttachContext() context.Context {
-	container.attachContext.mu.Lock()
-	defer container.attachContext.mu.Unlock()
-	if container.attachContext.ctx == nil {
-		container.attachContext.ctx, container.attachContext.cancel = context.WithCancel(context.Background())
-	}
-	return container.attachContext.ctx
+// AttachContext returns the context for attach calls to track container liveness.
+func (container *Container) AttachContext() context.Context {
+	return container.attachContext.init()
 }
 
 // CancelAttachContext cancels attach context. All attach calls should detach
 // after this call.
 func (container *Container) CancelAttachContext() {
-	container.attachContext.mu.Lock()
-	if container.attachContext.ctx != nil {
-		container.attachContext.cancel()
-		container.attachContext.ctx = nil
-	}
-	container.attachContext.mu.Unlock()
+	container.attachContext.cancel()
 }
 
 func (container *Container) startLogging() error {
@@ -721,7 +763,7 @@ func getConfigTargetPath(r *swarmtypes.ConfigReference) string {
 // CreateDaemonEnvironment creates a new environment variable slice for this container.
 func (container *Container) CreateDaemonEnvironment(tty bool, linkedEnv []string) []string {
 	// Setup environment
-	ctrOS := container.OS
+	ctrOS := container.ImagePlatform.OS
 	if ctrOS == "" {
 		ctrOS = runtime.GOOS
 	}

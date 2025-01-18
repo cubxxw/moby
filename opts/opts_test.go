@@ -10,24 +10,74 @@ import (
 )
 
 func TestValidateIPAddress(t *testing.T) {
-	if ret, err := ValidateIPAddress(`1.2.3.4`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`1.2.3.4`) got %s %s", ret, err)
+	tests := []struct {
+		doc         string
+		input       string
+		expectedOut string
+		expectedErr string
+	}{
+		{
+			doc:         "IPv4 loopback",
+			input:       `127.0.0.1`,
+			expectedOut: `127.0.0.1`,
+		},
+		{
+			doc:         "IPv4 loopback with whitespace",
+			input:       ` 127.0.0.1 `,
+			expectedOut: `127.0.0.1`,
+		},
+		{
+			doc:         "IPv6 loopback long form",
+			input:       `0:0:0:0:0:0:0:1`,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 loopback",
+			input:       `::1`,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 loopback with whitespace",
+			input:       ` ::1 `,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 lowercase",
+			input:       `2001:db8::68`,
+			expectedOut: `2001:db8::68`,
+		},
+		{
+			doc:         "IPv6 uppercase",
+			input:       `2001:DB8::68`,
+			expectedOut: `2001:db8::68`,
+		},
+		{
+			doc:         "IPv6 with brackets",
+			input:       `[::1]`,
+			expectedErr: `IP address is not correctly formatted: [::1]`,
+		},
+		{
+			doc:         "IPv4 partial",
+			input:       `127`,
+			expectedErr: `IP address is not correctly formatted: 127`,
+		},
+		{
+			doc:         "random invalid string",
+			input:       `random invalid string`,
+			expectedErr: `IP address is not correctly formatted: random invalid string`,
+		},
 	}
 
-	if ret, err := ValidateIPAddress(`127.0.0.1`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`127.0.0.1`) got %s %s", ret, err)
-	}
-
-	if ret, err := ValidateIPAddress(`::1`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`::1`) got %s %s", ret, err)
-	}
-
-	if ret, err := ValidateIPAddress(`127`); err == nil || ret != "" {
-		t.Fatalf("ValidateIPAddress(`127`) got %s %s", ret, err)
-	}
-
-	if ret, err := ValidateIPAddress(`random invalid string`); err == nil || ret != "" {
-		t.Fatalf("ValidateIPAddress(`random invalid string`) got %s %s", ret, err)
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			actualOut, actualErr := ValidateIPAddress(tc.input)
+			assert.Check(t, is.Equal(tc.expectedOut, actualOut))
+			if tc.expectedErr == "" {
+				assert.Check(t, actualErr)
+			} else {
+				assert.Check(t, is.Error(actualErr, tc.expectedErr))
+			}
+		})
 	}
 }
 
@@ -91,7 +141,7 @@ func TestListOptsWithoutValidator(t *testing.T) {
 }
 
 func TestListOptsWithValidator(t *testing.T) {
-	// Re-using logOptsvalidator (used by MapOpts)
+	// Re-using logOptsValidator (used by MapOpts)
 	o := NewListOpts(logOptsValidator)
 	o.Set("foo")
 	if o.String() != "" {
@@ -175,14 +225,14 @@ func TestValidateDNSSearch(t *testing.T) {
 }
 
 func TestValidateLabel(t *testing.T) {
-	testCases := []struct {
+	tests := []struct {
 		name           string
 		label          string
 		expectedResult string
 		expectedErr    string
 	}{
 		{
-			name:        "lable with bad attribute format",
+			name:        "label with bad attribute format",
 			label:       "label",
 			expectedErr: "bad attribute format: label",
 		},
@@ -248,18 +298,17 @@ func TestValidateLabel(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			result, err := ValidateLabel(testCase.label)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ValidateLabel(tc.label)
 
-			if testCase.expectedErr != "" {
-				assert.Error(t, err, testCase.expectedErr)
+			if tc.expectedErr != "" {
+				assert.Error(t, err, tc.expectedErr)
 			} else {
 				assert.NilError(t, err)
 			}
-			if testCase.expectedResult != "" {
-				assert.Check(t, is.Equal(result, testCase.expectedResult))
+			if tc.expectedResult != "" {
+				assert.Check(t, is.Equal(result, tc.expectedResult))
 			}
 		})
 	}

@@ -12,14 +12,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/internal/unshare"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/osl/kernel"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
@@ -31,19 +32,14 @@ func init() {
 	// by func (*Namespace) InvokeFunc() or func setIPv6() below from
 	// being scheduled onto that thread. Changes to the network namespace of
 	// the initial thread alter /proc/self/ns/net, which would break any
-	// code which (incorrectly) assumes that that file is the network
+	// code which (incorrectly) assumes that the file is the network
 	// namespace for the thread it is currently executing on.
 	runtime.LockOSThread()
 }
 
 var (
-	once             sync.Once
-	garbagePathMap   = make(map[string]bool)
-	gpmLock          sync.Mutex
-	gpmWg            sync.WaitGroup
-	gpmCleanupPeriod = 60 * time.Second
-	gpmChan          = make(chan chan struct{})
-	netnsBasePath    = filepath.Join(defaultPrefix, "netns")
+	once          sync.Once
+	netnsBasePath = filepath.Join(defaultPrefix, "netns")
 )
 
 // SetBasePath sets the base url prefix for the ns path
@@ -60,78 +56,6 @@ func createBasePath() {
 	if err != nil {
 		panic("Could not create net namespace path directory")
 	}
-
-	// Start the garbage collection go routine
-	go removeUnusedPaths()
-}
-
-func removeUnusedPaths() {
-	gpmLock.Lock()
-	period := gpmCleanupPeriod
-	gpmLock.Unlock()
-
-	ticker := time.NewTicker(period)
-	for {
-		var (
-			gc   chan struct{}
-			gcOk bool
-		)
-
-		select {
-		case <-ticker.C:
-		case gc, gcOk = <-gpmChan:
-		}
-
-		gpmLock.Lock()
-		pathList := make([]string, 0, len(garbagePathMap))
-		for path := range garbagePathMap {
-			pathList = append(pathList, path)
-		}
-		garbagePathMap = make(map[string]bool)
-		gpmWg.Add(1)
-		gpmLock.Unlock()
-
-		for _, path := range pathList {
-			os.Remove(path)
-		}
-
-		gpmWg.Done()
-		if gcOk {
-			close(gc)
-		}
-	}
-}
-
-func addToGarbagePaths(path string) {
-	gpmLock.Lock()
-	garbagePathMap[path] = true
-	gpmLock.Unlock()
-}
-
-func removeFromGarbagePaths(path string) {
-	gpmLock.Lock()
-	delete(garbagePathMap, path)
-	gpmLock.Unlock()
-}
-
-// GC triggers garbage collection of namespace path right away
-// and waits for it.
-func GC() {
-	gpmLock.Lock()
-	if len(garbagePathMap) == 0 {
-		// No need for GC if map is empty
-		gpmLock.Unlock()
-		return
-	}
-	gpmLock.Unlock()
-
-	// if content exists in the garbage paths
-	// we can trigger GC to run, providing a
-	// channel to be notified on completion
-	waitGC := make(chan struct{})
-	gpmChan <- waitGC
-	// wait for GC completion
-	<-waitGC
 }
 
 // GenerateKey generates a sandbox key based on the passed
@@ -197,7 +121,7 @@ func NewSandbox(key string, osCreate, isRestore bool) (*Namespace, error) {
 	}
 	defer sboxNs.Close()
 
-	n.nlHandle, err = netlink.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
+	n.nlHandle, err = nlwrap.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a netlink handle: %v", err)
 	}
@@ -205,16 +129,6 @@ func NewSandbox(key string, osCreate, isRestore bool) (*Namespace, error) {
 	err = n.nlHandle.SetSocketTimeout(ns.NetlinkSocketsTimeout)
 	if err != nil {
 		log.G(context.TODO()).Warnf("Failed to set the timeout on the sandbox netlink handle sockets: %v", err)
-	}
-	// In live-restore mode, IPV6 entries are getting cleaned up due to below code
-	// We should retain IPV6 configurations in live-restore mode when Docker Daemon
-	// comes back. It should work as it is on other cases
-	// As starting point, disable IPv6 on all interfaces
-	if !isRestore && !n.isDefault {
-		err = setIPv6(n.path, "all", false)
-		if err != nil {
-			log.G(context.TODO()).Warnf("Failed to disable IPv6 on all interfaces on network namespace %q: %v", n.path, err)
-		}
 	}
 
 	if err = n.loopbackUp(); err != nil {
@@ -226,7 +140,11 @@ func NewSandbox(key string, osCreate, isRestore bool) (*Namespace, error) {
 }
 
 func mountNetworkNamespace(basePath string, lnPath string) error {
-	return syscall.Mount(basePath, lnPath, "bind", syscall.MS_BIND, "")
+	err := syscall.Mount(basePath, lnPath, "bind", syscall.MS_BIND, "")
+	if err != nil {
+		return fmt.Errorf("bind-mount %s -> %s: %w", basePath, lnPath, err)
+	}
+	return nil
 }
 
 // GetSandboxForExternalKey returns sandbox object for the supplied path
@@ -246,7 +164,7 @@ func GetSandboxForExternalKey(basePath string, key string) (*Namespace, error) {
 	}
 	defer sboxNs.Close()
 
-	n.nlHandle, err = netlink.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
+	n.nlHandle, err = nlwrap.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a netlink handle: %v", err)
 	}
@@ -254,12 +172,6 @@ func GetSandboxForExternalKey(basePath string, key string) (*Namespace, error) {
 	err = n.nlHandle.SetSocketTimeout(ns.NetlinkSocketsTimeout)
 	if err != nil {
 		log.G(context.TODO()).Warnf("Failed to set the timeout on the sandbox netlink handle sockets: %v", err)
-	}
-
-	// As starting point, disable IPv6 on all interfaces
-	err = setIPv6(n.path, "all", false)
-	if err != nil {
-		log.G(context.TODO()).Warnf("Failed to disable IPv6 on all interfaces on network namespace %q: %v", n.path, err)
 	}
 
 	if err = n.loopbackUp(); err != nil {
@@ -296,17 +208,9 @@ func unmountNamespaceFile(path string) {
 
 func createNamespaceFile(path string) error {
 	once.Do(createBasePath)
-	// Remove it from garbage collection list if present
-	removeFromGarbagePaths(path)
 
 	// If the path is there unmount it first
 	unmountNamespaceFile(path)
-
-	// wait for garbage collection to complete if it is in progress
-	// before trying to create the file.
-	//
-	// TODO(aker): This garbage-collection was for a kernel bug in kernels 3.18-4.0.1: is this still needed on current kernels (and on kernel 3.10)? see https://github.com/moby/moby/pull/46315/commits/c0a6beba8e61d4019e1806d5241ba22007072ca2#r1331327103
-	gpmWg.Wait()
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -321,17 +225,20 @@ func createNamespaceFile(path string) error {
 // or sets the gateway etc. It holds a list of Interfaces, routes etc., and more
 // can be added dynamically.
 type Namespace struct {
-	path         string
-	iFaces       []*Interface
-	gw           net.IP
-	gwv6         net.IP
-	staticRoutes []*types.StaticRoute
-	neighbors    []*neigh
-	nextIfIndex  map[string]int
-	isDefault    bool
-	nlHandle     *netlink.Handle
-	loV6Enabled  bool
-	mu           sync.Mutex
+	path                string
+	iFaces              []*Interface
+	gw                  net.IP
+	gwv6                net.IP
+	defRoute4SrcName    string
+	defRoute6SrcName    string
+	staticRoutes        []*types.StaticRoute
+	neighbors           []*neigh
+	nextIfIndex         map[string]int
+	isDefault           bool
+	ipv6LoEnabledOnce   sync.Once
+	ipv6LoEnabledCached bool
+	nlHandle            nlwrap.Handle
+	mu                  sync.Mutex
 }
 
 // Interfaces returns the collection of Interface previously added with the AddInterface
@@ -342,6 +249,17 @@ func (n *Namespace) Interfaces() []*Interface {
 	ifaces := make([]*Interface, len(n.iFaces))
 	copy(ifaces, n.iFaces)
 	return ifaces
+}
+
+func (n *Namespace) ifaceBySrcName(srcName string) *Interface {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, iface := range n.iFaces {
+		if iface.srcName == srcName {
+			return iface
+		}
+	}
+	return nil
 }
 
 func (n *Namespace) loopbackUp() error {
@@ -466,22 +384,22 @@ func (n *Namespace) Key() string {
 
 // Destroy destroys the sandbox.
 func (n *Namespace) Destroy() error {
-	if n.nlHandle != nil {
-		n.nlHandle.Close()
-	}
+	n.nlHandle.Handle.Close()
 	// Assuming no running process is executing in this network namespace,
 	// unmounting is sufficient to destroy it.
 	if err := syscall.Unmount(n.path, syscall.MNT_DETACH); err != nil {
 		return err
 	}
 
-	// Stash it into the garbage collection list
-	addToGarbagePaths(n.path)
+	// Remove the path where the netns was mounted
+	if err := os.Remove(n.path); err != nil {
+		log.G(context.TODO()).WithError(err).Error("error removing namespace file")
+	}
 	return nil
 }
 
-// Restore restores the network namespace.
-func (n *Namespace) Restore(interfaces map[Iface][]IfaceOption, routes []*types.StaticRoute, gw net.IP, gw6 net.IP) error {
+// RestoreInterfaces restores the network namespace's interfaces.
+func (n *Namespace) RestoreInterfaces(interfaces map[Iface][]IfaceOption) error {
 	// restore interfaces
 	for iface, opts := range interfaces {
 		i, err := newInterface(n, iface.SrcName, iface.DstPrefix, opts...)
@@ -504,18 +422,31 @@ func (n *Namespace) Restore(interfaces map[Iface][]IfaceOption, routes []*types.
 					break
 				}
 				// find the interface name by ip
+				findIfname := func(needle *net.IPNet, haystack []netlink.Addr) (string, bool) {
+					for _, addr := range haystack {
+						if addr.IPNet.String() == needle.String() {
+							return ifaceName, true
+						}
+					}
+					return "", false
+				}
 				if i.address != nil {
 					addresses, err := n.nlHandle.AddrList(link, netlink.FAMILY_V4)
 					if err != nil {
 						return err
 					}
-					for _, addr := range addresses {
-						if addr.IPNet.String() == i.address.String() {
-							i.dstName = ifaceName
-							break
-						}
+					if name, found := findIfname(i.address, addresses); found {
+						i.dstName = name
+						break
 					}
-					if i.dstName == ifaceName {
+				}
+				if i.addressIPv6 != nil {
+					addresses, err := n.nlHandle.AddrList(link, netlink.FAMILY_V6)
+					if err != nil {
+						return err
+					}
+					if name, found := findIfname(i.address, addresses); found {
+						i.dstName = name
 						break
 					}
 				}
@@ -541,46 +472,66 @@ func (n *Namespace) Restore(interfaces map[Iface][]IfaceOption, routes []*types.
 			n.mu.Unlock()
 		}
 	}
-
-	// restore routes and gateways
-	n.mu.Lock()
-	n.staticRoutes = append(n.staticRoutes, routes...)
-	if len(gw) > 0 {
-		n.gw = gw
-	}
-	if len(gw6) > 0 {
-		n.gwv6 = gw6
-	}
-	n.mu.Unlock()
 	return nil
 }
 
-// Checks whether IPv6 needs to be enabled/disabled on the loopback interface
-func (n *Namespace) checkLoV6() {
-	var (
-		enable = false
-		action = "disable"
-	)
-
+func (n *Namespace) RestoreRoutes(routes []*types.StaticRoute) {
 	n.mu.Lock()
-	for _, iface := range n.iFaces {
-		if iface.AddressIPv6() != nil {
-			enable = true
-			action = "enable"
-			break
-		}
-	}
-	n.mu.Unlock()
+	defer n.mu.Unlock()
+	n.staticRoutes = append(n.staticRoutes, routes...)
+}
 
-	if n.loV6Enabled == enable {
+func (n *Namespace) RestoreGateway(ipv4 bool, gw net.IP, srcName string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if gw == nil {
+		// There's no gateway address, so the default route is bound to the interface.
+		if ipv4 {
+			n.defRoute4SrcName = srcName
+		} else {
+			n.defRoute6SrcName = srcName
+		}
 		return
 	}
 
-	if err := setIPv6(n.path, "lo", enable); err != nil {
-		log.G(context.TODO()).Warnf("Failed to %s IPv6 on loopback interface on network namespace %q: %v", action, n.path, err)
+	if ipv4 {
+		n.gw = gw
+	} else {
+		n.gwv6 = gw
 	}
+}
 
-	n.loV6Enabled = enable
+// IPv6LoEnabled returns true if the loopback interface had an IPv6 address when
+// last checked. It's always checked on the first call, and by RefreshIPv6LoEnabled.
+// ('::1' is assigned by the kernel if IPv6 is enabled.)
+func (n *Namespace) IPv6LoEnabled() bool {
+	n.ipv6LoEnabledOnce.Do(func() {
+		n.RefreshIPv6LoEnabled()
+	})
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.ipv6LoEnabledCached
+}
+
+// RefreshIPv6LoEnabled refreshes the cached result returned by IPv6LoEnabled.
+func (n *Namespace) RefreshIPv6LoEnabled() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// If anything goes wrong, assume no-IPv6.
+	n.ipv6LoEnabledCached = false
+	iface, err := n.nlHandle.LinkByName("lo")
+	if err != nil {
+		log.G(context.TODO()).WithError(err).Warn("Unable to find 'lo' to determine IPv6 support")
+		return
+	}
+	addrs, err := n.nlHandle.AddrList(iface, nl.FAMILY_V6)
+	if err != nil {
+		log.G(context.TODO()).WithError(err).Warn("Unable to get 'lo' addresses to determine IPv6 support")
+		return
+	}
+	n.ipv6LoEnabledCached = len(addrs) > 0
 }
 
 // ApplyOSTweaks applies operating system specific knobs on the sandbox.
@@ -641,28 +592,41 @@ func setIPv6(nspath, iface string, enable bool) error {
 			}
 		}()
 
-		var (
-			action = "disable"
-			value  = byte('1')
-			path   = fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", iface)
-		)
-
+		path := "/proc/sys/net/ipv6/conf/" + iface + "/disable_ipv6"
+		value := byte('1')
 		if enable {
-			action = "enable"
 			value = '0'
 		}
 
-		if _, err := os.Stat(path); err != nil {
+		if curVal, err := os.ReadFile(path); err != nil {
 			if os.IsNotExist(err) {
-				log.G(context.TODO()).WithError(err).Warn("Cannot configure IPv6 forwarding on container interface. Has IPv6 been disabled in this node's kernel?")
+				if enable {
+					log.G(context.TODO()).WithError(err).Warn("Cannot enable IPv6 on container interface. Has IPv6 been disabled in this node's kernel?")
+				} else {
+					log.G(context.TODO()).WithError(err).Debug("Not disabling IPv6 on container interface. Has IPv6 been disabled in this node's kernel?")
+				}
 				return
 			}
 			errCh <- err
 			return
+		} else if len(curVal) > 0 && curVal[0] == value {
+			// Nothing to do, the setting is already correct.
+			return
 		}
 
-		if err = os.WriteFile(path, []byte{value, '\n'}, 0o644); err != nil {
-			errCh <- fmt.Errorf("failed to %s IPv6 forwarding for container's interface %s: %w", action, iface, err)
+		if err = os.WriteFile(path, []byte{value, '\n'}, 0o644); err != nil || os.Getenv("DOCKER_TEST_RO_DISABLE_IPV6") != "" {
+			logger := log.G(context.TODO()).WithFields(log.Fields{
+				"error":     err,
+				"interface": iface,
+			})
+			if enable {
+				// The user asked for IPv6 on the interface, and we can't give it to them.
+				// But, in line with the IsNotExist case above, just log.
+				logger.Warn("Cannot enable IPv6 on container interface, continuing.")
+			} else {
+				logger.Error("Cannot disable IPv6 on container interface.")
+				errCh <- errors.New("failed to disable IPv6 on container's interface " + iface)
+			}
 			return
 		}
 	}()

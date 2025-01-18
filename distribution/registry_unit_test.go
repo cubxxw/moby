@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/registry"
 	registrypkg "github.com/docker/docker/registry"
@@ -40,23 +40,12 @@ func testTokenPassThru(t *testing.T, ts *httptest.Server) {
 		t.Fatalf("could not parse url from test server: %v", err)
 	}
 
-	endpoint := registrypkg.APIEndpoint{
-		Mirror:       false,
-		URL:          uri,
-		Official:     false,
-		TrimHostname: false,
-		TLSConfig:    nil,
-	}
 	n, _ := reference.ParseNormalizedNamed("testremotename")
 	repoInfo := &registrypkg.RepositoryInfo{
 		Name: n,
 		Index: &registry.IndexInfo{
-			Name:     "testrepo",
-			Mirrors:  nil,
-			Secure:   false,
-			Official: false,
+			Name: "testrepo",
 		},
-		Official: false,
 	}
 	imagePullConfig := &ImagePullConfig{
 		Config: Config{
@@ -66,7 +55,7 @@ func testTokenPassThru(t *testing.T, ts *httptest.Server) {
 			},
 		},
 	}
-	p := newPuller(endpoint, repoInfo, imagePullConfig, nil)
+	p := newPuller(registrypkg.APIEndpoint{URL: uri}, repoInfo, imagePullConfig, nil)
 	ctx := context.Background()
 	p.repo, err = newRepository(ctx, p.repoInfo, p.endpoint, p.config.MetaHeaders, p.config.AuthConfig, "pull")
 	if err != nil {

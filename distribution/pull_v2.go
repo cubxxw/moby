@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
@@ -86,18 +86,7 @@ func (p *puller) pull(ctx context.Context, ref reference.Named) (err error) {
 		return err
 	}
 
-	if err = p.pullRepository(ctx, ref); err != nil {
-		if _, ok := err.(fallbackError); ok {
-			return err
-		}
-		if continueOnError(err, p.endpoint.Mirror) {
-			return fallbackError{
-				err:         err,
-				transportOK: true,
-			}
-		}
-	}
-	return err
+	return p.pullRepository(ctx, ref)
 }
 
 func (p *puller) pullRepository(ctx context.Context, ref reference.Named) (err error) {
@@ -435,9 +424,12 @@ func (p *puller) pullTag(ctx context.Context, ref reference.Named, platform *oci
 
 	switch v := manifest.(type) {
 	case *schema1.SignedManifest:
-		msg := DeprecatedSchema1ImageMessage(ref)
-		log.G(ctx).Warn(msg)
-		progress.Message(p.config.ProgressOutput, "", msg)
+		err := DeprecatedSchema1ImageError(ref)
+		log.G(ctx).Warn(err.Error())
+		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+			return false, err
+		}
+		progress.Message(p.config.ProgressOutput, "", err.Error())
 
 		id, manifestDigest, err = p.pullSchema1(ctx, ref, v, platform)
 		if err != nil {
@@ -522,7 +514,7 @@ func (p *puller) pullSchema1(ctx context.Context, ref reference.Reference, unver
 	}
 
 	var verifiedManifest *schema1.Manifest
-	verifiedManifest, err = verifySchema1Manifest(unverifiedManifest, ref)
+	verifiedManifest, err = verifySchema1Manifest(ctx, unverifiedManifest, ref)
 	if err != nil {
 		return "", "", err
 	}
@@ -868,9 +860,12 @@ func (p *puller) pullManifestList(ctx context.Context, ref reference.Named, mfst
 
 		switch v := manifest.(type) {
 		case *schema1.SignedManifest:
-			msg := DeprecatedSchema1ImageMessage(ref)
-			log.G(ctx).Warn(msg)
-			progress.Message(p.config.ProgressOutput, "", msg)
+			err := DeprecatedSchema1ImageError(ref)
+			log.G(ctx).Warn(err.Error())
+			if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+				return "", "", err
+			}
+			progress.Message(p.config.ProgressOutput, "", err.Error())
 
 			platform := toOCIPlatform(match.Platform)
 			id, _, err = p.pullSchema1(ctx, manifestRef, v, platform)
@@ -941,7 +936,13 @@ type noMatchesErr struct {
 }
 
 func (e noMatchesErr) Error() string {
-	return fmt.Sprintf("no matching manifest for %s in the manifest list entries", formatPlatform(e.platform))
+	var p string
+	if e.platform.OS == "" {
+		p = platforms.FormatAll(platforms.DefaultSpec())
+	} else {
+		p = platforms.FormatAll(e.platform)
+	}
+	return fmt.Sprintf("no matching manifest for %s in the manifest list entries", p)
 }
 
 func retry(ctx context.Context, maxAttempts int, sleep time.Duration, f func(ctx context.Context) error) (err error) {
@@ -995,7 +996,7 @@ func schema2ManifestDigest(ref reference.Named, mfst distribution.Manifest) (dig
 	return digest.FromBytes(canonical), nil
 }
 
-func verifySchema1Manifest(signedManifest *schema1.SignedManifest, ref reference.Reference) (m *schema1.Manifest, err error) {
+func verifySchema1Manifest(ctx context.Context, signedManifest *schema1.SignedManifest, ref reference.Reference) (*schema1.Manifest, error) {
 	// If pull by digest, then verify the manifest digest. NOTE: It is
 	// important to do this first, before any other content validation. If the
 	// digest cannot be verified, don't even bother with those other things.
@@ -1006,12 +1007,12 @@ func verifySchema1Manifest(signedManifest *schema1.SignedManifest, ref reference
 		}
 		if !verifier.Verified() {
 			err := fmt.Errorf("image verification failed for digest %s", digested.Digest())
-			log.G(context.TODO()).Error(err)
+			log.G(ctx).Error(err)
 			return nil, err
 		}
 	}
-	m = &signedManifest.Manifest
 
+	m := &signedManifest.Manifest
 	if m.SchemaVersion != 1 {
 		return nil, fmt.Errorf("unsupported schema version %d for %q", m.SchemaVersion, reference.FamiliarString(ref))
 	}

@@ -1,4 +1,4 @@
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
 	"os"
@@ -7,16 +7,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/parsers/kernel"
-	"github.com/docker/docker/pkg/system"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/skip"
 )
@@ -52,9 +47,9 @@ func copyDir(src, dst string) error {
 type FileType uint32
 
 const (
-	Regular FileType = iota
-	Dir
-	Symlink
+	Regular FileType = 0
+	Dir     FileType = 1
+	Symlink FileType = 2
 )
 
 type FileData struct {
@@ -111,7 +106,7 @@ func provisionSampleDir(t *testing.T, root string, files []FileData) {
 
 		if info.filetype != Symlink {
 			// Set a consistent ctime, atime for all files and dirs
-			err := system.Chtimes(p, now, now)
+			err := chtimes(p, now, now)
 			assert.NilError(t, err)
 		}
 	}
@@ -250,16 +245,8 @@ func TestChangesWithChangesGH13590(t *testing.T) {
 
 // Create a directory, copy it, make sure we report no changes between the two
 func TestChangesDirsEmpty(t *testing.T) {
-	// Note we parse kernel.GetKernelVersion rather than system.GetOSVersion
-	// as test binaries aren't manifested, so would otherwise report the wrong
-	// build number.
 	if runtime.GOOS == "windows" {
-		v, err := kernel.GetKernelVersion()
-		assert.NilError(t, err)
-		build, _ := strconv.Atoi(strings.Split(strings.SplitN(v.String(), " ", 3)[2][1:], ".")[0])
-		if build >= osversion.V19H1 {
-			t.Skip("FIXME: broken on Windows 1903 and up; see #39846")
-		}
+		t.Skip("FIXME: broken on Windows 1903 and up; see https://github.com/moby/moby/pull/39846")
 	}
 
 	src, err := os.MkdirTemp("", "docker-changes-test")
@@ -304,7 +291,7 @@ func mutateSampleDir(t *testing.T, root string) {
 	assert.NilError(t, err)
 
 	// Touch file
-	err = system.Chtimes(path.Join(root, "file4"), time.Now().Add(time.Second), time.Now().Add(time.Second))
+	err = chtimes(path.Join(root, "file4"), time.Now().Add(time.Second), time.Now().Add(time.Second))
 	assert.NilError(t, err)
 
 	// Replace file with dir
@@ -339,21 +326,13 @@ func mutateSampleDir(t *testing.T, root string) {
 	assert.NilError(t, err)
 
 	// Touch dir
-	err = system.Chtimes(path.Join(root, "dir3"), time.Now().Add(time.Second), time.Now().Add(time.Second))
+	err = chtimes(path.Join(root, "dir3"), time.Now().Add(time.Second), time.Now().Add(time.Second))
 	assert.NilError(t, err)
 }
 
 func TestChangesDirsMutated(t *testing.T) {
-	// Note we parse kernel.GetKernelVersion rather than system.GetOSVersion
-	// as test binaries aren't manifested, so would otherwise report the wrong
-	// build number.
 	if runtime.GOOS == "windows" {
-		v, err := kernel.GetKernelVersion()
-		assert.NilError(t, err)
-		build, _ := strconv.Atoi(strings.Split(strings.SplitN(v.String(), " ", 3)[2][1:], ".")[0])
-		if build >= osversion.V19H1 {
-			t.Skip("FIXME: broken on Windows 1903 and up; see #39846")
-		}
+		t.Skip("FIXME: broken on Windows 1903 and up; see https://github.com/moby/moby/pull/39846")
 	}
 
 	src, err := os.MkdirTemp("", "docker-changes-test")
@@ -448,7 +427,7 @@ func TestApplyLayer(t *testing.T) {
 	layer, err := ExportChanges(dst, changes, idtools.IdentityMapping{})
 	assert.NilError(t, err)
 
-	layerCopy, err := NewTempArchive(layer, "")
+	layerCopy, err := newTempArchive(layer, "")
 	assert.NilError(t, err)
 
 	_, err = ApplyLayer(src, layerCopy)

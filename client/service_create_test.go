@@ -28,6 +28,18 @@ func TestServiceCreateError(t *testing.T) {
 	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
 }
 
+// TestServiceCreateConnectionError verifies that connection errors occurring
+// during API-version negotiation are not shadowed by API-version errors.
+//
+// Regression test for https://github.com/docker/cli/issues/4890
+func TestServiceCreateConnectionError(t *testing.T) {
+	client, err := NewClientWithOpts(WithAPIVersionNegotiation(), WithHost("tcp://no-such-host.invalid"))
+	assert.NilError(t, err)
+
+	_, err = client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, types.ServiceCreateOptions{})
+	assert.Check(t, is.ErrorType(err, IsErrConnectionFailed))
+}
+
 func TestServiceCreate(t *testing.T) {
 	expectedURL := "/services/create"
 	client := &Client{
@@ -38,7 +50,7 @@ func TestServiceCreate(t *testing.T) {
 			if req.Method != http.MethodPost {
 				return nil, fmt.Errorf("expected POST method, got %s", req.Method)
 			}
-			b, err := json.Marshal(types.ServiceCreateResponse{
+			b, err := json.Marshal(swarm.ServiceCreateResponse{
 				ID: "service_id",
 			})
 			if err != nil {
@@ -77,7 +89,7 @@ func TestServiceCreateCompatiblePlatforms(t *testing.T) {
 				assert.Check(t, is.Len(serviceSpec.TaskTemplate.Placement.Platforms, 1))
 
 				p := serviceSpec.TaskTemplate.Placement.Platforms[0]
-				b, err := json.Marshal(types.ServiceCreateResponse{
+				b, err := json.Marshal(swarm.ServiceCreateResponse{
 					ID: "service_" + p.OS + "_" + p.Architecture,
 				})
 				if err != nil {
@@ -153,7 +165,7 @@ func TestServiceCreateDigestPinning(t *testing.T) {
 				}
 				serviceCreateImage = service.TaskTemplate.ContainerSpec.Image
 
-				b, err := json.Marshal(types.ServiceCreateResponse{
+				b, err := json.Marshal(swarm.ServiceCreateResponse{
 					ID: "service_id",
 				})
 				if err != nil {

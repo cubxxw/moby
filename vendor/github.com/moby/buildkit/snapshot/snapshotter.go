@@ -6,18 +6,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/pkg/userns"
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/docker/docker/pkg/idtools"
+	"github.com/moby/buildkit/executor"
+	"github.com/moby/sys/userns"
 	"github.com/pkg/errors"
 )
 
-type Mountable interface {
-	// ID() string
-	Mount() ([]mount.Mount, func() error, error)
-	IdentityMapping() *idtools.IdentityMapping
-}
+type Mountable = executor.MountableRef
 
 // Snapshotter defines interface that any snapshot implementation should satisfy
 type Snapshotter interface {

@@ -2,17 +2,17 @@ package oci
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/userns"
-	"github.com/containerd/continuity/fs"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/moby/buildkit/executor"
@@ -20,6 +20,7 @@ import (
 	"github.com/moby/buildkit/util/network"
 	rootlessmountopts "github.com/moby/buildkit/util/rootless/mountopts"
 	traceexec "github.com/moby/buildkit/util/tracing/exec"
+	"github.com/moby/sys/userns"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/pkg/errors"
@@ -83,11 +84,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		ctx = namespaces.WithNamespace(ctx, "buildkit")
 	}
 
-	if mountOpts, err := generateMountOpts(resolvConf, hostsFile); err == nil {
-		opts = append(opts, mountOpts...)
-	} else {
-		return nil, nil, err
-	}
+	opts = append(opts, generateMountOpts(resolvConf, hostsFile)...)
 
 	if securityOpts, err := generateSecurityOpts(meta.SecurityMode, apparmorProfile, selinuxB); err == nil {
 		opts = append(opts, securityOpts...)
@@ -125,7 +122,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 	}
 
 	opts = append(opts,
-		oci.WithProcessArgs(meta.Args...),
+		withProcessArgs(meta.Args...),
 		oci.WithEnv(meta.Env),
 		oci.WithProcessCwd(meta.Cwd),
 		oci.WithNewPrivileges,
@@ -134,10 +131,10 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 
 	s, err := oci.GenerateSpec(ctx, nil, c, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.WithStack(err)
 	}
 
-	if cgroupNamespaceSupported() {
+	if cgroupV2NamespaceSupported() {
 		s.Linux.Namespaces = append(s.Linux.Namespaces, specs.LinuxNamespace{
 			Type: specs.CgroupNamespace,
 		})
@@ -150,7 +147,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 
 	// set the networking information on the spec
 	if err := namespace.Set(s); err != nil {
-		return nil, nil, err
+		return nil, nil, errors.WithStack(err)
 	}
 
 	sm := &submounts{}
@@ -182,9 +179,25 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		}
 		releasers = append(releasers, release)
 		for _, mount := range mounts {
+			mount, release, err := compactLongOverlayMount(mount, m.Readonly)
+			if err != nil {
+				releaseAll()
+				return nil, nil, err
+			}
+
+			if release != nil {
+				releasers = append(releasers, release)
+			}
+
 			mount, err = sm.subMount(mount, m.Selector)
 			if err != nil {
 				releaseAll()
+				var os *os.PathError
+				if errors.As(err, &os) {
+					if strings.HasSuffix(os.Path, m.Selector) {
+						os.Path = m.Selector
+					}
+				}
 				return nil, nil, err
 			}
 			s.Mounts = append(s.Mounts, specs.Mount{
@@ -197,7 +210,12 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 	}
 
 	if tracingSocket != "" {
-		s.Mounts = append(s.Mounts, getTracingSocketMount(tracingSocket))
+		// moby/buildkit#4764
+		if _, err := os.Stat(tracingSocket); err == nil {
+			if mount := getTracingSocketMount(tracingSocket); mount != nil {
+				s.Mounts = append(s.Mounts, *mount)
+			}
+		}
 	}
 
 	s.Mounts = dedupMounts(s.Mounts)
@@ -205,6 +223,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 	if userns.RunningInUserNS() {
 		s.Mounts, err = rootlessmountopts.FixUpOCI(s.Mounts)
 		if err != nil {
+			releaseAll()
 			return nil, nil, err
 		}
 	}
@@ -215,6 +234,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 type mountRef struct {
 	mount   mount.Mount
 	unmount func() error
+	subRefs map[string]mountRef
 }
 
 type submounts struct {
@@ -230,12 +250,19 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 	}
 	h, err := hashstructure.Hash(m, hashstructure.FormatV2, nil)
 	if err != nil {
-		return mount.Mount{}, nil
+		return mount.Mount{}, errors.WithStack(err)
 	}
 	if mr, ok := s.m[h]; ok {
-		sm, err := sub(mr.mount, subPath)
+		if sm, ok := mr.subRefs[subPath]; ok {
+			return sm.mount, nil
+		}
+		sm, unmount, err := sub(mr.mount, subPath)
 		if err != nil {
-			return mount.Mount{}, nil
+			return mount.Mount{}, err
+		}
+		mr.subRefs[subPath] = mountRef{
+			mount:   sm,
+			unmount: unmount,
 		}
 		return sm, nil
 	}
@@ -247,25 +274,19 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 		return mount.Mount{}, err
 	}
 
-	opts := []string{"rbind"}
-	for _, opt := range m.Options {
-		if opt == "ro" {
-			opts = append(opts, opt)
-		}
-	}
-
 	s.m[h] = mountRef{
-		mount: mount.Mount{
-			Source:  mp,
-			Type:    "bind",
-			Options: opts,
-		},
+		mount:   bind(mp, m.ReadOnly()),
 		unmount: lm.Unmount,
+		subRefs: map[string]mountRef{},
 	}
 
-	sm, err := sub(s.m[h].mount, subPath)
+	sm, unmount, err := sub(s.m[h].mount, subPath)
 	if err != nil {
 		return mount.Mount{}, err
+	}
+	s.m[h].subRefs[subPath] = mountRef{
+		mount:   sm,
+		unmount: unmount,
 	}
 	return sm, nil
 }
@@ -276,6 +297,9 @@ func (s *submounts) cleanup() {
 	for _, m := range s.m {
 		func(m mountRef) {
 			go func() {
+				for _, sm := range m.subRefs {
+					sm.unmount()
+				}
 				m.unmount()
 				wg.Done()
 			}()
@@ -284,23 +308,44 @@ func (s *submounts) cleanup() {
 	wg.Wait()
 }
 
-func sub(m mount.Mount, subPath string) (mount.Mount, error) {
-	src, err := fs.RootPath(m.Source, subPath)
-	if err != nil {
-		return mount.Mount{}, err
+func bind(p string, ro bool) mount.Mount {
+	m := mount.Mount{
+		Source: p,
 	}
-	m.Source = src
-	return m, nil
+	if runtime.GOOS != "windows" {
+		// Windows uses a mechanism similar to bind mounts, but will err out if we request
+		// a mount type it does not understand. Leaving the mount type empty on Windows will
+		// yield the same result.
+		m.Type = "bind"
+		m.Options = []string{"rbind"}
+	}
+	if ro {
+		m.Options = append(m.Options, "ro")
+	}
+	return m
 }
 
-func specMapping(s []idtools.IDMap) []specs.LinuxIDMapping {
-	var ids []specs.LinuxIDMapping
-	for _, item := range s {
-		ids = append(ids, specs.LinuxIDMapping{
-			HostID:      uint32(item.HostID),
-			ContainerID: uint32(item.ContainerID),
-			Size:        uint32(item.Size),
-		})
+func compactLongOverlayMount(m mount.Mount, ro bool) (mount.Mount, func() error, error) {
+	if m.Type != "overlay" {
+		return m, nil, nil
 	}
-	return ids
+
+	sz := 0
+	for _, opt := range m.Options {
+		sz += len(opt) + 1
+	}
+
+	// can fit to single page, no need to compact
+	if sz < 4096-512 {
+		return m, nil, nil
+	}
+
+	lm := snapshot.LocalMounterWithMounts([]mount.Mount{m})
+
+	mp, err := lm.Mount()
+	if err != nil {
+		return mount.Mount{}, nil, err
+	}
+
+	return bind(mp, ro), lm.Unmount, nil
 }

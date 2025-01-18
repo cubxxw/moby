@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/plugin"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/containerd/v2/plugins"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/requirement"
 	"github.com/docker/docker/testutil/registry"
 )
@@ -27,18 +27,12 @@ func DaemonIsLinux() bool {
 	return testEnv.DaemonInfo.OSType == "linux"
 }
 
-func MinimumAPIVersion(version string) func() bool {
-	return func() bool {
-		return versions.GreaterThanOrEqualTo(testEnv.DaemonAPIVersion(), version)
-	}
-}
-
 func OnlyDefaultNetworks(ctx context.Context) bool {
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
 		return false
 	}
-	networks, err := apiClient.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := apiClient.NetworkList(ctx, network.ListOptions{})
 	if err != nil || len(networks) > 0 {
 		return false
 	}
@@ -85,9 +79,6 @@ func Network() bool {
 }
 
 func Apparmor() bool {
-	if strings.HasPrefix(testEnv.DaemonInfo.OperatingSystem, "SUSE Linux Enterprise Server ") {
-		return false
-	}
 	buf, err := os.ReadFile("/sys/module/apparmor/parameters/enabled")
 	return err == nil && len(buf) > 1 && buf[0] == 'Y'
 }
@@ -97,15 +88,10 @@ func Apparmor() bool {
 func containerdSnapshotterEnabled() bool {
 	for _, v := range testEnv.DaemonInfo.DriverStatus {
 		if v[0] == "driver-type" {
-			return v[1] == string(plugin.SnapshotPlugin)
+			return v[1] == string(plugins.SnapshotPlugin)
 		}
 	}
 	return false
-}
-
-func IPv6() bool {
-	cmd := exec.Command("test", "-f", "/proc/net/if_inet6")
-	return cmd.Run() != nil
 }
 
 func UserNamespaceROMount() bool {
@@ -173,7 +159,7 @@ func TODOBuildkit() bool {
 }
 
 func DockerCLIVersion(t testing.TB) string {
-	out, _ := dockerCmd(t, "--version")
+	out := cli.DockerCmd(t, "--version").Stdout()
 	version := strings.Fields(out)
 	if len(version) < 3 {
 		t.Fatal("unknown version output", version)

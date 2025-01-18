@@ -4,19 +4,21 @@ import (
 	"runtime"
 
 	"github.com/docker/docker/daemon/config"
+	dopts "github.com/docker/docker/internal/opts"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/registry"
 	"github.com/spf13/pflag"
 )
 
 // installCommonConfigFlags adds flags to the pflag.FlagSet to configure the daemon
-func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
+func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) {
 	var (
 		allowNonDistributable = opts.NewNamedListOptsRef("allow-nondistributable-artifacts", &conf.AllowNondistributableArtifacts, registry.ValidateIndexName)
 		registryMirrors       = opts.NewNamedListOptsRef("registry-mirrors", &conf.Mirrors, registry.ValidateMirror)
 		insecureRegistries    = opts.NewNamedListOptsRef("insecure-registries", &conf.InsecureRegistries, registry.ValidateIndexName)
 	)
 	flags.Var(allowNonDistributable, "allow-nondistributable-artifacts", "Allow push of nondistributable artifacts to registry")
+	_ = flags.MarkDeprecated("allow-nondistributable-artifacts", "Pushing nondistributable artifacts is now enabled by default. ")
 	flags.Var(registryMirrors, "registry-mirror", "Preferred Docker registry mirror")
 	flags.Var(insecureRegistries, "insecure-registry", "Enable insecure registry communication")
 
@@ -28,6 +30,7 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.StringVar(&conf.ExecRoot, "exec-root", conf.ExecRoot, "Root directory for execution state files")
 	flags.StringVar(&conf.ContainerdAddr, "containerd", "", "containerd grpc address")
 	flags.BoolVar(&conf.CriContainerd, "cri-containerd", false, "start containerd with cri")
+	flags.Var(dopts.NewNamedSetOpts("features", conf.Features), "feature", "Enable feature in the daemon")
 
 	flags.Var(opts.NewNamedMapMapOpts("default-network-opts", conf.DefaultNetworkOpts, nil), "default-network-opt", "Default network options")
 	flags.IntVar(&conf.MTU, "mtu", conf.MTU, `Set the MTU for the default "bridge" network`)
@@ -45,15 +48,14 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	_ = flags.MarkHidden("network-diagnostic-port")
 
 	flags.BoolVar(&conf.RawLogs, "raw-logs", false, "Full timestamps without ANSI coloring")
-	flags.Var(opts.NewListOptsRef(&conf.DNS, opts.ValidateIPAddress), "dns", "DNS server to use")
+	flags.IPSliceVar(&conf.DNS, "dns", conf.DNS, "DNS server to use")
 	flags.Var(opts.NewNamedListOptsRef("dns-opts", &conf.DNSOptions, nil), "dns-opt", "DNS options to use")
 	flags.Var(opts.NewListOptsRef(&conf.DNSSearch, opts.ValidateDNSSearch), "dns-search", "DNS search domains to use")
-	flags.IPVar(&conf.HostGatewayIP, "host-gateway-ip", nil, "IP address that the special 'host-gateway' string in --add-host resolves to. Defaults to the IP address of the default bridge")
+	flags.Var(dopts.NewNamedIPListOptsRef("host-gateway-ips", &conf.HostGatewayIPs), "host-gateway-ip", "IP addresses that the special 'host-gateway' string in --add-host resolves to. Defaults to the IP addresses of the default bridge")
 	flags.Var(opts.NewNamedListOptsRef("labels", &conf.Labels, opts.ValidateLabel), "label", "Set key=value labels to the daemon")
 	flags.StringVar(&conf.LogConfig.Type, "log-driver", "json-file", "Default driver for container logs")
 	flags.Var(opts.NewNamedMapOpts("log-opts", conf.LogConfig.Config, nil), "log-opt", "Default log driver options for containers")
 
-	flags.StringVar(&conf.CorsHeaders, "api-cors-header", "", "Set CORS headers in the Engine API")
 	flags.IntVar(&conf.MaxConcurrentDownloads, "max-concurrent-downloads", conf.MaxConcurrentDownloads, "Set the max concurrent downloads")
 	flags.IntVar(&conf.MaxConcurrentUploads, "max-concurrent-uploads", conf.MaxConcurrentUploads, "Set the max concurrent uploads")
 	flags.IntVar(&conf.MaxDownloadAttempts, "max-download-attempts", conf.MaxDownloadAttempts, "Set the max download attempts for each pull")
@@ -76,8 +78,9 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 
 	// Deprecated flags / options
 
+	// TODO(thaJeztah): option is used to produce error when used; remove in next release
+	flags.StringVar(&conf.CorsHeaders, "api-cors-header", "", "Set CORS headers in the Engine API; deprecated: this feature was deprecated in 27.0, and now removed")
+	_ = flags.MarkDeprecated("api-cors-header", "accessing Docker API through a browser is insecure; use a reverse proxy if you need CORS headers")
 	flags.BoolVarP(&conf.AutoRestart, "restart", "r", true, "--restart on the daemon has been deprecated in favor of --restart policies on docker run")
 	_ = flags.MarkDeprecated("restart", "Please use a restart policy on docker run")
-
-	return nil
 }

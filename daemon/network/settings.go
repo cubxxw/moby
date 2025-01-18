@@ -24,7 +24,6 @@ type Settings struct {
 	Ports                  nat.PortMap
 	SecondaryIPAddresses   []networktypes.Address
 	SecondaryIPv6Addresses []networktypes.Address
-	IsAnonymousEndpoint    bool
 	HasSwarmEndpoint       bool
 }
 
@@ -34,6 +33,9 @@ type Settings struct {
 type EndpointSettings struct {
 	*networktypes.EndpointSettings
 	IPAMOperational bool
+	// DesiredMacAddress is the configured value, it's copied from MacAddress (the
+	// API param field) when the container is created.
+	DesiredMacAddress string
 }
 
 // AttachmentStore stores the load balancer IP address for a network id.

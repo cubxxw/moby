@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/diagnostic"
 	"github.com/docker/docker/libnetwork/networkdb"
 	events "github.com/docker/go-events"
 )
 
-// DummyClientPaths2Func exported paths for the client
-var DummyClientPaths2Func = map[string]diagnostic.HTTPHandlerFunc{
-	"/watchtable":          watchTable,
-	"/watchedtableentries": watchTableEntries,
+type Mux interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
+func RegisterDiagnosticHandlers(mux Mux, nDB *networkdb.NetworkDB) {
+	mux.HandleFunc("/watchtable", watchTable(nDB))
+	mux.HandleFunc("/watchedtableentries", watchTableEntries)
 }
 
 const (
@@ -28,23 +31,22 @@ type tableHandler struct {
 
 var clientWatchTable = map[string]tableHandler{}
 
-func watchTable(ctx interface{}, w http.ResponseWriter, r *http.Request) {
-	r.ParseForm() //nolint:errcheck
-	diagnostic.DebugHTTPForm(r)
-	if len(r.Form["tname"]) < 1 {
-		rsp := diagnostic.WrongCommand(missingParameter, fmt.Sprintf("%s?tname=table_name", r.URL.Path))
-		diagnostic.HTTPReply(w, rsp, &diagnostic.JSONOutput{}) //nolint:errcheck
-		return
-	}
+func watchTable(nDB *networkdb.NetworkDB) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm() //nolint:errcheck
+		diagnostic.DebugHTTPForm(r)
+		if len(r.Form["tname"]) < 1 {
+			rsp := diagnostic.WrongCommand(missingParameter, fmt.Sprintf("%s?tname=table_name", r.URL.Path))
+			diagnostic.HTTPReply(w, rsp, &diagnostic.JSONOutput{}) //nolint:errcheck
+			return
+		}
 
-	tableName := r.Form["tname"][0]
-	if _, ok := clientWatchTable[tableName]; ok {
-		fmt.Fprintf(w, "OK\n")
-		return
-	}
+		tableName := r.Form["tname"][0]
+		if _, ok := clientWatchTable[tableName]; ok {
+			fmt.Fprintf(w, "OK\n")
+			return
+		}
 
-	nDB, ok := ctx.(*networkdb.NetworkDB)
-	if ok {
 		ch, cancel := nDB.Watch(tableName, "")
 		clientWatchTable[tableName] = tableHandler{cancelWatch: cancel, entries: make(map[string]string)}
 		go handleTableEvents(tableName, ch)
@@ -53,7 +55,7 @@ func watchTable(ctx interface{}, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func watchTableEntries(ctx interface{}, w http.ResponseWriter, r *http.Request) {
+func watchTableEntries(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm() //nolint:errcheck
 	diagnostic.DebugHTTPForm(r)
 	if len(r.Form["tname"]) < 1 {
@@ -93,7 +95,7 @@ func handleTableEvents(tableName string, ch *events.Channel) {
 			return
 
 		case evt := <-ch.C:
-			log.G(context.TODO()).Infof("Recevied new event on:%s", tableName)
+			log.G(context.TODO()).Infof("Received new event on:%s", tableName)
 			switch event := evt.(type) {
 			case networkdb.CreateEvent:
 				// nid = event.NetworkID

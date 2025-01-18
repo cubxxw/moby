@@ -5,13 +5,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
-	ctd "github.com/containerd/containerd"
-	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/containerd/log"
-	ctdmetadata "github.com/containerd/containerd/metadata"
-	"github.com/containerd/containerd/snapshots"
+	ctd "github.com/containerd/containerd/v2/client"
+	ctdmetadata "github.com/containerd/containerd/v2/core/metadata"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/builder/builder-next/adapters/containerimage"
@@ -23,7 +25,7 @@ import (
 	wlabel "github.com/docker/docker/builder/builder-next/worker/label"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/graphdriver"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/metadata"
 	"github.com/moby/buildkit/cache/remotecache"
@@ -41,9 +43,12 @@ import (
 	containerdsnapshot "github.com/moby/buildkit/snapshot/containerd"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/bboltcachestorage"
+	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/apicaps"
 	"github.com/moby/buildkit/util/archutil"
 	"github.com/moby/buildkit/util/entitlements"
 	"github.com/moby/buildkit/util/network/netproviders"
+	"github.com/moby/buildkit/util/tracing"
 	"github.com/moby/buildkit/util/tracing/detect"
 	"github.com/moby/buildkit/worker"
 	"github.com/moby/buildkit/worker/containerd"
@@ -52,9 +57,6 @@ import (
 	"go.etcd.io/bbolt"
 	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/otel/sdk/trace"
-
-	"github.com/moby/buildkit/solver/pb"
-	"github.com/moby/buildkit/util/apicaps"
 )
 
 func newController(ctx context.Context, rt http.RoundTripper, opt Opt) (*control.Controller, error) {
@@ -65,11 +67,17 @@ func newController(ctx context.Context, rt http.RoundTripper, opt Opt) (*control
 }
 
 func getTraceExporter(ctx context.Context) trace.SpanExporter {
-	exp, err := detect.Exporter()
-	if err != nil {
-		log.G(ctx).WithError(err).Error("Failed to detect trace exporter for buildkit controller")
+	tc := make(tracing.MultiSpanExporter, 0, 2)
+	if detect.Recorder != nil {
+		tc = append(tc, detect.Recorder)
 	}
-	return exp
+
+	if exp, err := detect.NewSpanExporter(ctx); err != nil {
+		log.G(ctx).WithError(err).Error("Failed to detect trace exporter for buildkit controller")
+	} else if !detect.IsNoneSpanExporter(exp) {
+		tc = append(tc, exp)
+	}
+	return tc
 }
 
 func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt) (*control.Controller, error) {
@@ -77,7 +85,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 		return nil, err
 	}
 
-	historyDB, historyConf, err := openHistoryDB(opt.Root, opt.BuilderConfig.History)
+	historyDB, historyConf, err := openHistoryDB(opt.Root, "history_c8d.db", opt.BuilderConfig.History)
 	if err != nil {
 		return nil, err
 	}
@@ -90,12 +98,32 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	nc := netproviders.Opt{
 		Mode: "host",
 	}
+
+	// HACK! Windows doesn't have 'host' mode networking.
+	if runtime.GOOS == "windows" {
+		nc = netproviders.Opt{
+			Mode: "auto",
+		}
+	}
+
 	dns := getDNSConfig(opt.DNSConfig)
 
-	wo, err := containerd.NewWorkerOpt(opt.Root, opt.ContainerdAddress, opt.Snapshotter, opt.ContainerdNamespace,
-		opt.Rootless, map[string]string{
+	workerOpts := containerd.WorkerOptions{
+		Root:            opt.Root,
+		Address:         opt.ContainerdAddress,
+		SnapshotterName: opt.Snapshotter,
+		Namespace:       opt.ContainerdNamespace,
+		Rootless:        opt.Rootless,
+		Labels: map[string]string{
 			label.Snapshotter: opt.Snapshotter,
-		}, dns, nc, opt.ApparmorProfile, false, nil, "", ctd.WithTimeout(60*time.Second))
+		},
+		DNS:             dns,
+		NetworkOpt:      nc,
+		ApparmorProfile: opt.ApparmorProfile,
+		Selinux:         false,
+	}
+
+	wo, err := containerd.NewWorkerOpt(workerOpts, ctd.WithTimeout(60*time.Second))
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +131,11 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	policy, err := getGCPolicy(opt.BuilderConfig, opt.Root)
 	if err != nil {
 		return nil, err
+	}
+
+	// make sure platforms are normalized moby/buildkit#4391
+	for i, p := range wo.Platforms {
+		wo.Platforms[i] = platforms.Normalize(p)
 	}
 
 	wo.GCPolicy = policy
@@ -115,7 +148,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	}
 	wo.Executor = exec
 
-	w, err := mobyworker.NewContainerdWorker(ctx, wo)
+	w, err := mobyworker.NewContainerdWorker(ctx, wo, opt.Callbacks, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +159,15 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	if err != nil {
 		return nil, err
 	}
+
+	gwf, err := gateway.NewGatewayFrontend(wc.Infos(), nil)
+	if err != nil {
+		return nil, err
+	}
+
 	frontends := map[string]frontend.Frontend{
-		"dockerfile.v0": forwarder.NewGatewayForwarder(wc, dockerfile.Build),
-		"gateway.v0":    gateway.NewGatewayFrontend(wc),
+		"dockerfile.v0": forwarder.NewGatewayForwarder(wc.Infos(), dockerfile.Build),
+		"gateway.v0":    gwf,
 	}
 
 	return control.NewController(control.Opt{
@@ -136,6 +175,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 		WorkerController: wc,
 		Frontends:        frontends,
 		CacheManager:     solver.NewCacheManager(ctx, "local", cacheStorage, worker.NewCacheResultStorage(wc)),
+		CacheStore:       cacheStorage,
 		ResolveCacheImporterFuncs: map[string]remotecache.ResolveCacheImporterFunc{
 			"gha":      gha.ResolveCacheImporterFunc(),
 			"local":    localremotecache.ResolveCacheImporterFunc(opt.SessionManager),
@@ -153,11 +193,12 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 		LeaseManager:   wo.LeaseManager,
 		ContentStore:   wo.ContentStore,
 		TraceCollector: getTraceExporter(ctx),
+		GarbageCollect: w.GarbageCollect,
 	})
 }
 
-func openHistoryDB(root string, cfg *config.BuilderHistoryConfig) (*bolt.DB, *bkconfig.HistoryConfig, error) {
-	db, err := bbolt.Open(filepath.Join(root, "history.db"), 0o600, nil)
+func openHistoryDB(root string, fn string, cfg *config.BuilderHistoryConfig) (*bolt.DB, *bkconfig.HistoryConfig, error) {
+	db, err := bbolt.Open(filepath.Join(root, fn), 0o600, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -286,9 +327,13 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 	}
 
 	exp, err := mobyexporter.New(mobyexporter.Opt{
-		ImageStore:  dist.ImageStore,
-		Differ:      differ,
-		ImageTagger: opt.ImageTagger,
+		ImageStore:            dist.ImageStore,
+		ContentStore:          store,
+		Differ:                differ,
+		ImageTagger:           opt.ImageTagger,
+		LeaseManager:          lm,
+		ImageExportedCallback: opt.Callbacks.Exported,
+		// Callbacks.Named is not used here because the tag operation is handled directly by the image service.
 	})
 	if err != nil {
 		return nil, err
@@ -299,7 +344,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 		return nil, err
 	}
 
-	historyDB, historyConf, err := openHistoryDB(opt.Root, opt.BuilderConfig.History)
+	historyDB, historyConf, err := openHistoryDB(opt.Root, "history.db", opt.BuilderConfig.History)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +382,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 		Layers:            layers,
 		Platforms:         archutil.SupportedPlatforms(true),
 		LeaseManager:      lm,
+		GarbageCollect:    mdb.GarbageCollect,
 		Labels:            getLabels(opt, nil),
 	}
 
@@ -347,9 +393,14 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 	}
 	wc.Add(w)
 
+	gwf, err := gateway.NewGatewayFrontend(wc.Infos(), nil)
+	if err != nil {
+		return nil, err
+	}
+
 	frontends := map[string]frontend.Frontend{
-		"dockerfile.v0": forwarder.NewGatewayForwarder(wc, dockerfile.Build),
-		"gateway.v0":    gateway.NewGatewayFrontend(wc),
+		"dockerfile.v0": forwarder.NewGatewayForwarder(wc.Infos(), dockerfile.Build),
+		"gateway.v0":    gwf,
 	}
 
 	return control.NewController(control.Opt{
@@ -357,6 +408,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 		WorkerController: wc,
 		Frontends:        frontends,
 		CacheManager:     solver.NewCacheManager(ctx, "local", cacheStorage, worker.NewCacheResultStorage(wc)),
+		CacheStore:       cacheStorage,
 		ResolveCacheImporterFuncs: map[string]remotecache.ResolveCacheImporterFunc{
 			"registry": localinlinecache.ResolveCacheImporterFunc(opt.SessionManager, opt.RegistryHosts, store, dist.ReferenceStore, dist.ImageStore),
 			"local":    localremotecache.ResolveCacheImporterFunc(opt.SessionManager),
@@ -370,39 +422,44 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 		HistoryDB:      historyDB,
 		HistoryConfig:  historyConf,
 		TraceCollector: getTraceExporter(ctx),
+		GarbageCollect: w.GarbageCollect,
 	})
 }
 
 func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, error) {
 	var gcPolicy []client.PruneInfo
 	if conf.GC.Enabled {
-		var (
-			defaultKeepStorage int64
-			err                error
-		)
-
-		if conf.GC.DefaultKeepStorage != "" {
-			defaultKeepStorage, err = units.RAMInBytes(conf.GC.DefaultKeepStorage)
-			if err != nil {
-				return nil, errors.Wrapf(err, "could not parse '%s' as Builder.GC.DefaultKeepStorage config", conf.GC.DefaultKeepStorage)
-			}
-		}
-
 		if conf.GC.Policy == nil {
+			var defaultKeepStorage int64
+			if conf.GC.DefaultKeepStorage != "" {
+				b, err := units.RAMInBytes(conf.GC.DefaultKeepStorage)
+				if err != nil {
+					return nil, errors.Wrapf(err, "failed to parse defaultKeepStorage")
+				}
+				defaultKeepStorage = b
+			}
 			gcPolicy = mobyworker.DefaultGCPolicy(root, defaultKeepStorage)
 		} else {
 			gcPolicy = make([]client.PruneInfo, len(conf.GC.Policy))
 			for i, p := range conf.GC.Policy {
-				b, err := units.RAMInBytes(p.KeepStorage)
-				if err != nil {
-					return nil, err
+				var keepStorage int64
+				if p.KeepStorage != "" {
+					b, err := units.RAMInBytes(p.KeepStorage)
+					if err != nil {
+						return nil, errors.Wrapf(err, "failed to parse keepStorage")
+					}
+					// don't set a default here, zero is a valid value when
+					// specified by the user, as the gc-policy may be determined
+					// through other filters;
+					// https://github.com/moby/moby/pull/49062#issuecomment-2554981829
+					keepStorage = b
 				}
-				if b == 0 {
-					b = defaultKeepStorage
-				}
+
+				// FIXME(thaJeztah): wire up new options https://github.com/moby/moby/issues/48639
+				var err error
 				gcPolicy[i], err = toBuildkitPruneInfo(types.BuildCachePruneOptions{
 					All:         p.All,
-					KeepStorage: b,
+					KeepStorage: keepStorage,
 					Filters:     filters.Args(p.Filter),
 				})
 				if err != nil {
@@ -430,6 +487,16 @@ func getLabels(opt Opt, labels map[string]string) map[string]string {
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels[wlabel.HostGatewayIP] = opt.DNSConfig.HostGatewayIP.String()
+	if len(opt.DNSConfig.HostGatewayIPs) > 0 {
+		// TODO(robmry) - buildx has its own version of toBuildkitExtraHosts(), which
+		//   needs to be updated to understand >1 address. For now, take the IPv4 address
+		//   if there is one, else IPv6.
+		for _, gip := range opt.DNSConfig.HostGatewayIPs {
+			labels[wlabel.HostGatewayIP] = gip.String()
+			if gip.Is4() {
+				break
+			}
+		}
+	}
 	return labels
 }

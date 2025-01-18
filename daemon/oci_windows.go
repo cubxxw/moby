@@ -6,20 +6,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
-	"github.com/containerd/containerd/log"
-	coci "github.com/containerd/containerd/oci"
+	"github.com/Microsoft/hcsshim"
+	coci "github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
-	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/oci"
-	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows/registry"
 )
@@ -29,55 +30,17 @@ const (
 	credentialSpecFileLocation     = "CredentialSpecs"
 )
 
-func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container) (*specs.Spec, error) {
-	img, err := daemon.imageService.GetImage(ctx, string(c.ImageID), imagetypes.GetImageOpts{})
-	if err != nil {
-		return nil, err
-	}
-	if err := image.CheckOS(img.OperatingSystem()); err != nil {
-		return nil, err
-	}
-
-	s := oci.DefaultSpec()
-
-	if err := coci.WithAnnotations(c.HostConfig.Annotations)(ctx, nil, nil, &s); err != nil {
-		return nil, err
-	}
-
-	linkedEnv, err := daemon.setupLinkedContainers(c)
-	if err != nil {
-		return nil, err
-	}
-
+// setupContainerDirs sets up base container directories (root, ipc, tmpfs and secrets).
+func (daemon *Daemon) setupContainerDirs(c *container.Container) ([]container.Mount, error) {
 	// Note, unlike Unix, we do NOT call into SetupWorkingDirectory as
 	// this is done in VMCompute. Further, we couldn't do it for Hyper-V
 	// containers anyway.
-
 	if err := daemon.setupSecretDir(c); err != nil {
 		return nil, err
 	}
 
 	if err := daemon.setupConfigDir(c); err != nil {
 		return nil, err
-	}
-
-	// In s.Mounts
-	mounts, err := daemon.setupMounts(c)
-	if err != nil {
-		return nil, err
-	}
-
-	var isHyperV bool
-	if c.HostConfig.Isolation.IsDefault() {
-		// Container using default isolation, so take the default from the daemon configuration
-		isHyperV = daemon.defaultIsolation.IsHyperV()
-	} else {
-		// Container may be requesting an explicit isolation mode.
-		isHyperV = c.HostConfig.Isolation.IsHyperV()
-	}
-
-	if isHyperV {
-		s.Windows.HyperV = &specs.WindowsHyperV{}
 	}
 
 	// If the container has not been started, and has configs or secrets
@@ -89,7 +52,7 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 	if !c.HasBeenStartedBefore && (len(c.SecretReferences) > 0 || len(c.ConfigReferences) > 0) {
 		// The container file system is mounted before this function is called,
 		// except for Hyper-V containers, so mount it here in that case.
-		if isHyperV {
+		if daemon.isHyperV(c) {
 			if err := daemon.Mount(c); err != nil {
 				return nil, err
 			}
@@ -107,12 +70,41 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 	if err != nil {
 		return nil, err
 	}
+
+	var mounts []container.Mount
 	if secretMounts != nil {
 		mounts = append(mounts, secretMounts...)
 	}
 
 	if configMounts := c.ConfigMounts(); configMounts != nil {
 		mounts = append(mounts, configMounts...)
+	}
+
+	return mounts, nil
+}
+
+func (daemon *Daemon) isHyperV(c *container.Container) bool {
+	if c.HostConfig.Isolation.IsDefault() {
+		// Container using default isolation, so take the default from the daemon configuration
+		return daemon.defaultIsolation.IsHyperV()
+	}
+	// Container may be requesting an explicit isolation mode.
+	return c.HostConfig.Isolation.IsHyperV()
+}
+
+func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container, mounts []container.Mount) (*specs.Spec, error) {
+	img, err := daemon.imageService.GetImage(ctx, string(c.ImageID), backend.GetImageOpts{})
+	if err != nil {
+		return nil, err
+	}
+	if err := image.CheckOS(img.OperatingSystem()); err != nil {
+		return nil, err
+	}
+
+	s := oci.DefaultSpec()
+
+	if err := coci.WithAnnotations(c.HostConfig.Annotations)(ctx, nil, nil, &s); err != nil {
+		return nil, err
 	}
 
 	for _, mount := range mounts {
@@ -124,6 +116,16 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 			m.Options = append(m.Options, "ro")
 		}
 		s.Mounts = append(s.Mounts, m)
+	}
+
+	linkedEnv, err := daemon.setupLinkedContainers(c)
+	if err != nil {
+		return nil, err
+	}
+
+	isHyperV := daemon.isHyperV(c)
+	if isHyperV {
+		s.Windows.HyperV = &specs.WindowsHyperV{}
 	}
 
 	// In s.Process
@@ -138,9 +140,9 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 		}
 	}
 	s.Process.User.Username = c.Config.User
-	s.Windows.LayerFolders, err = daemon.imageService.GetLayerFolders(img, c.RWLayer)
+	s.Windows.LayerFolders, err = daemon.imageService.GetLayerFolders(img, c.RWLayer, c.ID)
 	if err != nil {
-		return nil, errors.Wrapf(err, "container %s", c.ID)
+		return nil, errors.Wrapf(err, "GetLayerFolders failed: container %s", c.ID)
 	}
 
 	// Get endpoints for the libnetwork allocated networks to the container
@@ -249,7 +251,24 @@ func (daemon *Daemon) createSpecWindowsFields(c *container.Container, s *specs.S
 			return errors.New("createSpecWindowsFields: BaseFS of container " + c.ID + " is unexpectedly empty")
 		}
 
-		s.Root.Path = c.BaseFS // This is not set for Hyper-V containers
+		if daemon.UsesSnapshotter() {
+			// daemon.Mount() for the snapshotters actually mounts the filesystem to the host
+			// using containerd/mount.All and BaseFS is the directory where this is mounted.
+			// This is consistent with Linux-based graphdriver implementations.
+			// For the windowsfilter graphdriver, the underlying Get() call does not actually mount
+			// the filesystem to a path, and BaseFS is the Volume GUID of the prepared/activated
+			// filesystem.
+
+			// The spec for Root.Path for Windows specifies that for Process-isolated containers,
+			// it must be in the Volume GUID (\\?\\Volume{GUID} style), not a host-mounted directory.
+			backingDevicePath, err := getBackingDeviceForContainerdMount(c.BaseFS)
+			if err != nil {
+				return errors.Wrapf(err, "createSpecWindowsFields: Failed to get backing device of BaseFS of container %s", c.ID)
+			}
+			s.Root.Path = backingDevicePath
+		} else {
+			s.Root.Path = c.BaseFS // This is not set for Hyper-V containers
+		}
 		if !strings.HasSuffix(s.Root.Path, `\`) {
 			s.Root.Path = s.Root.Path + `\` // Ensure a correctly formatted volume GUID path \\?\Volume{GUID}\
 		}
@@ -273,6 +292,48 @@ func (daemon *Daemon) createSpecWindowsFields(c *container.Container, s *specs.S
 	s.Windows.Devices = append(s.Windows.Devices, devices...)
 
 	return nil
+}
+
+// getBackingDeviceForContainerdMount extracts the backing device or directory mounted at mountPoint
+// by containerd's mount.Mount implementation for Windows.
+func getBackingDeviceForContainerdMount(mountPoint string) (string, error) {
+	// NOTE: This relies on details of the behaviour of containerd's mount implementation for Windows,
+	// and so is somewhat fragile.
+	// TODO: Upstream this into the mount package.
+	// The implementation would be the same, but it'll be better-encapsulated.
+
+	// See containerd/containerd/mount/mount_windows.go
+	// This is mostly just copied from mount.Unmount
+
+	const sourceStreamName = "containerd.io-source"
+
+	mountPoint = filepath.Clean(mountPoint)
+	adsFile := mountPoint + ":" + sourceStreamName
+	var layerPath string
+
+	if _, err := os.Lstat(adsFile); err == nil {
+		layerPathb, err := os.ReadFile(mountPoint + ":" + sourceStreamName)
+		if err != nil {
+			return "", fmt.Errorf("failed to retrieve layer source for mount %s: %w", mountPoint, err)
+		}
+		layerPath = string(layerPathb)
+	}
+
+	if layerPath == "" {
+		return "", fmt.Errorf("no layer source for mount %s", mountPoint)
+	}
+
+	home, layerID := filepath.Split(layerPath)
+	di := hcsshim.DriverInfo{
+		HomeDir: home,
+	}
+
+	backingDevice, err := hcsshim.GetLayerMountPath(di, layerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve backing device for layer %s: %w", mountPoint, err)
+	}
+
+	return backingDevice, nil
 }
 
 var errInvalidCredentialSpecSecOpt = errdefs.InvalidParameter(fmt.Errorf("invalid credential spec security option - value must be prefixed by 'file://', 'registry://', or 'raw://' followed by a non-empty value"))
@@ -367,7 +428,7 @@ func setResourcesInSpec(c *container.Container, s *specs.Spec, isHyperV bool) {
 				}
 			}
 		} else {
-			cpuMaximum = uint16(c.HostConfig.NanoCPUs / int64(sysinfo.NumCPU()) / (1e9 / 10000))
+			cpuMaximum = uint16(c.HostConfig.NanoCPUs / int64(runtime.NumCPU()) / (1e9 / 10000))
 			if cpuMaximum < 1 {
 				// The requested NanoCPUs is so small that we rounded to 0, use 1 instead
 				cpuMaximum = 1

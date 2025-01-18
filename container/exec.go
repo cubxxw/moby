@@ -5,8 +5,8 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/log"
 	"github.com/docker/docker/container/stream"
 	"github.com/docker/docker/libcontainerd/types"
 	"github.com/docker/docker/pkg/stringid"

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
 	"archive/tar"
@@ -14,8 +14,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/containerd/containerd/pkg/userns"
-	"github.com/docker/docker/pkg/system"
+	"github.com/moby/sys/userns"
 	"golang.org/x/sys/unix"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -199,11 +198,11 @@ func TestTarWithBlockCharFifo(t *testing.T) {
 	err = os.WriteFile(filepath.Join(origin, "1"), []byte("hello world"), 0o700)
 	assert.NilError(t, err)
 
-	err = system.Mknod(filepath.Join(origin, "2"), unix.S_IFBLK, int(system.Mkdev(int64(12), int64(5))))
+	err = mknod(filepath.Join(origin, "2"), unix.S_IFBLK, unix.Mkdev(uint32(12), uint32(5)))
 	assert.NilError(t, err)
-	err = system.Mknod(filepath.Join(origin, "3"), unix.S_IFCHR, int(system.Mkdev(int64(12), int64(5))))
+	err = mknod(filepath.Join(origin, "3"), unix.S_IFCHR, unix.Mkdev(uint32(12), uint32(5)))
 	assert.NilError(t, err)
-	err = system.Mknod(filepath.Join(origin, "4"), unix.S_IFIFO, int(system.Mkdev(int64(12), int64(5))))
+	err = mknod(filepath.Join(origin, "4"), unix.S_IFIFO, unix.Mkdev(uint32(12), uint32(5)))
 	assert.NilError(t, err)
 
 	dest, err := os.MkdirTemp("", "docker-test-tar-hardlink-dest")
@@ -253,6 +252,27 @@ func TestTarUntarWithXattr(t *testing.T) {
 	// there is no known Go implementation of setcap/getcap with support for v3 file capability
 	out, err := exec.Command("setcap", "cap_block_suspend+ep", filepath.Join(origin, "2")).CombinedOutput()
 	assert.NilError(t, err, string(out))
+
+	tarball, err := Tar(origin, Uncompressed)
+	assert.NilError(t, err)
+	defer tarball.Close()
+	rdr := tar.NewReader(tarball)
+	for {
+		h, err := rdr.Next()
+		if err == io.EOF {
+			break
+		}
+		assert.NilError(t, err)
+		capability, hasxattr := h.PAXRecords["SCHILY.xattr.security.capability"]
+		switch h.Name {
+		case "2":
+			if assert.Check(t, hasxattr, "tar entry %q should have the 'security.capability' xattr", h.Name) {
+				assert.Check(t, len(capability) > 0, "tar entry %q has a blank 'security.capability' xattr value")
+			}
+		default:
+			assert.Check(t, !hasxattr, "tar entry %q should not have the 'security.capability' xattr", h.Name)
+		}
+	}
 
 	for _, c := range []Compression{
 		Uncompressed,

@@ -3,10 +3,14 @@ package etchosts
 import (
 	"bytes"
 	"fmt"
+	"net/netip"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sync/errgroup"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestBuildDefault(t *testing.T) {
@@ -18,7 +22,7 @@ func TestBuildDefault(t *testing.T) {
 
 	// check that /etc/hosts has consistent ordering
 	for i := 0; i <= 5; i++ {
-		err = Build(file.Name(), "", "", "", nil)
+		err = Build(file.Name(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -27,100 +31,33 @@ func TestBuildDefault(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expected := "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\nfe00::0\tip6-localnet\nff00::0\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n"
+		expected := "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\nfe00::\tip6-localnet\nff00::\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n"
 
-		if expected != string(content) {
-			t.Fatalf("Expected to find '%s' got '%s'", expected, content)
+		actual := string(content)
+		if expected != actual {
+			assert.Check(t, is.Equal(actual, expected))
 		}
 	}
 }
 
-func TestBuildHostnameDomainname(t *testing.T) {
-	file, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(file.Name())
+func TestBuildNoIPv6(t *testing.T) {
+	d := t.TempDir()
+	filename := filepath.Join(d, "hosts")
 
-	err = Build(file.Name(), "10.11.12.13", "testhostname", "testdomainname", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content, err := os.ReadFile(file.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if expected := "10.11.12.13\ttesthostname.testdomainname testhostname\n"; !bytes.Contains(content, []byte(expected)) {
-		t.Fatalf("Expected to find '%s' got '%s'", expected, content)
-	}
-}
-
-func TestBuildHostname(t *testing.T) {
-	file, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(file.Name())
-
-	err = Build(file.Name(), "10.11.12.13", "testhostname", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content, err := os.ReadFile(file.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if expected := "10.11.12.13\ttesthostname\n"; !bytes.Contains(content, []byte(expected)) {
-		t.Fatalf("Expected to find '%s' got '%s'", expected, content)
-	}
-}
-
-func TestBuildHostnameFQDN(t *testing.T) {
-	file, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(file.Name())
-
-	err = Build(file.Name(), "10.11.12.13", "testhostname.testdomainname.com", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content, err := os.ReadFile(file.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if expected := "10.11.12.13\ttesthostname.testdomainname.com testhostname\n"; !bytes.Contains(content, []byte(expected)) {
-		t.Fatalf("Expected to find '%s' got '%s'", expected, content)
-	}
-}
-
-func TestBuildNoIP(t *testing.T) {
-	file, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(file.Name())
-
-	err = Build(file.Name(), "", "testhostname", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content, err := os.ReadFile(file.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if expected := ""; !bytes.Contains(content, []byte(expected)) {
-		t.Fatalf("Expected to find '%s' got '%s'", expected, content)
-	}
+	err := BuildNoIPv6(filename, []Record{
+		{
+			Hosts: "another.example",
+			IP:    netip.MustParseAddr("fdbb:c59c:d015::3"),
+		},
+		{
+			Hosts: "another.example",
+			IP:    netip.MustParseAddr("10.11.12.13"),
+		},
+	})
+	assert.NilError(t, err)
+	content, err := os.ReadFile(filename)
+	assert.NilError(t, err)
+	assert.Check(t, is.DeepEqual(string(content), "127.0.0.1\tlocalhost\n10.11.12.13\tanother.example\n"))
 }
 
 func TestUpdate(t *testing.T) {
@@ -130,7 +67,12 @@ func TestUpdate(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	if err := Build(file.Name(), "10.11.12.13", "testhostname", "testdomainname", nil); err != nil {
+	if err := Build(file.Name(), []Record{
+		{
+			"testhostname.testdomainname testhostname",
+			netip.MustParseAddr("10.11.12.13"),
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,18 +113,18 @@ func TestUpdateIgnoresPrefixedHostname(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	if err := Build(file.Name(), "10.11.12.13", "testhostname", "testdomainname", []Record{
+	if err := Build(file.Name(), []Record{
 		{
 			Hosts: "prefix",
-			IP:    "2.2.2.2",
+			IP:    netip.MustParseAddr("2.2.2.2"),
 		},
 		{
 			Hosts: "prefixAndMore",
-			IP:    "3.3.3.3",
+			IP:    netip.MustParseAddr("3.3.3.3"),
 		},
 		{
 			Hosts: "unaffectedHost",
-			IP:    "4.4.4.4",
+			IP:    netip.MustParseAddr("4.4.4.4"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -222,7 +164,7 @@ func TestDeleteIgnoresPrefixedHostname(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,11 +172,11 @@ func TestDeleteIgnoresPrefixedHostname(t *testing.T) {
 	if err := Add(file.Name(), []Record{
 		{
 			Hosts: "prefix",
-			IP:    "1.1.1.1",
+			IP:    netip.MustParseAddr("1.1.1.1"),
 		},
 		{
 			Hosts: "prefixAndMore",
-			IP:    "2.2.2.2",
+			IP:    netip.MustParseAddr("2.2.2.2"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -243,7 +185,7 @@ func TestDeleteIgnoresPrefixedHostname(t *testing.T) {
 	if err := Delete(file.Name(), []Record{
 		{
 			Hosts: "prefix",
-			IP:    "1.1.1.1",
+			IP:    netip.MustParseAddr("1.1.1.1"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -270,7 +212,7 @@ func TestAddEmpty(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +229,7 @@ func TestAdd(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +237,7 @@ func TestAdd(t *testing.T) {
 	if err := Add(file.Name(), []Record{
 		{
 			Hosts: "testhostname",
-			IP:    "2.2.2.2",
+			IP:    netip.MustParseAddr("2.2.2.2"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -318,7 +260,7 @@ func TestDeleteEmpty(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +285,7 @@ func TestDeleteNewline(t *testing.T) {
 	rec := []Record{
 		{
 			Hosts: "prefix",
-			IP:    "2.2.2.2",
+			IP:    netip.MustParseAddr("2.2.2.2"),
 		},
 	}
 	if err := Delete(file.Name(), rec); err != nil {
@@ -358,7 +300,7 @@ func TestDelete(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,15 +308,15 @@ func TestDelete(t *testing.T) {
 	if err := Add(file.Name(), []Record{
 		{
 			Hosts: "testhostname1",
-			IP:    "1.1.1.1",
+			IP:    netip.MustParseAddr("1.1.1.1"),
 		},
 		{
 			Hosts: "testhostname2",
-			IP:    "2.2.2.2",
+			IP:    netip.MustParseAddr("2.2.2.2"),
 		},
 		{
 			Hosts: "testhostname3",
-			IP:    "3.3.3.3",
+			IP:    netip.MustParseAddr("3.3.3.3"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -383,11 +325,11 @@ func TestDelete(t *testing.T) {
 	if err := Delete(file.Name(), []Record{
 		{
 			Hosts: "testhostname1",
-			IP:    "1.1.1.1",
+			IP:    netip.MustParseAddr("1.1.1.1"),
 		},
 		{
 			Hosts: "testhostname3",
-			IP:    "3.3.3.3",
+			IP:    netip.MustParseAddr("3.3.3.3"),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -414,7 +356,7 @@ func TestConcurrentWrites(t *testing.T) {
 	}
 	defer os.Remove(file.Name())
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,19 +364,20 @@ func TestConcurrentWrites(t *testing.T) {
 	if err := Add(file.Name(), []Record{
 		{
 			Hosts: "inithostname",
-			IP:    "172.17.0.1",
+			IP:    netip.MustParseAddr("172.17.0.1"),
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	group := new(errgroup.Group)
-	for i := 0; i < 10; i++ {
-		i := i
+	for i := byte(0); i < 10; i++ {
 		group.Go(func() error {
+			addr, ok := netip.AddrFromSlice([]byte{i, i, i, i})
+			assert.Assert(t, ok)
 			rec := []Record{
 				{
-					IP:    fmt.Sprintf("%d.%d.%d.%d", i, i, i, i),
+					IP:    addr,
 					Hosts: fmt.Sprintf("testhostname%d", i),
 				},
 			}
@@ -479,17 +422,19 @@ func benchDelete(b *testing.B) {
 		b.StartTimer()
 	}()
 
-	err = Build(file.Name(), "", "", "", nil)
+	err = Build(file.Name(), nil)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	var records []Record
 	var toDelete []Record
-	for i := 0; i < 255; i++ {
+	for i := byte(0); i < 255; i++ {
+		addr, ok := netip.AddrFromSlice([]byte{i, i, i, i})
+		assert.Assert(b, ok)
 		record := Record{
 			Hosts: fmt.Sprintf("testhostname%d", i),
-			IP:    fmt.Sprintf("%d.%d.%d.%d", i, i, i, i),
+			IP:    addr,
 		}
 		records = append(records, record)
 		if i%2 == 0 {

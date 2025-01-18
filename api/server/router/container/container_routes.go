@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/server/httpstatus"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
@@ -19,16 +19,21 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	containerpkg "github.com/docker/docker/container"
+	networkSettings "github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/pkg/ioutils"
+	"github.com/docker/docker/runconfig"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/net/websocket"
 )
 
-func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -37,14 +42,14 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
-	// TODO: remove pause arg, and always pause in backend
-	pause := httputils.BoolValue(r, "pause")
-	version := httputils.VersionFromContext(ctx)
-	if r.FormValue("pause") == "" && versions.GreaterThanOrEqualTo(version, "1.13") {
-		pause = true
-	}
-
-	config, _, _, err := s.decoder.DecodeConfig(r.Body)
+	// FIXME(thaJeztah): change this to unmarshal just [container.Config]:
+	// The commit endpoint accepts a [container.Config], but the decoder uses a
+	// [container.CreateRequest], which is a superset, and also contains
+	// [container.HostConfig] and [network.NetworkConfig]. Those structs
+	// are discarded here, but decoder.DecodeConfig also performs validation,
+	// so a request containing those additional fields would result in a
+	// validation error.
+	config, _, _, err := c.decoder.DecodeConfig(r.Body)
 	if err != nil && !errors.Is(err, io.EOF) { // Do not fail if body is empty.
 		return err
 	}
@@ -54,8 +59,8 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 		return errdefs.InvalidParameter(err)
 	}
 
-	imgID, err := s.backend.CreateImageFromContainer(ctx, r.Form.Get("container"), &backend.CreateImageConfig{
-		Pause:   pause,
+	imgID, err := c.backend.CreateImageFromContainer(ctx, r.Form.Get("container"), &backend.CreateImageConfig{
+		Pause:   httputils.BoolValueOrDefault(r, "pause", true), // TODO(dnephin): remove pause arg, and always pause in backend
 		Tag:     ref,
 		Author:  r.Form.Get("author"),
 		Comment: r.Form.Get("comment"),
@@ -69,7 +74,7 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 	return httputils.WriteJSON(w, http.StatusCreated, &types.IDResponse{ID: imgID})
 }
 
-func (s *containerRouter) getContainersJSON(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) getContainersJSON(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -78,7 +83,7 @@ func (s *containerRouter) getContainersJSON(ctx context.Context, w http.Response
 		return err
 	}
 
-	config := &types.ContainerListOptions{
+	config := &container.ListOptions{
 		All:     httputils.BoolValue(r, "all"),
 		Size:    httputils.BoolValue(r, "size"),
 		Since:   r.Form.Get("since"),
@@ -94,15 +99,24 @@ func (s *containerRouter) getContainersJSON(ctx context.Context, w http.Response
 		config.Limit = limit
 	}
 
-	containers, err := s.backend.Containers(ctx, config)
+	containers, err := c.backend.Containers(ctx, config)
 	if err != nil {
 		return err
+	}
+
+	version := httputils.VersionFromContext(ctx)
+
+	if versions.LessThan(version, "1.46") {
+		for _, c := range containers {
+			// Ignore HostConfig.Annotations because it was added in API v1.46.
+			c.HostConfig.Annotations = nil
+		}
 	}
 
 	return httputils.WriteJSON(w, http.StatusOK, containers)
 }
 
-func (s *containerRouter) getContainersStats(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) getContainersStats(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -116,17 +130,23 @@ func (s *containerRouter) getContainersStats(ctx context.Context, w http.Respons
 		oneShot = httputils.BoolValueOrDefault(r, "one-shot", false)
 	}
 
-	config := &backend.ContainerStatsConfig{
-		Stream:    stream,
-		OneShot:   oneShot,
-		OutStream: w,
-		Version:   httputils.VersionFromContext(ctx),
-	}
-
-	return s.backend.ContainerStats(ctx, vars["name"], config)
+	return c.backend.ContainerStats(ctx, vars["name"], &backend.ContainerStatsConfig{
+		Stream:  stream,
+		OneShot: oneShot,
+		OutStream: func() io.Writer {
+			// Assume that when this is called the request is OK.
+			w.WriteHeader(http.StatusOK)
+			if !stream {
+				return w
+			}
+			wf := ioutils.NewWriteFlusher(w)
+			wf.Flush()
+			return wf
+		},
+	})
 }
 
-func (s *containerRouter) getContainersLogs(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) getContainersLogs(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -142,7 +162,7 @@ func (s *containerRouter) getContainersLogs(ctx context.Context, w http.Response
 	}
 
 	containerName := vars["name"]
-	logsConfig := &types.ContainerLogsOptions{
+	logsConfig := &container.LogsOptions{
 		Follow:     httputils.BoolValue(r, "follow"),
 		Timestamps: httputils.BoolValue(r, "timestamps"),
 		Since:      r.Form.Get("since"),
@@ -153,7 +173,7 @@ func (s *containerRouter) getContainersLogs(ctx context.Context, w http.Response
 		Details:    httputils.BoolValue(r, "details"),
 	}
 
-	msgs, tty, err := s.backend.ContainerLogs(ctx, containerName, logsConfig)
+	msgs, tty, err := c.backend.ContainerLogs(ctx, containerName, logsConfig)
 	if err != nil {
 		return err
 	}
@@ -172,52 +192,31 @@ func (s *containerRouter) getContainersLogs(ctx context.Context, w http.Response
 	return nil
 }
 
-func (s *containerRouter) getContainersExport(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	return s.backend.ContainerExport(ctx, vars["name"], w)
+func (c *containerRouter) getContainersExport(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	return c.backend.ContainerExport(ctx, vars["name"], w)
 }
 
-type bodyOnStartError struct{}
+func (c *containerRouter) postContainersStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	ctx, span := otel.Tracer("").Start(ctx, "containerRouter.postContainersStart")
+	defer span.End()
 
-func (bodyOnStartError) Error() string {
-	return "starting container with non-empty request body was deprecated since API v1.22 and removed in v1.24"
-}
-
-func (bodyOnStartError) InvalidParameter() {}
-
-func (s *containerRouter) postContainersStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	// If contentLength is -1, we can assumed chunked encoding
 	// or more technically that the length is unknown
 	// https://golang.org/src/pkg/net/http/request.go#L139
 	// net/http otherwise seems to swallow any headers related to chunked encoding
 	// including r.TransferEncoding
 	// allow a nil body for backwards compatibility
-
-	version := httputils.VersionFromContext(ctx)
-	var hostConfig *container.HostConfig
+	//
 	// A non-nil json object is at least 7 characters.
 	if r.ContentLength > 7 || r.ContentLength == -1 {
-		if versions.GreaterThanOrEqualTo(version, "1.24") {
-			return bodyOnStartError{}
-		}
-
-		if err := httputils.CheckForJSON(r); err != nil {
-			return err
-		}
-
-		c, err := s.decoder.DecodeHostConfig(r.Body)
-		if err != nil {
-			return err
-		}
-		hostConfig = c
+		return errdefs.InvalidParameter(errors.New("starting container with non-empty request body was deprecated since API v1.22 and removed in v1.24"))
 	}
 
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	checkpoint := r.Form.Get("checkpoint")
-	checkpointDir := r.Form.Get("checkpoint-dir")
-	if err := s.backend.ContainerStart(ctx, vars["name"], hostConfig, checkpoint, checkpointDir); err != nil {
+	if err := c.backend.ContainerStart(ctx, vars["name"], r.Form.Get("checkpoint"), r.Form.Get("checkpoint-dir")); err != nil {
 		return err
 	}
 
@@ -225,7 +224,7 @@ func (s *containerRouter) postContainersStart(ctx context.Context, w http.Respon
 	return nil
 }
 
-func (s *containerRouter) postContainersStop(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersStop(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -245,7 +244,7 @@ func (s *containerRouter) postContainersStop(ctx context.Context, w http.Respons
 		options.Timeout = &valSeconds
 	}
 
-	if err := s.backend.ContainerStop(ctx, vars["name"], options); err != nil {
+	if err := c.backend.ContainerStop(ctx, vars["name"], options); err != nil {
 		return err
 	}
 
@@ -253,32 +252,21 @@ func (s *containerRouter) postContainersStop(ctx context.Context, w http.Respons
 	return nil
 }
 
-func (s *containerRouter) postContainersKill(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersKill(_ context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
 	name := vars["name"]
-	if err := s.backend.ContainerKill(name, r.Form.Get("signal")); err != nil {
-		var isStopped bool
-		if errdefs.IsConflict(err) {
-			isStopped = true
-		}
-
-		// Return error that's not caused because the container is stopped.
-		// Return error if the container is not running and the api is >= 1.20
-		// to keep backwards compatibility.
-		version := httputils.VersionFromContext(ctx)
-		if versions.GreaterThanOrEqualTo(version, "1.20") || !isStopped {
-			return errors.Wrapf(err, "Cannot kill container: %s", name)
-		}
+	if err := c.backend.ContainerKill(name, r.Form.Get("signal")); err != nil {
+		return errors.Wrapf(err, "cannot kill container: %s", name)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
-func (s *containerRouter) postContainersRestart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersRestart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -298,7 +286,7 @@ func (s *containerRouter) postContainersRestart(ctx context.Context, w http.Resp
 		options.Timeout = &valSeconds
 	}
 
-	if err := s.backend.ContainerRestart(ctx, vars["name"], options); err != nil {
+	if err := c.backend.ContainerRestart(ctx, vars["name"], options); err != nil {
 		return err
 	}
 
@@ -306,12 +294,12 @@ func (s *containerRouter) postContainersRestart(ctx context.Context, w http.Resp
 	return nil
 }
 
-func (s *containerRouter) postContainersPause(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersPause(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	if err := s.backend.ContainerPause(vars["name"]); err != nil {
+	if err := c.backend.ContainerPause(vars["name"]); err != nil {
 		return err
 	}
 
@@ -320,12 +308,12 @@ func (s *containerRouter) postContainersPause(ctx context.Context, w http.Respon
 	return nil
 }
 
-func (s *containerRouter) postContainersUnpause(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersUnpause(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	if err := s.backend.ContainerUnpause(vars["name"]); err != nil {
+	if err := c.backend.ContainerUnpause(vars["name"]); err != nil {
 		return err
 	}
 
@@ -334,7 +322,7 @@ func (s *containerRouter) postContainersUnpause(ctx context.Context, w http.Resp
 	return nil
 }
 
-func (s *containerRouter) postContainersWait(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersWait(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	// Behavior changed in version 1.30 to handle wait condition and to
 	// return headers immediately.
 	version := httputils.VersionFromContext(ctx)
@@ -362,7 +350,7 @@ func (s *containerRouter) postContainersWait(ctx context.Context, w http.Respons
 		}
 	}
 
-	waitC, err := s.backend.ContainerWait(ctx, vars["name"], waitCondition)
+	waitC, err := c.backend.ContainerWait(ctx, vars["name"], waitCondition)
 	if err != nil {
 		return err
 	}
@@ -399,8 +387,8 @@ func (s *containerRouter) postContainersWait(ctx context.Context, w http.Respons
 	})
 }
 
-func (s *containerRouter) getContainersChanges(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	changes, err := s.backend.ContainerChanges(ctx, vars["name"])
+func (c *containerRouter) getContainersChanges(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	changes, err := c.backend.ContainerChanges(ctx, vars["name"])
 	if err != nil {
 		return err
 	}
@@ -408,12 +396,12 @@ func (s *containerRouter) getContainersChanges(ctx context.Context, w http.Respo
 	return httputils.WriteJSON(w, http.StatusOK, changes)
 }
 
-func (s *containerRouter) getContainersTop(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) getContainersTop(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	procList, err := s.backend.ContainerTop(vars["name"], r.Form.Get("ps_args"))
+	procList, err := c.backend.ContainerTop(vars["name"], r.Form.Get("ps_args"))
 	if err != nil {
 		return err
 	}
@@ -421,21 +409,21 @@ func (s *containerRouter) getContainersTop(ctx context.Context, w http.ResponseW
 	return httputils.WriteJSON(w, http.StatusOK, procList)
 }
 
-func (s *containerRouter) postContainerRename(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainerRename(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
 	name := vars["name"]
 	newName := r.Form.Get("name")
-	if err := s.backend.ContainerRename(name, newName); err != nil {
+	if err := c.backend.ContainerRename(name, newName); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
-func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainerUpdate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -467,7 +455,7 @@ func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.Respon
 	}
 
 	name := vars["name"]
-	resp, err := s.backend.ContainerUpdate(name, hostConfig)
+	resp, err := c.backend.ContainerUpdate(name, hostConfig)
 	if err != nil {
 		return err
 	}
@@ -475,7 +463,7 @@ func (s *containerRouter) postContainerUpdate(ctx context.Context, w http.Respon
 	return httputils.WriteJSON(w, http.StatusOK, resp)
 }
 
-func (s *containerRouter) postContainersCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -485,28 +473,57 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 
 	name := r.Form.Get("name")
 
-	config, hostConfig, networkingConfig, err := s.decoder.DecodeConfig(r.Body)
+	config, hostConfig, networkingConfig, err := c.decoder.DecodeConfig(r.Body)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return errdefs.InvalidParameter(errors.New("invalid JSON: got EOF while reading request body"))
 		}
 		return err
 	}
+
+	if config == nil {
+		return errdefs.InvalidParameter(runconfig.ErrEmptyConfig)
+	}
+	if hostConfig == nil {
+		hostConfig = &container.HostConfig{}
+	}
+	if networkingConfig == nil {
+		networkingConfig = &network.NetworkingConfig{}
+	}
+	if networkingConfig.EndpointsConfig == nil {
+		networkingConfig.EndpointsConfig = make(map[string]*network.EndpointSettings)
+	}
+	// The NetworkMode "default" is used as a way to express a container should
+	// be attached to the OS-dependant default network, in an OS-independent
+	// way. Doing this conversion as soon as possible ensures we have less
+	// NetworkMode to handle down the path (including in the
+	// backward-compatibility layer we have just below).
+	//
+	// Note that this is not the only place where this conversion has to be
+	// done (as there are various other places where containers get created).
+	if hostConfig.NetworkMode == "" || hostConfig.NetworkMode.IsDefault() {
+		hostConfig.NetworkMode = networkSettings.DefaultNetwork
+		if nw, ok := networkingConfig.EndpointsConfig[network.NetworkDefault]; ok {
+			networkingConfig.EndpointsConfig[hostConfig.NetworkMode.NetworkName()] = nw
+			delete(networkingConfig.EndpointsConfig, network.NetworkDefault)
+		}
+	}
+
 	version := httputils.VersionFromContext(ctx)
-	adjustCPUShares := versions.LessThan(version, "1.19")
 
 	// When using API 1.24 and under, the client is responsible for removing the container
-	if hostConfig != nil && versions.LessThan(version, "1.25") {
+	if versions.LessThan(version, "1.25") {
 		hostConfig.AutoRemove = false
 	}
 
-	if hostConfig != nil && versions.LessThan(version, "1.40") {
+	if versions.LessThan(version, "1.40") {
 		// Ignore BindOptions.NonRecursive because it was added in API 1.40.
 		for _, m := range hostConfig.Mounts {
 			if bo := m.BindOptions; bo != nil {
 				bo.NonRecursive = false
 			}
 		}
+
 		// Ignore KernelMemoryTCP because it was added in API 1.40.
 		hostConfig.KernelMemoryTCP = 0
 
@@ -515,14 +532,26 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 			hostConfig.IpcMode = container.IPCModeShareable
 		}
 	}
-	if hostConfig != nil && versions.LessThan(version, "1.41") && !s.cgroup2 {
+
+	if versions.LessThan(version, "1.41") {
 		// Older clients expect the default to be "host" on cgroup v1 hosts
-		if hostConfig.CgroupnsMode.IsEmpty() {
+		if !c.cgroup2 && hostConfig.CgroupnsMode.IsEmpty() {
 			hostConfig.CgroupnsMode = container.CgroupnsModeHost
 		}
 	}
 
-	if hostConfig != nil && versions.LessThan(version, "1.42") {
+	var platform *ocispec.Platform
+	if versions.GreaterThanOrEqualTo(version, "1.41") {
+		if v := r.Form.Get("platform"); v != "" {
+			p, err := platforms.Parse(v)
+			if err != nil {
+				return errdefs.InvalidParameter(err)
+			}
+			platform = &p
+		}
+	}
+
+	if versions.LessThan(version, "1.42") {
 		for _, m := range hostConfig.Mounts {
 			// Ignore BindOptions.CreateMountpoint because it was added in API 1.42.
 			if bo := m.BindOptions; bo != nil {
@@ -542,16 +571,14 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 				bo.CreateMountpoint = false
 			}
 		}
-	}
 
-	if hostConfig != nil && versions.LessThan(version, "1.44") {
-		if config.Healthcheck != nil {
-			// StartInterval was added in API 1.44
-			config.Healthcheck.StartInterval = 0
+		if runtime.GOOS == "linux" {
+			// ConsoleSize is not respected by Linux daemon before API 1.42
+			hostConfig.ConsoleSize = [2]uint{0, 0}
 		}
 	}
 
-	if hostConfig != nil && versions.GreaterThanOrEqualTo(version, "1.42") {
+	if versions.GreaterThanOrEqualTo(version, "1.42") {
 		// Ignore KernelMemory removed in API 1.42.
 		hostConfig.KernelMemory = 0
 		for _, m := range hostConfig.Mounts {
@@ -567,50 +594,39 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		}
 	}
 
-	if hostConfig != nil && runtime.GOOS == "linux" && versions.LessThan(version, "1.42") {
-		// ConsoleSize is not respected by Linux daemon before API 1.42
-		hostConfig.ConsoleSize = [2]uint{0, 0}
-	}
-
-	if hostConfig != nil && versions.LessThan(version, "1.43") {
+	if versions.LessThan(version, "1.43") {
 		// Ignore Annotations because it was added in API v1.43.
 		hostConfig.Annotations = nil
 	}
 
-	var platform *ocispec.Platform
-	if versions.GreaterThanOrEqualTo(version, "1.41") {
-		if v := r.Form.Get("platform"); v != "" {
-			p, err := platforms.Parse(v)
-			if err != nil {
-				return errdefs.InvalidParameter(err)
-			}
-			platform = &p
+	defaultReadOnlyNonRecursive := false
+	if versions.LessThan(version, "1.44") {
+		if config.Healthcheck != nil {
+			// StartInterval was added in API 1.44
+			config.Healthcheck.StartInterval = 0
 		}
-	}
 
-	if hostConfig != nil && hostConfig.PidsLimit != nil && *hostConfig.PidsLimit <= 0 {
-		// Don't set a limit if either no limit was specified, or "unlimited" was
-		// explicitly set.
-		// Both `0` and `-1` are accepted as "unlimited", and historically any
-		// negative value was accepted, so treat those as "unlimited" as well.
-		hostConfig.PidsLimit = nil
-	}
+		// Set ReadOnlyNonRecursive to true because it was added in API 1.44
+		// Before that all read-only mounts were non-recursive.
+		// Keep that behavior for clients on older APIs.
+		defaultReadOnlyNonRecursive = true
 
-	if hostConfig != nil && versions.LessThan(version, "1.44") {
 		for _, m := range hostConfig.Mounts {
-			if m.BindOptions != nil {
-				// Ignore ReadOnlyNonRecursive because it was added in API 1.44.
-				m.BindOptions.ReadOnlyNonRecursive = false
-				if m.BindOptions.ReadOnlyForceRecursive {
+			if m.Type == mount.TypeBind {
+				if m.BindOptions != nil && m.BindOptions.ReadOnlyForceRecursive {
+					// NOTE: that technically this is a breaking change for older
+					// API versions, and we should ignore the new field.
+					// However, this option may be incorrectly set by a client with
+					// the expectation that the failing to apply recursive read-only
+					// is enforced, so we decided to produce an error instead,
+					// instead of silently ignoring.
 					return errdefs.InvalidParameter(errors.New("BindOptions.ReadOnlyForceRecursive needs API v1.44 or newer"))
 				}
 			}
 		}
-	}
 
-	if versions.LessThan(version, "1.44") {
 		// Creating a container connected to several networks is not supported until v1.44.
-		if networkingConfig != nil && len(networkingConfig.EndpointsConfig) > 1 {
+		if len(networkingConfig.EndpointsConfig) > 1 {
 			l := make([]string, 0, len(networkingConfig.EndpointsConfig))
 			for k := range networkingConfig.EndpointsConfig {
 				l = append(l, k)
@@ -619,34 +635,287 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		}
 	}
 
-	ccr, err := s.backend.ContainerCreate(ctx, types.ContainerCreateConfig{
-		Name:             name,
-		Config:           config,
-		HostConfig:       hostConfig,
-		NetworkingConfig: networkingConfig,
-		AdjustCPUShares:  adjustCPUShares,
-		Platform:         platform,
+	if versions.LessThan(version, "1.45") {
+		for _, m := range hostConfig.Mounts {
+			if m.VolumeOptions != nil && m.VolumeOptions.Subpath != "" {
+				return errdefs.InvalidParameter(errors.New("VolumeOptions.Subpath needs API v1.45 or newer"))
+			}
+		}
+	}
+
+	if versions.LessThan(version, "1.48") {
+		for _, epConfig := range networkingConfig.EndpointsConfig {
+			// Before 1.48, all endpoints had the same priority, so
+			// reinitialize this field.
+			epConfig.GwPriority = 0
+		}
+	}
+
+	var warnings []string
+	if warn := handleVolumeDriverBC(version, hostConfig); warn != "" {
+		warnings = append(warnings, warn)
+	}
+	if warn, err := handleMACAddressBC(config, hostConfig, networkingConfig, version); err != nil {
+		return err
+	} else if warn != "" {
+		warnings = append(warnings, warn)
+	}
+
+	if warn, err := handleSysctlBC(hostConfig, networkingConfig, version); err != nil {
+		return err
+	} else if warn != "" {
+		warnings = append(warnings, warn)
+	}
+
+	if hostConfig.PidsLimit != nil && *hostConfig.PidsLimit <= 0 {
+		// Don't set a limit if either no limit was specified, or "unlimited" was
+		// explicitly set.
+		// Both `0` and `-1` are accepted as "unlimited", and historically any
+		// negative value was accepted, so treat those as "unlimited" as well.
+		hostConfig.PidsLimit = nil
+	}
+
+	ccr, err := c.backend.ContainerCreate(ctx, backend.ContainerCreateConfig{
+		Name:                        name,
+		Config:                      config,
+		HostConfig:                  hostConfig,
+		NetworkingConfig:            networkingConfig,
+		Platform:                    platform,
+		DefaultReadOnlyNonRecursive: defaultReadOnlyNonRecursive,
 	})
 	if err != nil {
 		return err
 	}
-
+	ccr.Warnings = append(ccr.Warnings, warnings...)
 	return httputils.WriteJSON(w, http.StatusCreated, ccr)
 }
 
-func (s *containerRouter) deleteContainers(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+// handleVolumeDriverBC handles the use of the container-wide "VolumeDriver"
+// option when the Mounts API is used for volumes. It produces a warning
+// on API 1.48 and up. Older versions of the API did not produce a warning,
+// but the CLI would do so.
+func handleVolumeDriverBC(version string, hostConfig *container.HostConfig) (warning string) {
+	if hostConfig.VolumeDriver == "" || versions.LessThan(version, "1.48") {
+		return ""
+	}
+	for _, m := range hostConfig.Mounts {
+		if m.Type != mount.TypeVolume {
+			continue
+		}
+		if m.VolumeOptions != nil && m.VolumeOptions.DriverConfig != nil && m.VolumeOptions.DriverConfig.Name != "" {
+			// Driver was configured for this mount, so no ambiguity.
+			continue
+		}
+		return "WARNING: the container-wide volume-driver configuration is ignored for volumes specified via 'mount'. Use '--mount type=volume,volume-driver=...' instead"
+	}
+	return ""
+}
+
+// handleMACAddressBC takes care of backward-compatibility for the container-wide MAC address by mutating the
+// networkingConfig to set the endpoint-specific MACAddress field introduced in API v1.44. It returns a warning message
+// or an error if the container-wide field was specified for API >= v1.44.
+func handleMACAddressBC(config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, version string) (string, error) {
+	deprecatedMacAddress := config.MacAddress //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
+
+	// For older versions of the API, migrate the container-wide MAC address to EndpointsConfig.
+	if versions.LessThan(version, "1.44") {
+		if deprecatedMacAddress == "" {
+			// If a MAC address is supplied in EndpointsConfig, discard it because the old API
+			// would have ignored it.
+			for _, ep := range networkingConfig.EndpointsConfig {
+				ep.MacAddress = ""
+			}
+			return "", nil
+		}
+		if !hostConfig.NetworkMode.IsBridge() && !hostConfig.NetworkMode.IsUserDefined() {
+			return "", runconfig.ErrConflictContainerNetworkAndMac
+		}
+
+		epConfig, err := epConfigForNetMode(version, hostConfig.NetworkMode, networkingConfig)
+		if err != nil {
+			return "", err
+		}
+		epConfig.MacAddress = deprecatedMacAddress
+		return "", nil
+	}
+
+	// The container-wide MacAddress parameter is deprecated and should now be specified in EndpointsConfig.
+	if deprecatedMacAddress == "" {
+		return "", nil
+	}
+	var warning string
+	if hostConfig.NetworkMode.IsBridge() || hostConfig.NetworkMode.IsUserDefined() {
+		ep, err := epConfigForNetMode(version, hostConfig.NetworkMode, networkingConfig)
+		if err != nil {
+			return "", errors.Wrap(err, "unable to migrate container-wide MAC address to a specific network")
+		}
+		// ep is the endpoint that needs the container-wide MAC address; migrate the address
+		// to it, or bail out if there's a mismatch.
+		if ep.MacAddress == "" {
+			ep.MacAddress = deprecatedMacAddress
+		} else if ep.MacAddress != deprecatedMacAddress {
+			return "", errdefs.InvalidParameter(errors.New("the container-wide MAC address must match the endpoint-specific MAC address for the main network, or be left empty"))
+		}
+	}
+	warning = "The container-wide MacAddress field is now deprecated. It should be specified in EndpointsConfig instead."
+	config.MacAddress = "" //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
+
+	return warning, nil
+}
+
+// handleSysctlBC migrates top level network endpoint-specific '--sysctl'
+// settings to an DriverOpts for an endpoint. This is necessary because sysctls
+// are applied during container task creation, but sysctls that name an interface
+// (for example 'net.ipv6.conf.eth0.forwarding') cannot be applied until the
+// interface has been created. So, these settings are removed from hostConfig.Sysctls
+// and added to DriverOpts[netlabel.EndpointSysctls].
+//
+// Because interface names ('ethN') are allocated sequentially, and the order of
+// network connections is not deterministic on container restart, only 'eth0'
+// would work reliably in a top-level '--sysctl' option, and then only when
+// there's a single initial network connection. So, settings for 'eth0' are
+// migrated to the primary interface, identified by 'hostConfig.NetworkMode'.
+// Settings for other interfaces are treated as errors.
+//
+// In the DriverOpts, because the interface name cannot be determined in advance, the
+// interface name is replaced by "IFNAME". For example, 'net.ipv6.conf.eth0.forwarding'
+// becomes 'net.ipv6.conf.IFNAME.forwarding'. The value in DriverOpts is a
+// comma-separated list.
+//
+// A warning is generated when settings are migrated.
+func handleSysctlBC(
+	hostConfig *container.HostConfig,
+	netConfig *network.NetworkingConfig,
+	version string,
+) (string, error) {
+	if !hostConfig.NetworkMode.IsPrivate() {
+		return "", nil
+	}
+
+	var ep *network.EndpointSettings
+	var toDelete []string
+	var netIfSysctls []string
+	for k, v := range hostConfig.Sysctls {
+		// If the sysctl name matches "net.*.*.eth0.*" ...
+		if spl := strings.SplitN(k, ".", 5); len(spl) == 5 && spl[0] == "net" && strings.HasPrefix(spl[3], "eth") {
+			netIfSysctl := fmt.Sprintf("net.%s.%s.IFNAME.%s=%s", spl[1], spl[2], spl[4], v)
+			// Find the EndpointConfig to migrate settings to, if not already found.
+			if ep == nil {
+				// Per-endpoint sysctls were introduced in API version 1.46. Migration is
+				// needed, but refuse to do it automatically for API 1.48 and newer.
+				if versions.GreaterThan(version, "1.47") {
+					return "", fmt.Errorf("interface specific sysctl setting %q must be supplied using driver option '%s'",
+						k, netlabel.EndpointSysctls)
+				}
+				var err error
+				ep, err = epConfigForNetMode(version, hostConfig.NetworkMode, netConfig)
+				if err != nil {
+					return "", fmt.Errorf("unable to find a network for sysctl %s: %w", k, err)
+				}
+			}
+			// Only try to migrate settings for "eth0", anything else would always
+			// have behaved unpredictably.
+			if spl[3] != "eth0" {
+				return "", fmt.Errorf(`unable to determine network endpoint for sysctl %s, use driver option '%s' to set per-interface sysctls`,
+					k, netlabel.EndpointSysctls)
+			}
+			// Prepare the migration.
+			toDelete = append(toDelete, k)
+			netIfSysctls = append(netIfSysctls, netIfSysctl)
+		}
+	}
+	if ep == nil {
+		return "", nil
+	}
+
+	newDriverOpt := strings.Join(netIfSysctls, ",")
+	warning := fmt.Sprintf(`Migrated sysctl %q to DriverOpts{%q:%q}.`,
+		strings.Join(toDelete, ","),
+		netlabel.EndpointSysctls, newDriverOpt)
+
+	// Append existing per-endpoint sysctls to the migrated sysctls (give priority
+	// to per-endpoint settings).
+	if ep.DriverOpts == nil {
+		ep.DriverOpts = map[string]string{}
+	}
+	if oldDriverOpt, ok := ep.DriverOpts[netlabel.EndpointSysctls]; ok {
+		newDriverOpt += "," + oldDriverOpt
+	}
+	ep.DriverOpts[netlabel.EndpointSysctls] = newDriverOpt
+
+	// Delete migrated settings from the top-level sysctls.
+	for _, k := range toDelete {
+		delete(hostConfig.Sysctls, k)
+	}
+
+	return warning, nil
+}
+
+// epConfigForNetMode finds, or creates, an entry in netConfig.EndpointsConfig
+// corresponding to nwMode.
+//
+// nwMode.NetworkName() may be the network's name, its id, or its short-id.
+//
+// The corresponding endpoint in netConfig.EndpointsConfig may be keyed on a
+// different one of name/id/short-id. If there's any ambiguity (there are
+// endpoints but the names don't match), return an error and do not create a new
+// endpoint, because it might be a duplicate.
+func epConfigForNetMode(
+	version string,
+	nwMode container.NetworkMode,
+	netConfig *network.NetworkingConfig,
+) (*network.EndpointSettings, error) {
+	nwName := nwMode.NetworkName()
+
+	// It's always safe to create an EndpointsConfig entry under nwName if there are
+	// no entries already (because there can't be an entry for this network nwName
+	// refers to under any other name/short-id/id).
+	if len(netConfig.EndpointsConfig) == 0 {
+		es := &network.EndpointSettings{}
+		netConfig.EndpointsConfig = map[string]*network.EndpointSettings{
+			nwName: es,
+		}
+		return es, nil
+	}
+
+	// There cannot be more than one entry in EndpointsConfig with API < 1.44.
+	if versions.LessThan(version, "1.44") {
+		// No need to check for a match between NetworkMode and the names/ids in EndpointsConfig,
+		// the old version of the API would pick this network anyway.
+		for _, ep := range netConfig.EndpointsConfig {
+			return ep, nil
+		}
+	}
+
+	// There is existing endpoint config - if it's not indexed by NetworkMode.Name(), we
+	// can't tell which network the container-wide settings are intended for. NetworkMode,
+	// the keys in EndpointsConfig and the NetworkID in EndpointsConfig may mix network
+	// name/id/short-id. It's not safe to create EndpointsConfig under the NetworkMode
+	// name to store the container-wide setting, because that may result in two sets
+	// of EndpointsConfig for the same network and one set will be discarded later. So,
+	// reject the request ...
+	ep, ok := netConfig.EndpointsConfig[nwName]
+	if !ok {
+		return nil, errdefs.InvalidParameter(
+			errors.New("HostConfig.NetworkMode must match the identity of a network in NetworkSettings.Networks"))
+	}
+
+	return ep, nil
+}
+
+func (c *containerRouter) deleteContainers(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
 	name := vars["name"]
-	config := &types.ContainerRmConfig{
+	config := &backend.ContainerRmConfig{
 		ForceRemove:  httputils.BoolValue(r, "force"),
 		RemoveVolume: httputils.BoolValue(r, "v"),
 		RemoveLink:   httputils.BoolValue(r, "link"),
 	}
 
-	if err := s.backend.ContainerRm(name, config); err != nil {
+	if err := c.backend.ContainerRm(name, config); err != nil {
 		return err
 	}
 
@@ -655,24 +924,24 @@ func (s *containerRouter) deleteContainers(ctx context.Context, w http.ResponseW
 	return nil
 }
 
-func (s *containerRouter) postContainersResize(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersResize(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	height, err := strconv.Atoi(r.Form.Get("h"))
+	height, err := httputils.Uint32Value(r, "h")
 	if err != nil {
-		return errdefs.InvalidParameter(err)
+		return errdefs.InvalidParameter(errors.Wrapf(err, "invalid resize height %q", r.Form.Get("h")))
 	}
-	width, err := strconv.Atoi(r.Form.Get("w"))
+	width, err := httputils.Uint32Value(r, "w")
 	if err != nil {
-		return errdefs.InvalidParameter(err)
+		return errdefs.InvalidParameter(errors.Wrapf(err, "invalid resize width %q", r.Form.Get("w")))
 	}
 
-	return s.backend.ContainerResize(vars["name"], height, width)
+	return c.backend.ContainerResize(ctx, vars["name"], height, width)
 }
 
-func (s *containerRouter) postContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	err := httputils.ParseForm(r)
 	if err != nil {
 		return err
@@ -688,7 +957,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 	}
 
 	contentType := types.MediaTypeRawStream
-	setupStreams := func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error) {
+	setupStreams := func(multiplexed bool, cancel func()) (io.ReadCloser, io.Writer, io.Writer, error) {
 		conn, _, err := hijacker.Hijack()
 		if err != nil {
 			return nil, nil, nil, err
@@ -701,10 +970,14 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 			if multiplexed && versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.42") {
 				contentType = types.MediaTypeMultiplexedStream
 			}
-			fmt.Fprintf(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: "+contentType+"\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			// FIXME(thaJeztah): we should not ignore errors here; see https://github.com/moby/moby/pull/48359#discussion_r1725562802
+			fmt.Fprintf(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: %v\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", contentType)
 		} else {
-			fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n")
+			// FIXME(thaJeztah): we should not ignore errors here; see https://github.com/moby/moby/pull/48359#discussion_r1725562802
+			fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n")
 		}
+
+		go notifyClosed(ctx, conn, cancel)
 
 		closer := func() error {
 			httputils.CloseStreams(conn)
@@ -724,7 +997,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 		MuxStreams: true,
 	}
 
-	if err = s.backend.ContainerAttach(containerName, attachConfig); err != nil {
+	if err = c.backend.ContainerAttach(containerName, attachConfig); err != nil {
 		log.G(ctx).WithError(err).Errorf("Handler for %s %s returned error", r.Method, r.URL.Path)
 		// Remember to close stream if error happens
 		conn, _, errHijack := hijacker.Hijack()
@@ -740,7 +1013,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 	return nil
 }
 
-func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) wsContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -754,7 +1027,7 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 
 	version := httputils.VersionFromContext(ctx)
 
-	setupStreams := func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error) {
+	setupStreams := func(multiplexed bool, cancel func()) (io.ReadCloser, io.Writer, io.Writer, error) {
 		wsChan := make(chan *websocket.Conn)
 		h := func(conn *websocket.Conn) {
 			wsChan <- conn
@@ -773,6 +1046,8 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 		if versions.GreaterThanOrEqualTo(version, "1.28") {
 			conn.PayloadType = websocket.BinaryFrame
 		}
+
+		// TODO: Close notifications
 		return conn, conn, conn, nil
 	}
 
@@ -794,7 +1069,7 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 		MuxStreams: false, // never multiplex, as we rely on websocket to manage distinct streams
 	}
 
-	err = s.backend.ContainerAttach(containerName, attachConfig)
+	err = c.backend.ContainerAttach(containerName, attachConfig)
 	close(done)
 	select {
 	case <-started:
@@ -809,7 +1084,7 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 	return err
 }
 
-func (s *containerRouter) postContainersPrune(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainersPrune(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
@@ -819,7 +1094,7 @@ func (s *containerRouter) postContainersPrune(ctx context.Context, w http.Respon
 		return err
 	}
 
-	pruneReport, err := s.backend.ContainersPrune(ctx, pruneFilters)
+	pruneReport, err := c.backend.ContainersPrune(ctx, pruneFilters)
 	if err != nil {
 		return err
 	}

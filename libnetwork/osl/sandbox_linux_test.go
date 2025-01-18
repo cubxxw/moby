@@ -1,6 +1,7 @@
 package osl
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -10,8 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/internal/testutils/netnsutils"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/types"
@@ -44,19 +45,16 @@ func newKey(t *testing.T) (string, error) {
 	}
 
 	name = filepath.Join("/tmp", name)
-	if _, err := os.Create(name); err != nil {
+	f, err := os.Create(name)
+	if err != nil {
 		return "", err
 	}
-
-	// Set the rpmCleanupPeriod to be low to make the test run quicker
-	gpmLock.Lock()
-	gpmCleanupPeriod = 2 * time.Second
-	gpmLock.Unlock()
+	_ = f.Close()
 
 	return name, nil
 }
 
-func newInfo(t *testing.T, hnd *netlink.Handle) (*Namespace, error) {
+func newInfo(t *testing.T, hnd nlwrap.Handle) (*Namespace, error) {
 	t.Helper()
 	err := hnd.LinkAdd(&netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{Name: vethName1, TxQLen: 0},
@@ -72,7 +70,7 @@ func newInfo(t *testing.T, hnd *netlink.Handle) (*Namespace, error) {
 	}
 	addr.IP = ip4
 
-	ip6, addrv6, err := net.ParseCIDR("fe80::2/64")
+	ip6, addrv6, err := net.ParseCIDR("fdac:97b4:dbcc::2/64")
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +114,7 @@ func newInfo(t *testing.T, hnd *netlink.Handle) (*Namespace, error) {
 	return &Namespace{
 		iFaces: []*Interface{intf1, intf2, intf3},
 		gw:     net.ParseIP("192.168.1.1"),
-		gwv6:   net.ParseIP("fe80::1"),
+		gwv6:   net.ParseIP("fdac:97b4:dbcc::1/64"),
 	}, nil
 }
 
@@ -127,7 +125,7 @@ func verifySandbox(t *testing.T, ns *Namespace, ifaceSuffixes []string) {
 	}
 	defer sbNs.Close()
 
-	nh, err := netlink.NewHandleAt(sbNs)
+	nh, err := nlwrap.NewHandleAt(sbNs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,17 +140,9 @@ func verifySandbox(t *testing.T, ns *Namespace, ifaceSuffixes []string) {
 	}
 }
 
-func verifyCleanup(t *testing.T, ns *Namespace, wait bool) {
-	if wait {
-		time.Sleep(gpmCleanupPeriod * 2)
-	}
-
+func verifyCleanup(t *testing.T, ns *Namespace) {
 	if _, err := os.Stat(ns.Key()); err == nil {
-		if wait {
-			t.Fatalf("The sandbox path %s is not getting cleaned up even after twice the cleanup period", ns.Key())
-		} else {
-			t.Fatalf("The sandbox path %s is not cleaned up after running gc", ns.Key())
-		}
+		t.Fatalf("The sandbox path %s is not cleaned up after running gc", ns.Key())
 	}
 }
 
@@ -190,7 +180,7 @@ func TestDisableIPv6DAD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = setInterfaceIPv6(nlh, link, iface)
+	err = setInterfaceIPv6(context.Background(), nlh, link, iface)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,15 +246,15 @@ func TestSetInterfaceIP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := setInterfaceIP(nlh, linkA, iface); err != nil {
+	if err := setInterfaceIP(context.Background(), nlh, linkA, iface); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := setInterfaceIPv6(nlh, linkA, iface); err != nil {
+	if err := setInterfaceIPv6(context.Background(), nlh, linkA, iface); err != nil {
 		t.Fatal(err)
 	}
 
-	err = setInterfaceIP(nlh, linkB, iface)
+	err = setInterfaceIP(context.Background(), nlh, linkB, iface)
 	if err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded")
 	}
@@ -272,7 +262,7 @@ func TestSetInterfaceIP(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	err = setInterfaceIPv6(nlh, linkB, iface)
+	err = setInterfaceIPv6(context.Background(), nlh, linkB, iface)
 	if err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded")
 	}
@@ -326,15 +316,15 @@ func TestLiveRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := setInterfaceIP(nlh, linkA, iface); err != nil {
+	if err := setInterfaceIP(context.Background(), nlh, linkA, iface); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := setInterfaceIPv6(nlh, linkA, iface); err != nil {
+	if err := setInterfaceIPv6(context.Background(), nlh, linkA, iface); err != nil {
 		t.Fatal(err)
 	}
 
-	err = setInterfaceIP(nlh, linkB, iface)
+	err = setInterfaceIP(context.Background(), nlh, linkB, iface)
 	if err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded")
 	}
@@ -342,7 +332,7 @@ func TestLiveRestore(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	err = setInterfaceIPv6(nlh, linkB, iface)
+	err = setInterfaceIPv6(context.Background(), nlh, linkB, iface)
 	if err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded")
 	}
@@ -360,10 +350,10 @@ func TestLiveRestore(t *testing.T) {
 	// Check if the IPV4 & IPV6 entry present
 	// If present , we should get error in below call
 	// It shows us , we don't delete any config in live-restore case
-	if err := setInterfaceIPv6(nlh, linkA, iface); err == nil {
+	if err := setInterfaceIPv6(context.Background(), nlh, linkA, iface); err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded for IPV6 ")
 	}
-	if err := setInterfaceIP(nlh, linkA, iface); err == nil {
+	if err := setInterfaceIP(context.Background(), nlh, linkA, iface); err == nil {
 		t.Fatalf("Expected route conflict error, but succeeded for IPV4 ")
 	}
 }
@@ -391,7 +381,7 @@ func TestSandboxCreate(t *testing.T) {
 	}
 
 	for _, i := range tbox.Interfaces() {
-		err = s.AddInterface(i.SrcName(), i.DstName(),
+		err = s.AddInterface(context.Background(), i.SrcName(), i.DstName(),
 			WithIsBridge(i.Bridge()),
 			WithIPv4Address(i.Address()),
 			WithIPv6Address(i.AddressIPv6()))
@@ -416,7 +406,7 @@ func TestSandboxCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifyCleanup(t, s, true)
+	verifyCleanup(t, s)
 }
 
 func TestSandboxCreateTwice(t *testing.T) {
@@ -443,8 +433,7 @@ func TestSandboxCreateTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	GC()
-	verifyCleanup(t, s, false)
+	verifyCleanup(t, s)
 }
 
 func TestSandboxGC(t *testing.T) {
@@ -463,8 +452,7 @@ func TestSandboxGC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	GC()
-	verifyCleanup(t, s, false)
+	verifyCleanup(t, s)
 }
 
 func TestAddRemoveInterface(t *testing.T) {
@@ -490,7 +478,7 @@ func TestAddRemoveInterface(t *testing.T) {
 	}
 
 	for _, i := range tbox.Interfaces() {
-		err = s.AddInterface(i.SrcName(), i.DstName(),
+		err = s.AddInterface(context.Background(), i.SrcName(), i.DstName(),
 			WithIsBridge(i.Bridge()),
 			WithIPv4Address(i.Address()),
 			WithIPv6Address(i.AddressIPv6()),
@@ -510,7 +498,7 @@ func TestAddRemoveInterface(t *testing.T) {
 	verifySandbox(t, s, []string{"1", "2"})
 
 	i := tbox.Interfaces()[0]
-	err = s.AddInterface(i.SrcName(), i.DstName(),
+	err = s.AddInterface(context.Background(), i.SrcName(), i.DstName(),
 		WithIsBridge(i.Bridge()),
 		WithIPv4Address(i.Address()),
 		WithIPv6Address(i.AddressIPv6()),
@@ -526,6 +514,5 @@ func TestAddRemoveInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	GC()
-	verifyCleanup(t, s, false)
+	verifyCleanup(t, s)
 }

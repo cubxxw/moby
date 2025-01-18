@@ -29,6 +29,9 @@ func TestValidateMount(t *testing.T) {
 			input: mount.Mount{Type: mount.TypeVolume, Target: testDestinationPath},
 		},
 		{
+			input: mount.Mount{Type: mount.TypeVolume, Target: testDestinationPath, Source: "hello", VolumeOptions: &mount.VolumeOptions{Subpath: "world"}},
+		},
+		{
 			input:    mount.Mount{Type: mount.TypeBind},
 			expected: errMissingField("Target"),
 		},
@@ -53,7 +56,6 @@ func TestValidateMount(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run("", func(t *testing.T) {
 			err := parser.ValidateMountConfig(&tc.input)
 			if tc.expected != nil {
@@ -111,7 +113,6 @@ func TestValidateLCOWMount(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run("", func(t *testing.T) {
 			err := parser.ValidateMountConfig(&tc.input)
 			if tc.expected != nil {

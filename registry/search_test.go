@@ -131,7 +131,6 @@ func TestSearchErrors(t *testing.T) {
 		},
 	}
 	for _, tc := range errorCases {
-		tc := tc
 		t.Run(tc.expectedError, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !tc.shouldReturnError {
@@ -206,16 +205,10 @@ func TestSearch(t *testing.T) {
 					IsAutomated: true, //nolint:staticcheck // ignore SA1019 (field is deprecated).
 				},
 			},
-			expectedResults: []registry.SearchResult{
-				{
-					Name:        "name",
-					Description: "description",
-					IsAutomated: true, //nolint:staticcheck // ignore SA1019 (field is deprecated).
-				},
-			},
+			expectedResults: []registry.SearchResult{},
 		},
 		{
-			name:        "is-automated=false, no results",
+			name:        "is-automated=false, IsAutomated reset to false",
 			filtersArgs: filters.NewArgs(filters.Arg("is-automated", "false")),
 			registryResults: []registry.SearchResult{
 				{
@@ -224,7 +217,13 @@ func TestSearch(t *testing.T) {
 					IsAutomated: true, //nolint:staticcheck // ignore SA1019 (field is deprecated).
 				},
 			},
-			expectedResults: []registry.SearchResult{},
+			expectedResults: []registry.SearchResult{
+				{
+					Name:        "name",
+					Description: "description",
+					IsAutomated: false, //nolint:staticcheck // ignore SA1019 (field is deprecated).
+				},
+			},
 		},
 		{
 			name:        "is-automated=false",
@@ -390,19 +389,10 @@ func TestSearch(t *testing.T) {
 					IsAutomated: true, //nolint:staticcheck // ignore SA1019 (field is deprecated).
 				},
 			},
-			expectedResults: []registry.SearchResult{
-				{
-					Name:        "name3",
-					Description: "description3",
-					StarCount:   2,
-					IsOfficial:  true,
-					IsAutomated: true, //nolint:staticcheck // ignore SA1019 (field is deprecated).
-				},
-			},
+			expectedResults: []registry.SearchResult{},
 		},
 	}
 	for _, tc := range successCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-type", "application/json")

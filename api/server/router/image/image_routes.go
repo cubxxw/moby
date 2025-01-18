@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/server/httputils"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/filters"
-	opts "github.com/docker/docker/api/types/image"
+	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/builder/remotecontext"
@@ -55,7 +55,7 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 		if p := r.FormValue("platform"); p != "" {
 			sp, err := platforms.Parse(p)
 			if err != nil {
-				return err
+				return errdefs.InvalidParameter(err)
 			}
 			platform = &sp
 		}
@@ -72,9 +72,9 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 		// Special case: "pull -a" may send an image name with a
 		// trailing :. This is ugly, but let's not break API
 		// compatibility.
-		image := strings.TrimSuffix(img, ":")
+		imgName := strings.TrimSuffix(img, ":")
 
-		ref, err := reference.ParseNormalizedNamed(image)
+		ref, err := reference.ParseNormalizedNamed(imgName)
 		if err != nil {
 			return errdefs.InvalidParameter(err)
 		}
@@ -141,7 +141,7 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 		id, progressErr = ir.backend.ImportImage(ctx, tagRef, platform, comment, layerReader, r.Form["changes"])
 
 		if progressErr == nil {
-			output.Write(streamformatter.FormatStatus("", id.String()))
+			_, _ = output.Write(streamformatter.FormatStatus("", "%v", id.String()))
 		}
 	}
 	if progressErr != nil {
@@ -189,7 +189,7 @@ func (ir *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter
 
 	var ref reference.Named
 
-	// Tag is empty only in case ImagePushOptions.All is true.
+	// Tag is empty only in case PushOptions.All is true.
 	if tag != "" {
 		r, err := httputils.RepoTagReference(img, tag)
 		if err != nil {
@@ -204,7 +204,24 @@ func (ir *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter
 		ref = r
 	}
 
-	if err := ir.backend.PushImage(ctx, ref, metaHeaders, authConfig, output); err != nil {
+	var platform *ocispec.Platform
+	// Platform is optional, and only supported in API version 1.46 and later.
+	// However the PushOptions struct previously was an alias for the PullOptions struct
+	// which also contained a Platform field.
+	// This means that older clients may be sending a platform field, even
+	// though it wasn't really supported by the server.
+	// Don't break these clients and just ignore the platform field on older APIs.
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.46") {
+		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
+			p, err := httputils.DecodePlatform(formPlatform)
+			if err != nil {
+				return err
+			}
+			platform = p
+		}
+	}
+
+	if err := ir.backend.PushImage(ctx, ref, platform, metaHeaders, authConfig, output); err != nil {
 		if !output.Flushed() {
 			return err
 		}
@@ -229,7 +246,22 @@ func (ir *imageRouter) getImagesGet(ctx context.Context, w http.ResponseWriter, 
 		names = r.Form["names"]
 	}
 
-	if err := ir.backend.ExportImage(ctx, names, output); err != nil {
+	var platform *ocispec.Platform
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.48") {
+		if formPlatforms := r.Form["platform"]; len(formPlatforms) > 1 {
+			// TODO(thaJeztah): remove once we support multiple platforms: see https://github.com/moby/moby/issues/48759
+			return errdefs.InvalidParameter(errors.New("multiple platform parameters not supported"))
+		}
+		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
+			p, err := httputils.DecodePlatform(formPlatform)
+			if err != nil {
+				return err
+			}
+			platform = p
+		}
+	}
+
+	if err := ir.backend.ExportImage(ctx, names, platform, output); err != nil {
 		if !output.Flushed() {
 			return err
 		}
@@ -242,13 +274,28 @@ func (ir *imageRouter) postImagesLoad(ctx context.Context, w http.ResponseWriter
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
+
+	var platform *ocispec.Platform
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.48") {
+		if formPlatforms := r.Form["platform"]; len(formPlatforms) > 1 {
+			// TODO(thaJeztah): remove once we support multiple platforms: see https://github.com/moby/moby/issues/48759
+			return errdefs.InvalidParameter(errors.New("multiple platform parameters not supported"))
+		}
+		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
+			p, err := httputils.DecodePlatform(formPlatform)
+			if err != nil {
+				return err
+			}
+			platform = p
+		}
+	}
 	quiet := httputils.BoolValueOrDefault(r, "quiet", true)
 
 	w.Header().Set("Content-Type", "application/json")
 
 	output := ioutils.NewWriteFlusher(w)
 	defer output.Close()
-	if err := ir.backend.LoadImage(ctx, r.Body, output, quiet); err != nil {
+	if err := ir.backend.LoadImage(ctx, r.Body, platform, output, quiet); err != nil {
 		_, _ = output.Write(streamformatter.FormatError(err))
 	}
 	return nil
@@ -285,89 +332,38 @@ func (ir *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, 
 }
 
 func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	img, err := ir.backend.GetImage(ctx, vars["name"], opts.GetImageOpts{Details: true})
+	imageInspect, err := ir.backend.ImageInspect(ctx, vars["name"], backend.ImageInspectOpts{})
 	if err != nil {
 		return err
 	}
 
-	imageInspect, err := ir.toImageInspect(img)
-	if err != nil {
-		return err
+	// Make sure we output empty arrays instead of nil. While Go nil slice is functionally equivalent to an empty slice,
+	// it matters for the JSON representation.
+	if imageInspect.RepoTags == nil {
+		imageInspect.RepoTags = []string{}
+	}
+	if imageInspect.RepoDigests == nil {
+		imageInspect.RepoDigests = []string{}
 	}
 
 	version := httputils.VersionFromContext(ctx)
 	if versions.LessThan(version, "1.44") {
 		imageInspect.VirtualSize = imageInspect.Size //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.44.
-	}
-	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
-}
 
-func (ir *imageRouter) toImageInspect(img *image.Image) (*types.ImageInspect, error) {
-	var repoTags, repoDigests []string
-	for _, ref := range img.Details.References {
-		switch ref.(type) {
-		case reference.NamedTagged:
-			repoTags = append(repoTags, reference.FamiliarString(ref))
-		case reference.Canonical:
-			repoDigests = append(repoDigests, reference.FamiliarString(ref))
+		if imageInspect.Created == "" {
+			// backwards compatibility for Created not existing returning "0001-01-01T00:00:00Z"
+			// https://github.com/moby/moby/issues/47368
+			imageInspect.Created = time.Time{}.Format(time.RFC3339Nano)
 		}
 	}
-
-	comment := img.Comment
-	if len(comment) == 0 && len(img.History) > 0 {
-		comment = img.History[len(img.History)-1].Comment
+	if versions.GreaterThanOrEqualTo(version, "1.45") {
+		imageInspect.Container = ""        //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
+		imageInspect.ContainerConfig = nil //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
 	}
-
-	// Make sure we output empty arrays instead of nil.
-	if repoTags == nil {
-		repoTags = []string{}
+	if versions.LessThan(version, "1.48") {
+		imageInspect.Descriptor = nil
 	}
-	if repoDigests == nil {
-		repoDigests = []string{}
-	}
-
-	var created string
-	if img.Created != nil {
-		created = img.Created.Format(time.RFC3339Nano)
-	}
-
-	return &types.ImageInspect{
-		ID:              img.ID().String(),
-		RepoTags:        repoTags,
-		RepoDigests:     repoDigests,
-		Parent:          img.Parent.String(),
-		Comment:         comment,
-		Created:         created,
-		Container:       img.Container,
-		ContainerConfig: &img.ContainerConfig,
-		DockerVersion:   img.DockerVersion,
-		Author:          img.Author,
-		Config:          img.Config,
-		Architecture:    img.Architecture,
-		Variant:         img.Variant,
-		Os:              img.OperatingSystem(),
-		OsVersion:       img.OSVersion,
-		Size:            img.Details.Size,
-		GraphDriver: types.GraphDriverData{
-			Name: img.Details.Driver,
-			Data: img.Details.Metadata,
-		},
-		RootFS: rootFSToAPIType(img.RootFS),
-		Metadata: types.ImageMetadata{
-			LastTagTime: img.Details.LastUpdated,
-		},
-	}, nil
-}
-
-func rootFSToAPIType(rootfs *image.RootFS) types.RootFS {
-	var layers []string
-	for _, l := range rootfs.DiffIDs {
-		layers = append(layers, l.String())
-	}
-	return types.RootFS{
-		Type:   rootfs.Type,
-		Layers: layers,
-	}
+	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
 }
 
 func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
@@ -395,10 +391,16 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		sharedSize = httputils.BoolValue(r, "shared-size")
 	}
 
-	images, err := ir.backend.Images(ctx, types.ImageListOptions{
+	var manifests bool
+	if versions.GreaterThanOrEqualTo(version, "1.47") {
+		manifests = httputils.BoolValue(r, "manifests")
+	}
+
+	images, err := ir.backend.Images(ctx, imagetypes.ListOptions{
 		All:        httputils.BoolValue(r, "all"),
 		Filters:    imageFilters,
 		SharedSize: sharedSize,
+		Manifests:  manifests,
 	})
 	if err != nil {
 		return err
@@ -406,6 +408,7 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 
 	useNone := versions.LessThan(version, "1.43")
 	withVirtualSize := versions.LessThan(version, "1.44")
+	noDescriptor := versions.LessThan(version, "1.48")
 	for _, img := range images {
 		if useNone {
 			if len(img.RepoTags) == 0 && len(img.RepoDigests) == 0 {
@@ -423,13 +426,30 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		if withVirtualSize {
 			img.VirtualSize = img.Size //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.44.
 		}
+		if noDescriptor {
+			img.Descriptor = nil
+		}
 	}
 
 	return httputils.WriteJSON(w, http.StatusOK, images)
 }
 
 func (ir *imageRouter) getImagesHistory(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	history, err := ir.backend.ImageHistory(ctx, vars["name"])
+	if err := httputils.ParseForm(r); err != nil {
+		return err
+	}
+
+	var platform *ocispec.Platform
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.48") {
+		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
+			p, err := httputils.DecodePlatform(formPlatform)
+			if err != nil {
+				return err
+			}
+			platform = p
+		}
+	}
+	history, err := ir.backend.ImageHistory(ctx, vars["name"], platform)
 	if err != nil {
 		return err
 	}
@@ -452,7 +472,7 @@ func (ir *imageRouter) postImagesTag(ctx context.Context, w http.ResponseWriter,
 		return errdefs.InvalidParameter(errors.New("refusing to create an ambiguous tag using digest algorithm as name"))
 	}
 
-	img, err := ir.backend.GetImage(ctx, vars["name"], opts.GetImageOpts{})
+	img, err := ir.backend.GetImage(ctx, vars["name"], backend.GetImageOpts{})
 	if err != nil {
 		return errdefs.NotFound(err)
 	}

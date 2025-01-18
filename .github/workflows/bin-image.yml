@@ -1,5 +1,14 @@
 name: bin-image
 
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -10,6 +19,7 @@ on:
     branches:
       - 'master'
       - '[0-9]+.[0-9]+'
+      - '[0-9]+.x'
     tags:
       - 'v*'
   pull_request:
@@ -21,23 +31,27 @@ env:
   PLATFORM: Moby Engine - Nightly
   PRODUCT: moby-bin
   PACKAGER_NAME: The Moby Project
+  SETUP_BUILDX_VERSION: edge
+  SETUP_BUILDKIT_IMAGE: moby/buildkit:latest
 
 jobs:
   validate-dco:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     uses: ./.github/workflows/.dco.yml
 
   prepare:
     runs-on: ubuntu-20.04
+    timeout-minutes: 20 # guardrails timeout for the whole job
     outputs:
       platforms: ${{ steps.platforms.outputs.matrix }}
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Docker meta
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.MOBYBIN_REPO_SLUG }}
@@ -45,7 +59,7 @@ jobs:
           ## push semver tag v23.0.0
           # moby/moby-bin:23.0.0
           # moby/moby-bin:latest
-          ## push semver prelease tag v23.0.0-beta.1
+          ## push semver prerelease tag v23.0.0-beta.1
           # moby/moby-bin:23.0.0-beta.1
           ## push on master
           # moby/moby-bin:master
@@ -60,11 +74,13 @@ jobs:
             type=sha
       -
         name: Rename meta bake definition file
+        # see https://github.com/docker/metadata-action/issues/381#issuecomment-1918607161
         run: |
-          mv "${{ steps.meta.outputs.bake-file }}" "/tmp/bake-meta.json"
+          bakeFile="${{ steps.meta.outputs.bake-file }}"
+          mv "${bakeFile#cwd://}" "/tmp/bake-meta.json"
       -
         name: Upload meta bake definition
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bake-meta
           path: /tmp/bake-meta.json
@@ -78,9 +94,11 @@ jobs:
 
   build:
     runs-on: ubuntu-20.04
+    timeout-minutes: 120 # guardrails timeout for the whole job
     needs:
       - validate-dco
       - prepare
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     strategy:
       fail-fast: false
       matrix:
@@ -88,33 +106,43 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       -
+        name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      -
         name: Download meta bake definition
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: bake-meta
           path: /tmp
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Login to Docker Hub
         if: github.event_name != 'pull_request' && github.repository == 'moby/moby'
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_MOBYBIN_USERNAME }}
           password: ${{ secrets.DOCKERHUB_MOBYBIN_TOKEN }}
       -
         name: Build
         id: bake
-        uses: docker/bake-action@v3
+        uses: docker/bake-action@v6
         with:
+          source: .
           files: |
             ./docker-bake.hcl
             /tmp/bake-meta.json
@@ -133,37 +161,43 @@ jobs:
       -
         name: Upload digest
         if: github.event_name != 'pull_request' && github.repository == 'moby/moby'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: digests
+          name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
     runs-on: ubuntu-20.04
-    if: github.event_name != 'pull_request' && github.repository == 'moby/moby'
+    timeout-minutes: 120 # guardrails timeout for the whole job
     needs:
       - build
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name != 'pull_request' && github.repository == 'moby/moby'
     steps:
       -
         name: Download meta bake definition
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: bake-meta
           path: /tmp
       -
         name: Download digests
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: digests
           path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_MOBYBIN_USERNAME }}
           password: ${{ secrets.DOCKERHUB_MOBYBIN_TOKEN }}

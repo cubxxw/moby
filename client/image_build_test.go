@@ -14,7 +14,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/errdefs"
-	units "github.com/docker/go-units"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -48,7 +47,6 @@ func TestImageBuild(t *testing.T) {
 			expectedQueryParams: map[string]string{
 				"q":       "1",
 				"nocache": "1",
-				"rm":      "1",
 				"forcerm": "1",
 				"pull":    "1",
 			},
@@ -123,7 +121,7 @@ func TestImageBuild(t *testing.T) {
 		},
 		{
 			buildOptions: types.ImageBuildOptions{
-				Ulimits: []*units.Ulimit{
+				Ulimits: []*container.Ulimit{
 					{
 						Name: "nproc",
 						Hard: 65557,

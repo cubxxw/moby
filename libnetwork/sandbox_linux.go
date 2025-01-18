@@ -6,10 +6,17 @@ import (
 	"net"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
+	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Linux-specific container configuration flags.
+type containerConfigOS struct{} //nolint:nolintlint,unused // only populated on windows
 
 func releaseOSSboxResources(ns *osl.Namespace, ep *Endpoint) {
 	for _, i := range ns.Interfaces() {
@@ -67,30 +74,59 @@ func (sb *Sandbox) Statistics() (map[string]*types.InterfaceStatistics, error) {
 	return m, nil
 }
 
-func (sb *Sandbox) updateGateway(ep *Endpoint) error {
+func (sb *Sandbox) updateGateway(ep4, ep6 *Endpoint) error {
+	var populated4, populated6 bool
 	sb.mu.Lock()
 	osSbox := sb.osSbox
+	if ep4 != nil {
+		_, populated4 = sb.populatedEndpoints[ep4.ID()]
+	}
+	if ep6 != nil {
+		_, populated6 = sb.populatedEndpoints[ep6.ID()]
+	}
 	sb.mu.Unlock()
 	if osSbox == nil {
 		return nil
 	}
 	osSbox.UnsetGateway()     //nolint:errcheck
 	osSbox.UnsetGatewayIPv6() //nolint:errcheck
-
-	if ep == nil {
-		return nil
+	if err := osSbox.UnsetDefaultRouteIPv4(); err != nil {
+		log.G(context.TODO()).WithError(err).Warn("removing IPv4 default route")
+	}
+	if err := osSbox.UnsetDefaultRouteIPv6(); err != nil {
+		log.G(context.TODO()).WithError(err).Warn("removing IPv6 default route")
 	}
 
-	ep.mu.Lock()
-	joinInfo := ep.joinInfo
-	ep.mu.Unlock()
+	if populated4 {
+		ep4.mu.Lock()
+		joinInfo := ep4.joinInfo
+		ep4.mu.Unlock()
 
-	if err := osSbox.SetGateway(joinInfo.gw); err != nil {
-		return fmt.Errorf("failed to set gateway while updating gateway: %v", err)
+		if joinInfo.gw != nil {
+			if err := osSbox.SetGateway(joinInfo.gw); err != nil {
+				return fmt.Errorf("failed to set gateway: %v", err)
+			}
+		} else {
+			if err := osSbox.SetDefaultRouteIPv4(ep4.iface.srcName); err != nil {
+				return fmt.Errorf("failed to set IPv4 default route: %v", err)
+			}
+		}
 	}
 
-	if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
-		return fmt.Errorf("failed to set IPv6 gateway while updating gateway: %v", err)
+	if populated6 {
+		ep6.mu.Lock()
+		joinInfo := ep6.joinInfo
+		ep6.mu.Unlock()
+
+		if joinInfo.gw6 != nil {
+			if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
+				return fmt.Errorf("failed to set IPv6 gateway: %v", err)
+			}
+		} else {
+			if err := osSbox.SetDefaultRouteIPv6(ep6.iface.srcName); err != nil {
+				return fmt.Errorf("failed to set IPv6 default route: %v", err)
+			}
+		}
 	}
 
 	return nil
@@ -107,10 +143,10 @@ func (sb *Sandbox) ExecFunc(f func()) error {
 }
 
 // SetKey updates the Sandbox Key.
-func (sb *Sandbox) SetKey(basePath string) error {
+func (sb *Sandbox) SetKey(ctx context.Context, basePath string) error {
 	start := time.Now()
 	defer func() {
-		log.G(context.TODO()).Debugf("sandbox set key processing took %s for container %s", time.Since(start), sb.ContainerID())
+		log.G(ctx).Debugf("sandbox set key processing took %s for container %s", time.Since(start), sb.ContainerID())
 	}()
 
 	if basePath == "" {
@@ -130,7 +166,7 @@ func (sb *Sandbox) SetKey(basePath string) error {
 		// and destroy the OS snab. We are moving into a new home further down. Note that none
 		// of the network resources gets destroyed during the move.
 		if err := sb.releaseOSSbox(); err != nil {
-			log.G(context.TODO()).WithError(err).Error("Error destroying os sandbox")
+			log.G(ctx).WithError(err).Error("Error destroying os sandbox")
 		}
 	}
 
@@ -150,19 +186,46 @@ func (sb *Sandbox) SetKey(basePath string) error {
 
 		if err := sb.osSbox.InvokeFunc(sb.resolver.SetupFunc(0)); err == nil {
 			if err := sb.resolver.Start(); err != nil {
-				log.G(context.TODO()).Errorf("Resolver Start failed for container %s, %q", sb.ContainerID(), err)
+				log.G(ctx).Errorf("Resolver Start failed for container %s, %q", sb.ContainerID(), err)
 			}
 		} else {
-			log.G(context.TODO()).Errorf("Resolver Setup Function failed for container %s, %q", sb.ContainerID(), err)
+			log.G(ctx).Errorf("Resolver Setup Function failed for container %s, %q", sb.ContainerID(), err)
 		}
 	}
 
+	osSbox.RefreshIPv6LoEnabled()
+	if err := sb.rebuildHostsFile(ctx); err != nil {
+		return err
+	}
+
 	for _, ep := range sb.Endpoints() {
-		if err = sb.populateNetworkResources(ep); err != nil {
+		if err = sb.populateNetworkResources(ctx, ep); err != nil {
 			return err
 		}
 	}
+
 	return nil
+}
+
+// IPv6Enabled determines whether a container supports IPv6.
+// IPv6 support can always be determined for host networking. For other network
+// types it can only be determined once there's a container namespace to probe,
+// return ok=false in that case.
+func (sb *Sandbox) IPv6Enabled() (enabled, ok bool) {
+	// For host networking, IPv6 support depends on the host.
+	if sb.config.useDefaultSandBox {
+		return netutils.IsV6Listenable(), true
+	}
+
+	// For other network types, look at whether the container's loopback interface has an IPv6 address.
+	sb.mu.Lock()
+	osSbox := sb.osSbox
+	sb.mu.Unlock()
+
+	if osSbox == nil {
+		return false, false
+	}
+	return osSbox.IPv6LoEnabled(), true
 }
 
 func (sb *Sandbox) releaseOSSbox() error {
@@ -220,16 +283,29 @@ func (sb *Sandbox) restoreOslSandbox() error {
 		}
 	}
 
-	gwep := sb.getGatewayEndpoint()
-	if gwep == nil {
-		return nil
+	if err := sb.osSbox.RestoreInterfaces(interfaces); err != nil {
+		return err
+	}
+	if len(routes) > 0 {
+		sb.osSbox.RestoreRoutes(routes)
+	}
+	if gwEp4, gwEp6 := sb.getGatewayEndpoint(); gwEp4 != nil || gwEp6 != nil {
+		if gwEp4 != nil {
+			sb.osSbox.RestoreGateway(true, gwEp4.joinInfo.gw, gwEp4.iface.srcName)
+		}
+		if gwEp6 != nil {
+			sb.osSbox.RestoreGateway(false, gwEp6.joinInfo.gw6, gwEp6.iface.srcName)
+		}
 	}
 
-	// restore osl sandbox
-	return sb.osSbox.Restore(interfaces, routes, gwep.joinInfo.gw, gwep.joinInfo.gw6)
+	return nil
 }
 
-func (sb *Sandbox) populateNetworkResources(ep *Endpoint) error {
+func (sb *Sandbox) populateNetworkResources(ctx context.Context, ep *Endpoint) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.Sandbox.populateNetworkResources", trace.WithAttributes(
+		attribute.String("endpoint.Name", ep.Name())))
+	defer span.End()
+
 	sb.mu.Lock()
 	if sb.osSbox == nil {
 		sb.mu.Unlock()
@@ -261,8 +337,11 @@ func (sb *Sandbox) populateNetworkResources(ep *Endpoint) error {
 		if i.mac != nil {
 			ifaceOptions = append(ifaceOptions, osl.WithMACAddress(i.mac))
 		}
+		if sysctls := ep.getSysctls(); len(sysctls) > 0 {
+			ifaceOptions = append(ifaceOptions, osl.WithSysctls(sysctls))
+		}
 
-		if err := sb.osSbox.AddInterface(i.srcName, i.dstPrefix, ifaceOptions...); err != nil {
+		if err := sb.osSbox.AddInterface(ctx, i.srcName, i.dstPrefix, ifaceOptions...); err != nil {
 			return fmt.Errorf("failed to add interface %s to sandbox: %v", i.srcName, err)
 		}
 
@@ -288,17 +367,17 @@ func (sb *Sandbox) populateNetworkResources(ep *Endpoint) error {
 		}
 	}
 
-	if ep == sb.getGatewayEndpoint() {
-		if err := sb.updateGateway(ep); err != nil {
-			return err
-		}
-	}
-
 	// Make sure to add the endpoint to the populated endpoint set
-	// before populating loadbalancers.
+	// before updating gateways or populating loadbalancers.
 	sb.mu.Lock()
 	sb.populatedEndpoints[ep.ID()] = struct{}{}
 	sb.mu.Unlock()
+
+	if gw4, gw6 := sb.getGatewayEndpoint(); ep == gw4 || ep == gw6 {
+		if err := sb.updateGateway(gw4, gw6); err != nil {
+			return fmt.Errorf("updating gateway endpoint: %w", err)
+		}
+	}
 
 	// Populate load balancer only after updating all the other
 	// information including gateway and other routes so that
@@ -311,7 +390,7 @@ func (sb *Sandbox) populateNetworkResources(ep *Endpoint) error {
 	// not bother updating the store. The sandbox object will be
 	// deleted anyway
 	if !inDelete {
-		return sb.storeUpdate()
+		return sb.storeUpdate(ctx)
 	}
 
 	return nil

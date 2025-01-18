@@ -40,6 +40,7 @@ type PackOption struct {
 	AlignedChunk     bool
 	ChunkSize        string
 	BatchSize        string
+	Encrypt          bool
 	Timeout          *time.Duration
 
 	Features Features
@@ -133,8 +134,11 @@ func buildPackArgs(option PackOption) []string {
 	if option.ChunkSize != "" {
 		args = append(args, "--chunk-size", option.ChunkSize)
 	}
-	if option.BatchSize != "" {
+	if option.Features.Contains(FeatureBatchSize) {
 		args = append(args, "--batch-size", option.BatchSize)
+	}
+	if option.Encrypt {
+		args = append(args, "--encrypt")
 	}
 	args = append(args, option.SourcePath)
 
@@ -301,7 +305,33 @@ func Unpack(option UnpackOption) error {
 	}
 
 	if option.BackendConfigPath != "" {
-		args = append(args, "--backend-config", option.BackendConfigPath)
+		configBytes, err := os.ReadFile(option.BackendConfigPath)
+		if err != nil {
+			return errors.Wrapf(err, "fail to read backend config file %s", option.BackendConfigPath)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(configBytes, &config); err != nil {
+			return errors.Wrapf(err, "fail to unmarshal backend config file %s", option.BackendConfigPath)
+		}
+
+		backendConfigType, ok := config["backend"].(map[string]interface{})["type"]
+		if !ok {
+			return errors.New("backend config file should contain a valid backend type")
+		}
+
+		backendConfig, ok := config["backend"].(map[string]interface{})[backendConfigType.(string)]
+		if !ok {
+			return errors.New("failed to get backend config with type " + backendConfigType.(string))
+		}
+
+		backendConfigBytes, err := json.Marshal(backendConfig)
+		if err != nil {
+			return errors.Wrapf(err, "fail to marshal backend config %v", backendConfig)
+		}
+
+		args = append(args, "--backend-type", backendConfigType.(string))
+		args = append(args, "--backend-config", string(backendConfigBytes))
 	} else if option.BlobPath != "" {
 		args = append(args, "--blob", option.BlobPath)
 	}

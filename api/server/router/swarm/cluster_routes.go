@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/server/httputils"
 	basictypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
@@ -218,14 +218,6 @@ func (sr *swarmRouter) createService(ctx context.Context, w http.ResponseWriter,
 			queryRegistry = true
 		}
 		adjustForAPIVersion(v, &service)
-	}
-
-	version := httputils.VersionFromContext(ctx)
-	if versions.LessThan(version, "1.44") {
-		if service.TaskTemplate.ContainerSpec != nil && service.TaskTemplate.ContainerSpec.Healthcheck != nil {
-			// StartInterval was added in API 1.44
-			service.TaskTemplate.ContainerSpec.Healthcheck.StartInterval = 0
-		}
 	}
 
 	resp, err := sr.backend.CreateService(service, encodedAuth, queryRegistry)

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/remotes/docker"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/docker/docker/api/types"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/system"
@@ -43,7 +43,6 @@ func TestPluginInvalidJSON(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		ep := ep
 		t.Run(ep[1:], func(t *testing.T) {
 			t.Parallel()
 
@@ -114,6 +113,49 @@ func TestPluginInstall(t *testing.T) {
 		assert.NilError(t, plugin.CreateInRegistry(ctx, repo, nil))
 
 		rdr, err := client.PluginInstall(ctx, repo, types.PluginInstallOptions{Disabled: true, RemoteRef: repo})
+		assert.NilError(t, err)
+		defer rdr.Close()
+
+		_, err = io.Copy(io.Discard, rdr)
+		assert.NilError(t, err)
+
+		_, _, err = client.PluginInspectWithRaw(ctx, repo)
+		assert.NilError(t, err)
+	})
+
+	t.Run("with digest", func(t *testing.T) {
+		ctx := setupTest(t)
+
+		reg := registry.NewV2(t)
+		defer reg.Close()
+
+		name := "test-" + strings.ToLower(t.Name())
+		repo := path.Join(registry.DefaultURL, name+":latest")
+		err := plugin.Create(ctx, client, repo)
+		assert.NilError(t, err)
+
+		rdr, err := client.PluginPush(ctx, repo, "")
+		assert.NilError(t, err)
+		defer rdr.Close()
+
+		buf := &strings.Builder{}
+		assert.NilError(t, err)
+		var digest string
+		assert.NilError(t, jsonmessage.DisplayJSONMessagesStream(rdr, buf, 0, false, func(j jsonmessage.JSONMessage) {
+			if j.Aux != nil {
+				var r types.PushResult
+				assert.NilError(t, json.Unmarshal(*j.Aux, &r))
+				digest = r.Digest
+			}
+		}), buf)
+
+		err = client.PluginRemove(ctx, repo, types.PluginRemoveOptions{Force: true})
+		assert.NilError(t, err)
+
+		rdr, err = client.PluginInstall(ctx, repo, types.PluginInstallOptions{
+			Disabled:  true,
+			RemoteRef: repo + "@" + digest,
+		})
 		assert.NilError(t, err)
 		defer rdr.Close()
 
@@ -300,7 +342,7 @@ func TestPluginBackCompatMediaTypes(t *testing.T) {
 	// that the default resolver code uses. "Older registries" here would be
 	// like the one currently included in the test suite.
 	headers := http.Header{}
-	headers.Add("Accept", images.MediaTypeDockerSchema2Manifest)
+	headers.Add("Accept", c8dimages.MediaTypeDockerSchema2Manifest)
 
 	resolver := docker.NewResolver(docker.ResolverOptions{
 		Headers: headers,
@@ -319,7 +361,7 @@ func TestPluginBackCompatMediaTypes(t *testing.T) {
 
 	var m ocispec.Manifest
 	assert.NilError(t, json.NewDecoder(rdr).Decode(&m))
-	assert.Check(t, is.Equal(m.MediaType, images.MediaTypeDockerSchema2Manifest))
+	assert.Check(t, is.Equal(m.MediaType, c8dimages.MediaTypeDockerSchema2Manifest))
 	assert.Check(t, is.Len(m.Layers, 1))
-	assert.Check(t, is.Equal(m.Layers[0].MediaType, images.MediaTypeDockerSchema2LayerGzip))
+	assert.Check(t, is.Equal(m.Layers[0].MediaType, c8dimages.MediaTypeDockerSchema2LayerGzip))
 }

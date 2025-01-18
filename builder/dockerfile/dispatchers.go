@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/builder"
@@ -91,17 +91,17 @@ func dispatchAdd(ctx context.Context, d dispatchRequest, c *instructions.AddComm
 		return errors.New("the --chmod option requires BuildKit. Refer to https://docs.docker.com/go/buildkit/ to learn how to build images with BuildKit enabled")
 	}
 	downloader := newRemoteSourceDownloader(d.builder.Output, d.builder.Stdout)
-	copier := copierFromDispatchRequest(d, downloader, nil)
-	defer copier.Cleanup()
+	cpr := copierFromDispatchRequest(d, downloader, nil)
+	defer cpr.Cleanup()
 
-	copyInstruction, err := copier.createCopyInstruction(c.SourcesAndDest, "ADD")
+	instruction, err := cpr.createCopyInstruction(c.SourcesAndDest, "ADD")
 	if err != nil {
 		return err
 	}
-	copyInstruction.chownStr = c.Chown
-	copyInstruction.allowLocalDecompression = true
+	instruction.chownStr = c.Chown
+	instruction.allowLocalDecompression = true
 
-	return d.builder.performCopy(ctx, d, copyInstruction)
+	return d.builder.performCopy(ctx, d, instruction)
 }
 
 // COPY foo /path
@@ -119,17 +119,17 @@ func dispatchCopy(ctx context.Context, d dispatchRequest, c *instructions.CopyCo
 			return errors.Wrapf(err, "invalid from flag value %s", c.From)
 		}
 	}
-	copier := copierFromDispatchRequest(d, errOnSourceDownload, im)
-	defer copier.Cleanup()
-	copyInstruction, err := copier.createCopyInstruction(c.SourcesAndDest, "COPY")
+	cpr := copierFromDispatchRequest(d, errOnSourceDownload, im)
+	defer cpr.Cleanup()
+	instruction, err := cpr.createCopyInstruction(c.SourcesAndDest, "COPY")
 	if err != nil {
 		return err
 	}
-	copyInstruction.chownStr = c.Chown
-	if c.From != "" && copyInstruction.chownStr == "" {
-		copyInstruction.preserveOwnership = true
+	instruction.chownStr = c.Chown
+	if c.From != "" && instruction.chownStr == "" {
+		instruction.preserveOwnership = true
 	}
-	return d.builder.performCopy(ctx, d, copyInstruction)
+	return d.builder.performCopy(ctx, d, instruction)
 }
 
 func (d *dispatchRequest) getImageMount(ctx context.Context, imageRefOrID string) (*imageMount, error) {
@@ -158,25 +158,25 @@ func initializeStage(ctx context.Context, d dispatchRequest, cmd *instructions.S
 	}
 
 	var platform *ocispec.Platform
-	if v := cmd.Platform; v != "" {
-		v, err := d.getExpandedString(d.shlex, v)
+	if val := cmd.Platform; val != "" {
+		v, err := d.getExpandedString(d.shlex, val)
 		if err != nil {
 			return errors.Wrapf(err, "failed to process arguments for platform %s", v)
 		}
 
 		p, err := platforms.Parse(v)
 		if err != nil {
-			return errors.Wrapf(err, "failed to parse platform %s", v)
+			return errors.Wrapf(errdefs.InvalidParameter(err), "failed to parse platform %s", v)
 		}
 		platform = &p
 	}
 
-	image, err := d.getFromImage(ctx, d.shlex, cmd.BaseName, platform)
+	img, err := d.getFromImage(ctx, d.shlex, cmd.BaseName, platform)
 	if err != nil {
 		return err
 	}
 	state := d.state
-	if err := state.beginStage(cmd.Name, image); err != nil {
+	if err := state.beginStage(cmd.Name, img); err != nil {
 		return err
 	}
 	if len(state.runConfig.OnBuild) > 0 {
@@ -224,7 +224,7 @@ func (d *dispatchRequest) getExpandedString(shlex *shell.Lex, str string) (strin
 		substitutionArgs = append(substitutionArgs, key+"="+value)
 	}
 
-	name, err := shlex.ProcessWord(str, substitutionArgs)
+	name, _, err := shlex.ProcessWord(str, shell.EnvsFromSlice(substitutionArgs))
 	if err != nil {
 		return "", err
 	}
@@ -348,9 +348,16 @@ func dispatchRun(ctx context.Context, d dispatchRequest, c *instructions.RunComm
 		saveCmd = prependEnvOnCmd(d.state.buildArgs, buildArgs, cmdFromArgs)
 	}
 
+	cacheArgsEscaped := argsEscaped
+	// ArgsEscaped is not persisted in the committed image on Windows.
+	// Use the original from previous build steps for cache probing.
+	if d.state.operatingSystem == "windows" {
+		cacheArgsEscaped = stateRunConfig.ArgsEscaped
+	}
+
 	runConfigForCacheProbe := copyRunConfig(stateRunConfig,
 		withCmd(saveCmd),
-		withArgsEscaped(argsEscaped),
+		withArgsEscaped(cacheArgsEscaped),
 		withEntrypointOverride(saveCmd, nil))
 	if hit, err := d.builder.probeCache(d.state, runConfigForCacheProbe); err != nil || hit {
 		return err
@@ -501,7 +508,7 @@ func dispatchEntrypoint(ctx context.Context, d dispatchRequest, c *instructions.
 //
 // Expose ports for links and port mappings. This all ends up in
 // req.runConfig.ExposedPorts for runconfig.
-func dispatchExpose(ctx context.Context, d dispatchRequest, c *instructions.ExposeCommand, envs []string) error {
+func dispatchExpose(ctx context.Context, d dispatchRequest, c *instructions.ExposeCommand, envs shell.EnvGetter) error {
 	// custom multi word expansion
 	// expose $FOO with FOO="80 443" is expanded as EXPOSE [80,443]. This is the only command supporting word to words expansion
 	// so the word processing has been de-generalized

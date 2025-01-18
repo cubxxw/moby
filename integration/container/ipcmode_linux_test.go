@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
@@ -29,6 +28,8 @@ import (
 //	29 23 0:24 / /dev/shm rw,nosuid,nodev shared:4 - tmpfs tmpfs rw
 //	^^^^\
 //	     - this is the minor:major we look for
+//
+//nolint:dupword
 func testIpcCheckDevExists(mm string) (bool, error) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
@@ -68,7 +69,7 @@ func testIpcNonePrivateShareable(t *testing.T, mode string, mustBeMounted bool, 
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(len(resp.Warnings), 0))
 
-	err = apiClient.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{})
+	err = apiClient.ContainerStart(ctx, resp.ID, containertypes.StartOptions{})
 	assert.NilError(t, err)
 
 	// get major:minor pair for /dev/shm from container's /proc/self/mountinfo
@@ -98,7 +99,7 @@ func TestIpcModeNone(t *testing.T) {
 	testIpcNonePrivateShareable(t, "none", false, false)
 }
 
-// TestAPIIpcModePrivate checks the container private IPC mode
+// TestIpcModePrivate checks the container private IPC mode
 // (--ipc private) works as expected. It gets the minor:major pair
 // of /dev/shm mount from the container, and makes sure there is no
 // such pair on the host.
@@ -108,7 +109,7 @@ func TestIpcModePrivate(t *testing.T) {
 	testIpcNonePrivateShareable(t, "private", true, false)
 }
 
-// TestAPIIpcModeShareable checks the container shareable IPC mode
+// TestIpcModeShareable checks the container shareable IPC mode
 // (--ipc shareable) works as expected. It gets the minor:major pair
 // of /dev/shm mount from the container, and makes sure such pair
 // also exists on the host.
@@ -140,7 +141,7 @@ func testIpcContainer(t *testing.T, donorMode string, mustWork bool) {
 	assert.Check(t, is.Equal(len(resp.Warnings), 0))
 	name1 := resp.ID
 
-	err = apiClient.ContainerStart(ctx, name1, types.ContainerStartOptions{})
+	err = apiClient.ContainerStart(ctx, name1, containertypes.StartOptions{})
 	assert.NilError(t, err)
 
 	// create and start the second container
@@ -150,7 +151,7 @@ func testIpcContainer(t *testing.T, donorMode string, mustWork bool) {
 	assert.Check(t, is.Equal(len(resp.Warnings), 0))
 	name2 := resp.ID
 
-	err = apiClient.ContainerStart(ctx, name2, types.ContainerStartOptions{})
+	err = apiClient.ContainerStart(ctx, name2, containertypes.StartOptions{})
 	if !mustWork {
 		// start should fail with a specific error
 		assert.Check(t, is.ErrorContains(err, "non-shareable IPC"))
@@ -172,7 +173,7 @@ func testIpcContainer(t *testing.T, donorMode string, mustWork bool) {
 	assert.Check(t, is.Equal(true, regexp.MustCompile("^covfefe$").MatchString(out)))
 }
 
-// TestAPIIpcModeShareableAndPrivate checks that
+// TestAPIIpcModeShareableAndContainer checks that
 // 1) a container created with --ipc container:ID can use IPC of another shareable container.
 // 2) a container created with --ipc container:ID can NOT use IPC of another private container.
 func TestAPIIpcModeShareableAndContainer(t *testing.T) {
@@ -206,7 +207,7 @@ func TestAPIIpcModeHost(t *testing.T) {
 	assert.Check(t, is.Equal(len(resp.Warnings), 0))
 	name := resp.ID
 
-	err = apiClient.ContainerStart(ctx, name, types.ContainerStartOptions{})
+	err = apiClient.ContainerStart(ctx, name, containertypes.StartOptions{})
 	assert.NilError(t, err)
 
 	// check that IPC is shared
@@ -241,7 +242,7 @@ func testDaemonIpcPrivateShareable(t *testing.T, mustBeShared bool, arg ...strin
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(len(resp.Warnings), 0))
 
-	err = c.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{})
+	err = c.ContainerStart(ctx, resp.ID, containertypes.StartOptions{})
 	assert.NilError(t, err)
 
 	// get major:minor pair for /dev/shm from container's /proc/self/mountinfo
@@ -300,7 +301,6 @@ func TestDaemonIpcModeShareableFromConfig(t *testing.T) {
 // TestIpcModeOlderClient checks that older client gets shareable IPC mode
 // by default, even when the daemon default is private.
 func TestIpcModeOlderClient(t *testing.T) {
-	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"), "requires a daemon with DefaultIpcMode: private")
 	apiClient := testEnv.APIClient()
 	skip.If(t, versions.LessThan(apiClient.ClientVersion(), "1.40"), "requires client API >= 1.40")
 

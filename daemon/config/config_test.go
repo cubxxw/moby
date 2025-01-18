@@ -1,17 +1,21 @@
 package config // import "github.com/docker/docker/daemon/config"
 
 import (
+	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
+	"dario.cat/mergo"
+	"github.com/docker/docker/api"
 	"github.com/docker/docker/libnetwork/ipamutils"
 	"github.com/docker/docker/opts"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/imdario/mergo"
 	"github.com/spf13/pflag"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/unicode"
@@ -155,7 +159,7 @@ func TestDaemonConfigurationMergeDefaultAddressPools(t *testing.T) {
 	emptyConfigFile := makeConfigFile(t, `{}`)
 	configFile := makeConfigFile(t, `{"default-address-pools":[{"base": "10.123.0.0/16", "size": 24 }]}`)
 
-	expected := []*ipamutils.NetworkToSplit{{Base: "10.123.0.0/16", Size: 24}}
+	expected := []*ipamutils.NetworkToSplit{{Base: netip.MustParsePrefix("10.123.0.0/16"), Size: 24}}
 
 	t.Run("empty config file", func(t *testing.T) {
 		conf := Config{}
@@ -165,7 +169,7 @@ func TestDaemonConfigurationMergeDefaultAddressPools(t *testing.T) {
 
 		config, err := MergeDaemonConfigurations(&conf, flags, emptyConfigFile)
 		assert.NilError(t, err)
-		assert.DeepEqual(t, config.DefaultAddressPools.Value(), expected)
+		assert.DeepEqual(t, config.DefaultAddressPools.Value(), expected, cmpopts.EquateComparable(netip.Prefix{}))
 	})
 
 	t.Run("config file", func(t *testing.T) {
@@ -175,7 +179,7 @@ func TestDaemonConfigurationMergeDefaultAddressPools(t *testing.T) {
 
 		config, err := MergeDaemonConfigurations(&conf, flags, configFile)
 		assert.NilError(t, err)
-		assert.DeepEqual(t, config.DefaultAddressPools.Value(), expected)
+		assert.DeepEqual(t, config.DefaultAddressPools.Value(), expected, cmpopts.EquateComparable(netip.Prefix{}))
 	})
 
 	t.Run("with conflicting options", func(t *testing.T) {
@@ -218,6 +222,7 @@ func TestValidateConfigurationErrors(t *testing.T) {
 		name        string
 		field       string
 		config      *Config
+		platform    string
 		expectedErr string
 	}{
 		{
@@ -237,28 +242,6 @@ func TestValidateConfigurationErrors(t *testing.T) {
 				},
 			},
 			expectedErr: "bad attribute format: one",
-		},
-		{
-			name: "single DNS, invalid IP-address",
-			config: &Config{
-				CommonConfig: CommonConfig{
-					DNSConfig: DNSConfig{
-						DNS: []string{"1.1.1.1o"},
-					},
-				},
-			},
-			expectedErr: "1.1.1.1o is not an ip address",
-		},
-		{
-			name: "multiple DNS, invalid IP-address",
-			config: &Config{
-				CommonConfig: CommonConfig{
-					DNSConfig: DNSConfig{
-						DNS: []string{"2.2.2.2", "1.1.1.1o"},
-					},
-				},
-			},
-			expectedErr: "1.1.1.1o is not an ip address",
 		},
 		{
 			name: "single DNSSearch",
@@ -286,7 +269,11 @@ func TestValidateConfigurationErrors(t *testing.T) {
 			name: "negative MTU",
 			config: &Config{
 				CommonConfig: CommonConfig{
-					BridgeConfig: BridgeConfig{MTU: -10},
+					BridgeConfig: BridgeConfig{
+						DefaultBridgeConfig: DefaultBridgeConfig{
+							MTU: -10,
+						},
+					},
 				},
 			},
 			expectedErr: "invalid default MTU: -10",
@@ -367,6 +354,62 @@ func TestValidateConfigurationErrors(t *testing.T) {
 			},
 			expectedErr: "invalid logging level: foobar",
 		},
+		{
+			name: "exec-opt without value",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"no-value"},
+				},
+			},
+			expectedErr: "invalid exec-opt (no-value): must be formatted 'opt=value'",
+		},
+		{
+			name: "exec-opt with empty value",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"empty-value="},
+				},
+			},
+			expectedErr: "invalid exec-opt (empty-value=): must be formatted 'opt=value'",
+		},
+		{
+			name: "exec-opt without key",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"=empty-key"},
+				},
+			},
+			expectedErr: "invalid exec-opt (=empty-key): must be formatted 'opt=value'",
+		},
+		{
+			name: "exec-opt unknown option",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"unknown-option=any-value"},
+				},
+			},
+			expectedErr: "invalid exec-opt (unknown-option=any-value): unknown option: 'unknown-option'",
+		},
+		{
+			name: "exec-opt invalid on linux",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"isolation=default"},
+				},
+			},
+			platform:    "linux",
+			expectedErr: "invalid exec-opt (isolation=default): option 'isolation' is only supported on windows",
+		},
+		{
+			name: "exec-opt invalid on windows",
+			config: &Config{
+				CommonConfig: CommonConfig{
+					ExecOptions: []string{"native.cgroupdriver=systemd"},
+				},
+			},
+			platform:    "windows",
+			expectedErr: "invalid exec-opt (native.cgroupdriver=systemd): option 'native.cgroupdriver' is only supported on linux",
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,7 +421,11 @@ func TestValidateConfigurationErrors(t *testing.T) {
 				assert.Check(t, mergo.Merge(cfg, tc.config, mergo.WithOverride))
 			}
 			err = Validate(cfg)
-			assert.Error(t, err, tc.expectedErr)
+			if tc.platform != "" && tc.platform != runtime.GOOS {
+				assert.NilError(t, err)
+			} else {
+				assert.Error(t, err, tc.expectedErr)
+			}
 		})
 	}
 }
@@ -417,17 +464,6 @@ func TestValidateConfiguration(t *testing.T) {
 			},
 		},
 		{
-			name:  "with dns",
-			field: "DNSConfig",
-			config: &Config{
-				CommonConfig: CommonConfig{
-					DNSConfig: DNSConfig{
-						DNS: []string{"1.1.1.1"},
-					},
-				},
-			},
-		},
-		{
 			name:  "with dns-search",
 			field: "DNSConfig",
 			config: &Config{
@@ -443,7 +479,11 @@ func TestValidateConfiguration(t *testing.T) {
 			field: "MTU",
 			config: &Config{
 				CommonConfig: CommonConfig{
-					BridgeConfig: BridgeConfig{MTU: 1234},
+					BridgeConfig: BridgeConfig{
+						DefaultBridgeConfig: DefaultBridgeConfig{
+							MTU: 1234,
+						},
+					},
 				},
 			},
 		},
@@ -522,6 +562,87 @@ func TestValidateConfiguration(t *testing.T) {
 			assert.Check(t, is.DeepEqual(cfg, tc.config, field(tc.field)))
 			err = Validate(cfg)
 			assert.NilError(t, err)
+		})
+	}
+}
+
+func TestValidateMinAPIVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		doc         string
+		input       string
+		expectedErr string
+	}{
+		{
+			doc:         "empty",
+			expectedErr: "value is empty",
+		},
+		{
+			doc:         "with prefix",
+			input:       "v1.43",
+			expectedErr: `API version must be provided without "v" prefix`,
+		},
+		{
+			doc:         "major only",
+			input:       "1",
+			expectedErr: `minimum supported API version is`,
+		},
+		{
+			doc:         "too low",
+			input:       "1.0",
+			expectedErr: `minimum supported API version is`,
+		},
+		{
+			doc:         "minor too high",
+			input:       "1.99",
+			expectedErr: `maximum supported API version is`,
+		},
+		{
+			doc:         "major too high",
+			input:       "9.0",
+			expectedErr: `maximum supported API version is`,
+		},
+		{
+			doc:   "current version",
+			input: api.DefaultVersion,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.doc, func(t *testing.T) {
+			err := ValidateMinAPIVersion(tc.input)
+			if tc.expectedErr != "" {
+				assert.Check(t, is.ErrorContains(err, tc.expectedErr))
+			} else {
+				assert.Check(t, err)
+			}
+		})
+	}
+}
+
+func TestConfigInvalidDNS(t *testing.T) {
+	tests := []struct {
+		doc         string
+		input       string
+		expectedErr string
+	}{
+		{
+			doc:         "single DNS, invalid IP-address",
+			input:       `{"dns": ["1.1.1.1o"]}`,
+			expectedErr: `invalid IP address: 1.1.1.1o`,
+		},
+		{
+			doc:         "multiple DNS, invalid IP-address",
+			input:       `{"dns": ["2.2.2.2", "1.1.1.1o"]}`,
+			expectedErr: `invalid IP address: 1.1.1.1o`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.doc, func(t *testing.T) {
+			var cfg Config
+			err := json.Unmarshal([]byte(tc.input), &cfg)
+			assert.Check(t, is.Error(err, tc.expectedErr))
 		})
 	}
 }

@@ -5,9 +5,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // EventType represents a possible event from libcontainerd
@@ -64,7 +64,7 @@ type Client interface {
 
 // Container provides access to a containerd container.
 type Container interface {
-	Start(ctx context.Context, checkpointDir string, withStdin bool, attachStdio StdioCallback) (Task, error)
+	NewTask(ctx context.Context, checkpointDir string, withStdin bool, attachStdio StdioCallback) (Task, error)
 	Task(ctx context.Context) (Task, error)
 	// AttachTask returns the current task for the container and reattaches
 	// to the IO for the running task. If no task exists for the container
@@ -79,6 +79,8 @@ type Container interface {
 // Task provides access to a running containerd container.
 type Task interface {
 	Process
+	// Start begins execution of the task
+	Start(context.Context) error
 	// Pause suspends the execution of the task
 	Pause(context.Context) error
 	// Resume the execution of the task

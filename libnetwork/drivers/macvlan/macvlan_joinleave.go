@@ -7,14 +7,23 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
-func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.macvlan.Join", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid),
+		attribute.String("sboxKey", sboxKey)))
+	defer span.End()
+
 	n, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -54,11 +63,11 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 			if err != nil {
 				return err
 			}
-			log.G(context.TODO()).Debugf("Macvlan Endpoint Joined with IPv4_Addr: %s, Gateway: %s, MacVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Macvlan Endpoint Joined with IPv4_Addr: %s, Gateway: %s, MacVlan_Mode: %s, Parent: %s",
 				ep.addr.IP.String(), v4gw.String(), n.config.MacvlanMode, n.config.Parent)
 		}
 		// parse and match the endpoint address with the available v6 subnets
-		if len(n.config.Ipv6Subnets) > 0 {
+		if ep.addrv6 != nil && len(n.config.Ipv6Subnets) > 0 {
 			s := n.getSubnetforIPv6(ep.addrv6)
 			if s == nil {
 				return fmt.Errorf("could not find a valid ipv6 subnet for endpoint %s", eid)
@@ -71,18 +80,26 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 			if err != nil {
 				return err
 			}
-			log.G(context.TODO()).Debugf("Macvlan Endpoint Joined with IPv6_Addr: %s Gateway: %s MacVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Macvlan Endpoint Joined with IPv6_Addr: %s Gateway: %s MacVlan_Mode: %s, Parent: %s",
 				ep.addrv6.IP.String(), v6gw.String(), n.config.MacvlanMode, n.config.Parent)
+		}
+		if len(n.config.Ipv4Subnets) == 0 && len(n.config.Ipv6Subnets) == 0 {
+			// With no addresses, don't need a gateway.
+			jinfo.DisableGatewayService()
 		}
 	} else {
 		if len(n.config.Ipv4Subnets) > 0 {
-			log.G(context.TODO()).Debugf("Macvlan Endpoint Joined with IPv4_Addr: %s, MacVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Macvlan Endpoint Joined with IPv4_Addr: %s, MacVlan_Mode: %s, Parent: %s",
 				ep.addr.IP.String(), n.config.MacvlanMode, n.config.Parent)
 		}
 		if len(n.config.Ipv6Subnets) > 0 {
-			log.G(context.TODO()).Debugf("Macvlan Endpoint Joined with IPv6_Addr: %s MacVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Macvlan Endpoint Joined with IPv6_Addr: %s MacVlan_Mode: %s, Parent: %s",
 				ep.addrv6.IP.String(), n.config.MacvlanMode, n.config.Parent)
 		}
+		// If n.config.Internal was set locally by the driver because there's no parent
+		// interface, libnetwork doesn't know the network is internal. So, stop it from
+		// adding a gateway endpoint.
+		jinfo.DisableGatewayService()
 	}
 	iNames := jinfo.InterfaceName()
 	err = iNames.SetNames(vethName, containerVethPrefix)

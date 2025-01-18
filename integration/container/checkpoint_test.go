@@ -6,10 +6,9 @@ import (
 	"regexp"
 	"sort"
 	"testing"
-	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/checkpoint"
+	containertypes "github.com/docker/docker/api/types/container"
 	mounttypes "github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
@@ -105,10 +104,7 @@ func TestCheckpoint(t *testing.T) {
 	})
 	assert.NilError(t, err)
 
-	poll.WaitOn(t,
-		container.IsInState(ctx, apiClient, cID, "exited"),
-		poll.WithDelay(100*time.Millisecond),
-	)
+	poll.WaitOn(t, container.IsInState(ctx, apiClient, cID, "exited"))
 
 	inspect, err = apiClient.ContainerInspect(ctx, cID)
 	assert.NilError(t, err)
@@ -128,7 +124,7 @@ func TestCheckpoint(t *testing.T) {
 
 	// Restore the container from a second checkpoint.
 	t.Log("Restore the container")
-	err = apiClient.ContainerStart(ctx, cID, types.ContainerStartOptions{
+	err = apiClient.ContainerStart(ctx, cID, containertypes.StartOptions{
 		CheckpointID: "test2",
 	})
 	assert.NilError(t, err)

@@ -1,10 +1,13 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.22
+
 package config
 
 import (
 	"context"
 	"strings"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/cluster"
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/ipamutils"
@@ -36,7 +39,7 @@ type Config struct {
 	ClusterProvider        cluster.Provider
 	NetworkControlPlaneMTU int
 	DefaultAddressPool     []*ipamutils.NetworkToSplit
-	Scope                  datastore.ScopeCfg
+	DatastoreBucket        string
 	ActiveSandboxes        map[string]interface{}
 	PluginGetter           plugingetter.PluginGetter
 }
@@ -44,7 +47,8 @@ type Config struct {
 // New creates a new Config and initializes it with the given Options.
 func New(opts ...Option) *Config {
 	cfg := &Config{
-		driverCfg: make(map[string]map[string]any),
+		driverCfg:       make(map[string]map[string]any),
+		DatastoreBucket: datastore.DefaultBucket,
 	}
 
 	for _, opt := range opts {
@@ -53,10 +57,6 @@ func New(opts ...Option) *Config {
 		}
 	}
 
-	// load default scope configs which don't have explicit user specified configs.
-	if cfg.Scope == (datastore.ScopeCfg{}) {
-		cfg.Scope = datastore.DefaultScope(cfg.DataDir)
-	}
 	return cfg
 }
 

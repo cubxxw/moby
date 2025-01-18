@@ -6,8 +6,8 @@ import (
 	"sync"
 
 	winio "github.com/Microsoft/go-winio"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/log"
 	"github.com/pkg/errors"
 )
 

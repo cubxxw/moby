@@ -14,13 +14,14 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/container"
+	"github.com/docker/docker/integration/internal/process"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
@@ -39,7 +40,7 @@ func TestConfigDaemonID(t *testing.T) {
 	d := daemon.New(t)
 	defer d.Stop(t)
 
-	d.Start(t, "--iptables=false")
+	d.Start(t, "--iptables=false", "--ip6tables=false")
 	info := d.Info(t)
 	assert.Check(t, info.ID != "")
 	d.Stop(t)
@@ -53,7 +54,7 @@ func TestConfigDaemonID(t *testing.T) {
 	err := os.WriteFile(idFile, []byte(engineID), 0o644)
 	assert.NilError(t, err)
 
-	d.Start(t, "--iptables=false")
+	d.Start(t, "--iptables=false", "--ip6tables=false")
 	info = d.Info(t)
 	assert.Equal(t, info.ID, engineID)
 	d.Stop(t)
@@ -111,7 +112,6 @@ func TestDaemonConfigValidation(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_ = testutil.StartSpan(ctx, t)
@@ -157,7 +157,6 @@ func TestConfigDaemonSeccompProfiles(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.doc, func(t *testing.T) {
 			_ = testutil.StartSpan(ctx, t)
 
@@ -174,6 +173,73 @@ func TestConfigDaemonSeccompProfiles(t *testing.T) {
 			info = d.Info(t)
 			assert.Assert(t, is.Contains(info.SecurityOptions, "name=seccomp,profile="+tc.expectedProfile))
 			d.Stop(t)
+		})
+	}
+}
+
+func TestDaemonConfigFeatures(t *testing.T) {
+	skip.If(t, runtime.GOOS == "windows")
+	ctx := testutil.StartSpan(baseContext, t)
+
+	d := daemon.New(t)
+	dockerBinary, err := d.BinaryPath()
+	assert.NilError(t, err)
+	params := []string{"--validate", "--config-file"}
+
+	dest := os.Getenv("DOCKER_INTEGRATION_DAEMON_DEST")
+	if dest == "" {
+		dest = os.Getenv("DEST")
+	}
+	testdata := filepath.Join(dest, "..", "..", "integration", "daemon", "testdata")
+
+	const (
+		validOut  = "configuration OK"
+		failedOut = "unable to configure the Docker daemon with file"
+	)
+
+	tests := []struct {
+		name        string
+		args        []string
+		expectedOut string
+	}{
+		{
+			name:        "config with no content",
+			args:        append(params, filepath.Join(testdata, "empty-config-1.json")),
+			expectedOut: validOut,
+		},
+		{
+			name:        "config with {}",
+			args:        append(params, filepath.Join(testdata, "empty-config-2.json")),
+			expectedOut: validOut,
+		},
+		{
+			name:        "invalid config",
+			args:        append(params, filepath.Join(testdata, "invalid-config-1.json")),
+			expectedOut: failedOut,
+		},
+		{
+			name:        "malformed config",
+			args:        append(params, filepath.Join(testdata, "malformed-config.json")),
+			expectedOut: failedOut,
+		},
+		{
+			name:        "valid config",
+			args:        append(params, filepath.Join(testdata, "valid-config-1.json")),
+			expectedOut: validOut,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_ = testutil.StartSpan(ctx, t)
+			cmd := exec.Command(dockerBinary, tc.args...)
+			out, err := cmd.CombinedOutput()
+			assert.Check(t, is.Contains(string(out), tc.expectedOut))
+			if tc.expectedOut == failedOut {
+				assert.ErrorContains(t, err, "", "expected an error, but got none")
+			} else {
+				assert.NilError(t, err)
+			}
 		})
 	}
 }
@@ -207,10 +273,11 @@ func TestDaemonProxy(t *testing.T) {
 			"HTTP_PROXY="+proxyServer.URL,
 			"HTTPS_PROXY="+proxyServer.URL,
 			"NO_PROXY=example.com",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
 		c := d.NewClientT(t)
 
-		d.Start(t, "--iptables=false")
+		d.Start(t, "--iptables=false", "--ip6tables=false")
 		defer d.Stop(t)
 
 		info := d.Info(t)
@@ -218,12 +285,12 @@ func TestDaemonProxy(t *testing.T) {
 		assert.Check(t, is.Equal(info.HTTPSProxy, proxyServer.URL))
 		assert.Check(t, is.Equal(info.NoProxy, "example.com"))
 
-		_, err := c.ImagePull(ctx, "example.org:5000/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5000/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5000")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5000", "should not have used proxy")
 	})
@@ -244,8 +311,9 @@ func TestDaemonProxy(t *testing.T) {
 			"https_proxy="+"https://"+userPass+"myuser:mypassword@from-env-https-invalid",
 			"NO_PROXY=ignore.invalid",
 			"no_proxy=ignore.invalid",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
-		d.Start(t, "--iptables=false", "--http-proxy", proxyServer.URL, "--https-proxy", proxyServer.URL, "--no-proxy", "example.com")
+		d.Start(t, "--iptables=false", "--ip6tables=false", "--http-proxy", proxyServer.URL, "--https-proxy", proxyServer.URL, "--no-proxy", "example.com")
 		defer d.Stop(t)
 
 		c := d.NewClientT(t)
@@ -269,12 +337,12 @@ func TestDaemonProxy(t *testing.T) {
 		ok, logs := d.ScanLogsT(ctx, t, daemon.ScanLogsMatchString(userPass))
 		assert.Assert(t, !ok, "logs should not contain the non-sanitized proxy URL: %s", logs)
 
-		_, err := c.ImagePull(ctx, "example.org:5001/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5001/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5001")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5001", "should not have used proxy")
 	})
@@ -294,6 +362,7 @@ func TestDaemonProxy(t *testing.T) {
 			"https_proxy="+"https://"+userPass+"myuser:mypassword@from-env-https-invalid",
 			"NO_PROXY=ignore.invalid",
 			"no_proxy=ignore.invalid",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
 		c := d.NewClientT(t)
 
@@ -301,7 +370,7 @@ func TestDaemonProxy(t *testing.T) {
 		configJSON := fmt.Sprintf(`{"proxies":{"http-proxy":%[1]q, "https-proxy": %[1]q, "no-proxy": "example.com"}}`, proxyServer.URL)
 		assert.NilError(t, os.WriteFile(configFile, []byte(configJSON), 0o644))
 
-		d.Start(t, "--iptables=false", "--config-file", configFile)
+		d.Start(t, "--iptables=false", "--ip6tables=false", "--config-file", configFile)
 		defer d.Stop(t)
 
 		info := d.Info(t)
@@ -319,12 +388,12 @@ func TestDaemonProxy(t *testing.T) {
 			"NO_PROXY",
 		))
 
-		_, err := c.ImagePull(ctx, "example.org:5002/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5002/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5002")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5002", "should not have used proxy")
 	})
@@ -363,8 +432,10 @@ func TestDaemonProxy(t *testing.T) {
 			proxyURL    = "https://xxxxx:xxxxx@example.org"
 		)
 
-		d := daemon.New(t)
-		d.Start(t, "--iptables=false", "--http-proxy", proxyRawURL, "--https-proxy", proxyRawURL, "--no-proxy", "example.com")
+		d := daemon.New(t, daemon.WithEnvVars(
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
+		))
+		d.Start(t, "--iptables=false", "--ip6tables=false", "--http-proxy", proxyRawURL, "--https-proxy", proxyRawURL, "--no-proxy", "example.com")
 		defer d.Stop(t)
 		err := d.Signal(syscall.SIGHUP)
 		assert.NilError(t, err)
@@ -381,6 +452,74 @@ func TestLiveRestore(t *testing.T) {
 	_ = testutil.StartSpan(baseContext, t)
 
 	t.Run("volume references", testLiveRestoreVolumeReferences)
+	t.Run("autoremove", testLiveRestoreAutoRemove)
+	t.Run("user chains", testLiveRestoreUserChainsSetup)
+}
+
+func testLiveRestoreAutoRemove(t *testing.T) {
+	skip.If(t, testEnv.IsRootless(), "restarted rootless daemon will have a new process namespace")
+
+	t.Parallel()
+	ctx := testutil.StartSpan(baseContext, t)
+
+	run := func(t *testing.T) (*daemon.Daemon, func(), string) {
+		d := daemon.New(t)
+		d.StartWithBusybox(ctx, t, "--live-restore", "--iptables=false", "--ip6tables=false")
+		t.Cleanup(func() {
+			d.Stop(t)
+			d.Cleanup(t)
+		})
+
+		tmpDir := t.TempDir()
+
+		apiClient := d.NewClientT(t)
+
+		cID := container.Run(ctx, t, apiClient,
+			container.WithBind(tmpDir, "/v"),
+			// Run until a 'stop' file is created.
+			container.WithCmd("sh", "-c", "while [ ! -f /v/stop ]; do sleep 0.1; done"),
+			container.WithAutoRemove)
+		t.Cleanup(func() { apiClient.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true}) })
+		finishContainer := func() {
+			file, err := os.Create(filepath.Join(tmpDir, "stop"))
+			assert.NilError(t, err, "Failed to create 'stop' file")
+			file.Close()
+		}
+		return d, finishContainer, cID
+	}
+
+	t.Run("engine restart shouldnt kill alive containers", func(t *testing.T) {
+		d, finishContainer, cID := run(t)
+
+		d.Restart(t, "--live-restore", "--iptables=false", "--ip6tables=false")
+
+		apiClient := d.NewClientT(t)
+		_, err := apiClient.ContainerInspect(ctx, cID)
+		assert.NilError(t, err, "Container shouldn't be removed after engine restart")
+
+		finishContainer()
+
+		poll.WaitOn(t, container.IsRemoved(ctx, apiClient, cID))
+	})
+	t.Run("engine restart should remove containers that exited", func(t *testing.T) {
+		d, finishContainer, cID := run(t)
+
+		apiClient := d.NewClientT(t)
+
+		// Get PID of the container process.
+		inspect, err := apiClient.ContainerInspect(ctx, cID)
+		assert.NilError(t, err)
+		pid := inspect.State.Pid
+
+		d.Stop(t)
+
+		finishContainer()
+		poll.WaitOn(t, process.NotAlive(pid))
+
+		d.Start(t, "--live-restore", "--iptables=false", "--ip6tables=false")
+
+		poll.WaitOn(t, container.IsRemoved(ctx, apiClient, cID))
+	})
 }
 
 func testLiveRestoreVolumeReferences(t *testing.T) {
@@ -388,7 +527,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 	ctx := testutil.StartSpan(baseContext, t)
 
 	d := daemon.New(t)
-	d.StartWithBusybox(ctx, t, "--live-restore", "--iptables=false")
+	d.StartWithBusybox(ctx, t, "--live-restore", "--iptables=false", "--ip6tables=false")
 	defer func() {
 		d.Stop(t)
 		d.Cleanup(t)
@@ -410,10 +549,10 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 				Target: "/foo",
 			}
 			cID := container.Run(ctx, t, c, container.WithMount(m), container.WithCmd("top"), container.WithRestartPolicy(policy))
-			defer c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+			defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 
 			// Stop the daemon
-			d.Restart(t, "--live-restore", "--iptables=false")
+			d.Restart(t, "--live-restore", "--iptables=false", "--ip6tables=false")
 
 			// Try to remove the volume
 			err = c.VolumeRemove(ctx, volName, false)
@@ -452,7 +591,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 
 		const testContent = "hello"
 		cID := container.Run(ctx, t, c, container.WithMount(m), container.WithCmd("sh", "-c", "echo "+testContent+">>/foo/test.txt; sleep infinity"))
-		defer c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+		defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 
 		// Wait until container creates a file in the volume.
 		poll.WaitOn(t, func(t poll.LogT) poll.Result {
@@ -471,7 +610,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 			return poll.Success()
 		})
 
-		d.Restart(t, "--live-restore", "--iptables=false")
+		d.Restart(t, "--live-restore", "--iptables=false", "--ip6tables=false")
 
 		// Try to remove the volume
 		// This should fail since its used by a container
@@ -484,7 +623,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 			// Check if a new container with the same volume has access to the previous content.
 			// This fails if the volume gets unmounted at startup.
 			cID2 := container.Run(ctx, t, c, container.WithMount(m), container.WithCmd("cat", "/foo/test.txt"))
-			defer c.ContainerRemove(ctx, cID2, types.ContainerRemoveOptions{Force: true})
+			defer c.ContainerRemove(ctx, cID2, containertypes.RemoveOptions{Force: true})
 
 			poll.WaitOn(t, container.IsStopped(ctx, c, cID2))
 
@@ -493,7 +632,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 				assert.Check(t, is.Equal(inspect.State.ExitCode, 0), "volume doesn't have the same file")
 			}
 
-			logs, err := c.ContainerLogs(ctx, cID2, types.ContainerLogsOptions{ShowStdout: true})
+			logs, err := c.ContainerLogs(ctx, cID2, containertypes.LogsOptions{ShowStdout: true})
 			assert.NilError(t, err)
 			defer logs.Close()
 
@@ -505,7 +644,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 		})
 
 		// Remove that container which should free the references in the volume
-		err = c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+		err = c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 		assert.NilError(t, err)
 
 		// Now we should be able to remove the volume
@@ -524,40 +663,39 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 			Target: "/foo",
 		}
 		cID := container.Run(ctx, t, c, container.WithMount(m), container.WithCmd("top"))
-		defer c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+		defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 
-		d.Restart(t, "--live-restore", "--iptables=false")
+		d.Restart(t, "--live-restore", "--iptables=false", "--ip6tables=false")
 
-		err := c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+		err := c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 		assert.NilError(t, err)
 	})
 }
 
-func TestDaemonDefaultBridgeWithFixedCidrButNoBip(t *testing.T) {
-	skip.If(t, runtime.GOOS == "windows")
+func testLiveRestoreUserChainsSetup(t *testing.T) {
+	skip.If(t, testEnv.IsRootless(), "rootless daemon uses it's own network namespace")
 
+	t.Parallel()
 	ctx := testutil.StartSpan(baseContext, t)
 
-	bridgeName := "ext-bridge1"
-	d := daemon.New(t, daemon.WithEnvVars("DOCKER_TEST_CREATE_DEFAULT_BRIDGE="+bridgeName))
-	defer func() {
+	t.Run("user chains should be inserted", func(t *testing.T) {
+		d := daemon.New(t)
+		d.StartWithBusybox(ctx, t, "--live-restore")
+		t.Cleanup(func() {
+			d.Stop(t)
+			d.Cleanup(t)
+		})
+
+		c := d.NewClientT(t)
+
+		cID := container.Run(ctx, t, c, container.WithCmd("top"))
+		defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
+
 		d.Stop(t)
-		d.Cleanup(t)
-	}()
+		icmd.RunCommand("iptables", "--flush", "FORWARD").Assert(t, icmd.Success)
+		d.Start(t, "--live-restore")
 
-	defer func() {
-		// No need to clean up when running this test in rootless mode, as the
-		// interface is deleted when the daemon is stopped and the netns
-		// reclaimed by the kernel.
-		if !testEnv.IsRootless() {
-			deleteInterface(t, bridgeName)
-		}
-	}()
-	d.StartWithBusybox(ctx, t, "--bridge", bridgeName, "--fixed-cidr", "192.168.130.0/24")
-}
-
-func deleteInterface(t *testing.T, ifName string) {
-	icmd.RunCommand("ip", "link", "delete", ifName).Assert(t, icmd.Success)
-	icmd.RunCommand("iptables", "-t", "nat", "--flush").Assert(t, icmd.Success)
-	icmd.RunCommand("iptables", "--flush").Assert(t, icmd.Success)
+		result := icmd.RunCommand("iptables", "-S", "FORWARD", "1")
+		assert.Check(t, is.Equal(strings.TrimSpace(result.Stdout()), "-A FORWARD -j DOCKER-USER"), "the jump to DOCKER-USER should be the first rule in the FORWARD chain")
+	})
 }

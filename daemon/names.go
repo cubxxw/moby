@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/names"
 	"github.com/docker/docker/errdefs"
@@ -20,11 +20,13 @@ var (
 )
 
 func (daemon *Daemon) registerName(container *container.Container) error {
-	if daemon.Exists(container.ID) {
-		return fmt.Errorf("Container is already loaded")
+	if container.ID == "" {
+		return fmt.Errorf("invalid empty id")
 	}
-	if err := validateID(container.ID); err != nil {
-		return err
+	if daemon.containers.Get(container.ID) != nil {
+		// TODO(thaJeztah): should this be a panic (duplicate IDs due to invalid state on disk?)
+		// TODO(thaJeztah): should this also check for container.ID being a prefix of another container's ID? (daemon.containersReplica.GetByPrefix); only should happen due to corruption / truncated ID.
+		return fmt.Errorf("container is already loaded")
 	}
 	if container.Name == "" {
 		name, err := daemon.generateAndReserveName(container.ID)
@@ -66,7 +68,7 @@ func (daemon *Daemon) reserveName(id, name string) (string, error) {
 	}
 
 	if err := daemon.containersReplica.ReserveName(name, id); err != nil {
-		if errors.Is(err, container.ErrNameReserved) {
+		if errdefs.IsConflict(err) {
 			id, err := daemon.containersReplica.Snapshot().GetID(name)
 			if err != nil {
 				log.G(context.TODO()).Errorf("got unexpected error while looking up reserved name: %v", err)
@@ -92,7 +94,7 @@ func (daemon *Daemon) generateAndReserveName(id string) (string, error) {
 		}
 
 		if err := daemon.containersReplica.ReserveName(name, id); err != nil {
-			if errors.Is(err, container.ErrNameReserved) {
+			if errdefs.IsConflict(err) {
 				continue
 			}
 			return "", err
@@ -105,11 +107,4 @@ func (daemon *Daemon) generateAndReserveName(id string) (string, error) {
 		return "", err
 	}
 	return name, nil
-}
-
-func validateID(id string) error {
-	if id == "" {
-		return fmt.Errorf("Invalid empty id")
-	}
-	return nil
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/docker/distribution/manifest/schema2"
 	"github.com/docker/distribution/registry/client"
 	"github.com/docker/distribution/registry/client/auth"
-	"github.com/docker/distribution/registry/client/transport"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/registry"
@@ -76,11 +75,8 @@ func newRepository(
 	ctx context.Context, repoInfo *registry.RepositoryInfo, endpoint registry.APIEndpoint,
 	metaHeaders http.Header, authConfig *registrytypes.AuthConfig, actions ...string,
 ) (distribution.Repository, error) {
-	repoName := repoInfo.Name.Name()
-	// If endpoint does not support CanonicalName, use the RemoteName instead
-	if endpoint.TrimHostname {
-		repoName = reference.Path(repoInfo.Name)
-	}
+	// Trim the hostname to form the RemoteName
+	repoName := reference.Path(repoInfo.Name)
 
 	direct := &net.Dialer{
 		Timeout:   30 * time.Second,
@@ -98,7 +94,7 @@ func newRepository(
 	}
 
 	modifiers := registry.Headers(dockerversion.DockerUserAgent(ctx), metaHeaders)
-	authTransport := transport.NewTransport(base, modifiers...)
+	authTransport := newTransport(base, modifiers...)
 
 	challengeManager, err := registry.PingV2Registry(endpoint.URL, authTransport)
 	if err != nil {
@@ -123,15 +119,16 @@ func newRepository(
 			Scopes: []auth.Scope{auth.RepositoryScope{
 				Repository: repoName,
 				Actions:    actions,
-				Class:      repoInfo.Class,
 			}},
 			ClientID: registry.AuthClientID,
 		})
 		basicHandler := auth.NewBasicHandler(creds)
 		modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler))
 	}
-	tr := transport.NewTransport(base, modifiers...)
 
+	tr := newTransport(base, modifiers...)
+
+	// FIXME(thaJeztah): should this just take the original repoInfo.Name instead of converting the remote name back to a named reference?
 	repoNameRef, err := reference.WithName(repoName)
 	if err != nil {
 		return nil, fallbackError{

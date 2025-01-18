@@ -9,12 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/internal/metrics"
 )
 
 const (
@@ -32,6 +33,10 @@ const (
 	// The time given for the container to start before the health check starts considering
 	// the container unstable. Defaults to none.
 	defaultStartPeriod = 0 * time.Second
+
+	// defaultStartInterval is the default interval between health checks during
+	// the start period.
+	defaultStartInterval = 5 * time.Second
 
 	// Default number of consecutive failures of the health check
 	// for the container to be considered unhealthy.
@@ -51,7 +56,7 @@ const (
 type probe interface {
 	// Perform one run of the check. Returns the exit code and an optional
 	// short diagnostic string.
-	run(context.Context, *Daemon, *container.Container) (*types.HealthcheckResult, error)
+	run(context.Context, *Daemon, *container.Container) (*containertypes.HealthcheckResult, error)
 }
 
 // cmdProbe implements the "CMD" probe type.
@@ -62,7 +67,7 @@ type cmdProbe struct {
 
 // exec the healthcheck command in the container.
 // Returns the exit code and probe output (if any)
-func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container) (*types.HealthcheckResult, error) {
+func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container) (*containertypes.HealthcheckResult, error) {
 	startTime := time.Now()
 	cmdSlice := strslice.StrSlice(cntr.Config.Healthcheck.Test)[1:]
 	if p.shell {
@@ -97,7 +102,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 	defer cancelProbe()
 	execErr := make(chan error, 1)
 
-	options := containertypes.ExecStartOptions{
+	options := backend.ExecStartConfig{
 		Stdout: output,
 		Stderr: output,
 	}
@@ -119,7 +124,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 			return nil, err
 		}
 	case <-execConfig.Started:
-		healthCheckStartDuration.UpdateSince(startTime)
+		metrics.HealthCheckStartDuration.UpdateSince(startTime)
 	}
 
 	if !tm.Stop() {
@@ -141,7 +146,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 		} else {
 			msg = fmt.Sprintf("Health check exceeded timeout (%v)", probeTimeout)
 		}
-		return &types.HealthcheckResult{
+		return &containertypes.HealthcheckResult{
 			ExitCode: -1,
 			Output:   msg,
 			End:      time.Now(),
@@ -169,7 +174,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 	}
 	// Note: Go's json package will handle invalid UTF-8 for us
 	out := output.String()
-	return &types.HealthcheckResult{
+	return &containertypes.HealthcheckResult{
 		End:      time.Now(),
 		ExitCode: exitCode,
 		Output:   out,
@@ -177,7 +182,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 }
 
 // Update the container's Status.Health struct based on the latest probe's result.
-func handleProbeResult(d *Daemon, c *container.Container, result *types.HealthcheckResult, done chan struct{}) {
+func handleProbeResult(d *Daemon, c *container.Container, result *containertypes.HealthcheckResult, done chan struct{}) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -204,14 +209,14 @@ func handleProbeResult(d *Daemon, c *container.Container, result *types.Healthch
 
 	if result.ExitCode == exitStatusHealthy {
 		h.FailingStreak = 0
-		h.SetStatus(types.Healthy)
+		h.SetStatus(containertypes.Healthy)
 	} else { // Failure (including invalid exit code)
 		shouldIncrementStreak := true
 
 		// If the container is starting (i.e. we never had a successful health check)
 		// then we check if we are within the start period of the container in which
 		// case we do not increment the failure streak.
-		if h.Status() == types.Starting {
+		if h.Status() == containertypes.Starting {
 			startPeriod := timeoutWithDefault(c.Config.Healthcheck.StartPeriod, defaultStartPeriod)
 			timeSinceStart := result.Start.Sub(c.State.StartedAt)
 
@@ -225,14 +230,17 @@ func handleProbeResult(d *Daemon, c *container.Container, result *types.Healthch
 			h.FailingStreak++
 
 			if h.FailingStreak >= retries {
-				h.SetStatus(types.Unhealthy)
+				h.SetStatus(containertypes.Unhealthy)
 			}
 		}
 		// Else we're starting or healthy. Stay in that state.
 	}
 
-	// replicate Health status changes
-	if err := c.CheckpointTo(d.containersReplica); err != nil {
+	// Replicate Health status changes to the API, skipping persistent storage
+	// to avoid unnecessary disk writes. The health state is only best-effort
+	// persisted across of the daemon. It will get written to disk on the next
+	// checkpoint, such as when the container state changes.
+	if err := c.CommitInMemory(d.containersReplica); err != nil {
 		// queries will be inconsistent until the next probe runs or other state mutations
 		// checkpoint the container
 		log.G(context.TODO()).Errorf("Error replicating health state for container %s: %v", c.ID, err)
@@ -248,7 +256,7 @@ func handleProbeResult(d *Daemon, c *container.Container, result *types.Healthch
 // There is never more than one monitor thread running per container at a time.
 func monitor(d *Daemon, c *container.Container, stop chan struct{}, probe probe) {
 	probeInterval := timeoutWithDefault(c.Config.Healthcheck.Interval, defaultProbeInterval)
-	startInterval := timeoutWithDefault(c.Config.Healthcheck.StartInterval, defaultProbeInterval)
+	startInterval := timeoutWithDefault(c.Config.Healthcheck.StartInterval, defaultStartInterval)
 	startPeriod := timeoutWithDefault(c.Config.Healthcheck.StartPeriod, defaultStartPeriod)
 
 	c.Lock()
@@ -263,7 +271,7 @@ func monitor(d *Daemon, c *container.Container, stop chan struct{}, probe probe)
 		status := c.Health.Health.Status
 		c.Unlock()
 
-		if status == types.Starting {
+		if status == containertypes.Starting {
 			return startInterval
 		}
 		return probeInterval
@@ -281,14 +289,14 @@ func monitor(d *Daemon, c *container.Container, stop chan struct{}, probe probe)
 			log.G(context.TODO()).Debugf("Running health check for container %s ...", c.ID)
 			startTime := time.Now()
 			ctx, cancelProbe := context.WithCancel(context.Background())
-			results := make(chan *types.HealthcheckResult, 1)
+			results := make(chan *containertypes.HealthcheckResult, 1)
 			go func() {
-				healthChecksCounter.Inc()
+				metrics.HealthChecksCounter.Inc()
 				result, err := probe.run(ctx, d, c)
 				if err != nil {
-					healthChecksFailedCounter.Inc()
+					metrics.HealthChecksFailedCounter.Inc()
 					log.G(ctx).Warnf("Health check for container %s error: %v", c.ID, err)
-					results <- &types.HealthcheckResult{
+					results <- &containertypes.HealthcheckResult{
 						ExitCode: -1,
 						Output:   err.Error(),
 						Start:    startTime,
@@ -372,11 +380,11 @@ func (daemon *Daemon) initHealthMonitor(c *container.Container) {
 	daemon.stopHealthchecks(c)
 
 	if h := c.State.Health; h != nil {
-		h.SetStatus(types.Starting)
+		h.SetStatus(containertypes.Starting)
 		h.FailingStreak = 0
 	} else {
 		h := &container.Health{}
-		h.SetStatus(types.Starting)
+		h.SetStatus(containertypes.Starting)
 		c.State.Health = h
 	}
 
@@ -450,7 +458,7 @@ func getShell(cntr *container.Container) []string {
 	if runtime.GOOS != "windows" {
 		return []string{"/bin/sh", "-c"}
 	}
-	if cntr.OS != runtime.GOOS {
+	if cntr.ImagePlatform.OS != runtime.GOOS {
 		return []string{"/bin/sh", "-c"}
 	}
 	return []string{"cmd", "/S", "/C"}

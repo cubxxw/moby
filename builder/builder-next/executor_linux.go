@@ -2,12 +2,13 @@ package buildkit
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/libnetwork"
 	"github.com/docker/docker/pkg/idtools"
@@ -15,11 +16,12 @@ import (
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
 	"github.com/moby/buildkit/executor/resources"
+	resourcestypes "github.com/moby/buildkit/executor/resources/types"
 	"github.com/moby/buildkit/executor/runcexecutor"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/network"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 const networkName = "bridge"
@@ -55,9 +57,16 @@ func newExecutor(root, cgroupParent string, net *libnetwork.Controller, dnsConfi
 		return nil, err
 	}
 
+	runcCmds := []string{"runc"}
+
+	// TODO: FIXME: testing env var, replace with something better or remove in a major version or two
+	if runcOverride := os.Getenv("DOCKER_BUILDKIT_RUNC_COMMAND"); runcOverride != "" {
+		runcCmds = []string{runcOverride}
+	}
+
 	return runcexecutor.New(runcexecutor.Opt{
 		Root:                filepath.Join(root, "executor"),
-		CommandCandidates:   []string{"runc"},
+		CommandCandidates:   runcCmds,
 		DefaultCgroupParent: cgroupParent,
 		Rootless:            rootless,
 		NoPivot:             os.Getenv("DOCKER_RAMDISK") != "",
@@ -104,20 +113,20 @@ func (iface *lnInterface) init(c *libnetwork.Controller, n *libnetwork.Network) 
 	defer close(iface.ready)
 	id := identity.NewID()
 
-	ep, err := n.CreateEndpoint(id, libnetwork.CreateOptionDisableResolution())
+	ep, err := n.CreateEndpoint(context.TODO(), id, libnetwork.CreateOptionDisableResolution())
 	if err != nil {
 		iface.err = err
 		return
 	}
 
-	sbx, err := c.NewSandbox(id, libnetwork.OptionUseExternalKey(), libnetwork.OptionHostsPath(filepath.Join(iface.provider.Root, id, "hosts")),
+	sbx, err := c.NewSandbox(context.TODO(), id, libnetwork.OptionUseExternalKey(), libnetwork.OptionHostsPath(filepath.Join(iface.provider.Root, id, "hosts")),
 		libnetwork.OptionResolvConfPath(filepath.Join(iface.provider.Root, id, "resolv.conf")))
 	if err != nil {
 		iface.err = err
 		return
 	}
 
-	if err := ep.Join(sbx); err != nil {
+	if err := ep.Join(context.TODO(), sbx); err != nil {
 		iface.err = err
 		return
 	}
@@ -127,8 +136,8 @@ func (iface *lnInterface) init(c *libnetwork.Controller, n *libnetwork.Network) 
 }
 
 // TODO(neersighted): Unstub Sample(), and collect data from the libnetwork Endpoint.
-func (iface *lnInterface) Sample() (*network.Sample, error) {
-	return &network.Sample{}, nil
+func (iface *lnInterface) Sample() (*resourcestypes.NetworkSample, error) {
+	return &resourcestypes.NetworkSample{}, nil
 }
 
 func (iface *lnInterface) Set(s *specs.Spec) error {
@@ -152,7 +161,7 @@ func (iface *lnInterface) Close() error {
 	<-iface.ready
 	if iface.sbx != nil {
 		go func() {
-			if err := iface.sbx.Delete(); err != nil {
+			if err := iface.sbx.Delete(context.TODO()); err != nil {
 				log.G(context.TODO()).WithError(err).Errorf("failed to delete builder network sandbox")
 			}
 			if err := os.RemoveAll(filepath.Join(iface.provider.Root, iface.sbx.ContainerID())); err != nil {
@@ -166,10 +175,18 @@ func (iface *lnInterface) Close() error {
 func getDNSConfig(cfg config.DNSConfig) *oci.DNSConfig {
 	if cfg.DNS != nil || cfg.DNSSearch != nil || cfg.DNSOptions != nil {
 		return &oci.DNSConfig{
-			Nameservers:   cfg.DNS,
+			Nameservers:   ipAddresses(cfg.DNS),
 			SearchDomains: cfg.DNSSearch,
 			Options:       cfg.DNSOptions,
 		}
 	}
 	return nil
+}
+
+func ipAddresses(ips []net.IP) []string {
+	var addrs []string
+	for _, ip := range ips {
+		addrs = append(addrs, ip.String())
+	}
+	return addrs
 }

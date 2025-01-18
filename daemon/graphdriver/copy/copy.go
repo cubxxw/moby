@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/docker/docker/pkg/pools"
 	"github.com/docker/docker/pkg/system"
+	"github.com/moby/sys/userns"
 	"golang.org/x/sys/unix"
 )
 
@@ -159,6 +159,7 @@ func DirCopy(srcDir, dstDir string, copyMode Mode, copyOpaqueXattrs bool) error 
 					return err2
 				}
 			} else if hardLinkDstPath, ok := copiedFiles[id]; ok {
+				isHardlink = true
 				if err2 := os.Link(hardLinkDstPath, dstPath); err2 != nil {
 					return err2
 				}

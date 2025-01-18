@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/integration-cli/cli"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 type DockerCLIInfoSuite struct {
@@ -24,7 +26,7 @@ func (s *DockerCLIInfoSuite) OnTimeout(c *testing.T) {
 
 // ensure docker info succeeds
 func (s *DockerCLIInfoSuite) TestInfoEnsureSucceeds(c *testing.T) {
-	out, _ := dockerCmd(c, "info")
+	out := cli.DockerCmd(c, "info").Stdout()
 
 	// always shown fields
 	stringsToCheck := []string{
@@ -71,12 +73,12 @@ func (s *DockerCLIInfoSuite) TestInfoDisplaysRunningContainers(c *testing.T) {
 
 	existing := existingContainerStates(c)
 
-	dockerCmd(c, "run", "-d", "busybox", "top")
-	out, _ := dockerCmd(c, "info")
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"]+1)))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"])))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"])))
+	cli.DockerCmd(c, "run", "-d", "busybox", "top")
+	out := cli.DockerCmd(c, "info").Stdout()
+	assert.Assert(c, is.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"]+1)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"])))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"])))
 }
 
 func (s *DockerCLIInfoSuite) TestInfoDisplaysPausedContainers(c *testing.T) {
@@ -84,16 +86,15 @@ func (s *DockerCLIInfoSuite) TestInfoDisplaysPausedContainers(c *testing.T) {
 
 	existing := existingContainerStates(c)
 
-	out := runSleepingContainer(c, "-d")
-	cleanedContainerID := strings.TrimSpace(out)
+	id := runSleepingContainer(c, "-d")
 
-	dockerCmd(c, "pause", cleanedContainerID)
+	cli.DockerCmd(c, "pause", id)
 
-	out, _ = dockerCmd(c, "info")
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"])))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"]+1)))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"])))
+	out := cli.DockerCmd(c, "info").Stdout()
+	assert.Assert(c, is.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"])))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"]+1)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"])))
 }
 
 func (s *DockerCLIInfoSuite) TestInfoDisplaysStoppedContainers(c *testing.T) {
@@ -101,20 +102,20 @@ func (s *DockerCLIInfoSuite) TestInfoDisplaysStoppedContainers(c *testing.T) {
 
 	existing := existingContainerStates(c)
 
-	out, _ := dockerCmd(c, "run", "-d", "busybox", "top")
+	out := cli.DockerCmd(c, "run", "-d", "busybox", "top").Stdout()
 	cleanedContainerID := strings.TrimSpace(out)
 
-	dockerCmd(c, "stop", cleanedContainerID)
+	cli.DockerCmd(c, "stop", cleanedContainerID)
 
-	out, _ = dockerCmd(c, "info")
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"])))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"])))
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"]+1)))
+	out = cli.DockerCmd(c, "info").Stdout()
+	assert.Assert(c, is.Contains(out, fmt.Sprintf("Containers: %d\n", existing["Containers"]+1)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Running: %d\n", existing["ContainersRunning"])))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Paused: %d\n", existing["ContainersPaused"])))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf(" Stopped: %d\n", existing["ContainersStopped"]+1)))
 }
 
 func existingContainerStates(c *testing.T) map[string]int {
-	out, _ := dockerCmd(c, "info", "--format", "{{json .}}")
+	out := cli.DockerCmd(c, "info", "--format", "{{json .}}").Stdout()
 	var m map[string]interface{}
 	err := json.Unmarshal([]byte(out), &m)
 	assert.NilError(c, err)

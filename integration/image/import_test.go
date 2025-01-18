@@ -9,11 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	imagetypes "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
 )
 
@@ -28,7 +30,7 @@ func TestImportExtremelyLargeImageWorks(t *testing.T) {
 
 	// Spin up a new daemon, so that we can run this test in parallel (it's a slow test)
 	d := daemon.New(t)
-	d.Start(t, "--iptables=false")
+	d.Start(t, "--iptables=false", "--ip6tables=false")
 	defer d.Stop(t)
 
 	client := d.NewClientT(t)
@@ -45,9 +47,9 @@ func TestImportExtremelyLargeImageWorks(t *testing.T) {
 	reference := strings.ToLower(t.Name()) + ":v42"
 
 	_, err = client.ImageImport(ctx,
-		types.ImageImportSource{Source: imageRdr, SourceName: "-"},
+		imagetypes.ImportSource{Source: imageRdr, SourceName: "-"},
 		reference,
-		types.ImageImportOptions{})
+		imagetypes.ImportOptions{})
 	assert.NilError(t, err)
 }
 
@@ -67,10 +69,9 @@ func TestImportWithCustomPlatform(t *testing.T) {
 	imageRdr := io.MultiReader(&tarBuffer, io.LimitReader(testutil.DevZero, 0))
 
 	tests := []struct {
-		name        string
-		platform    string
-		expected    image.V1Image
-		expectedErr string
+		name     string
+		platform string
+		expected image.V1Image
 	}{
 		{
 			platform: "",
@@ -78,14 +79,6 @@ func TestImportWithCustomPlatform(t *testing.T) {
 				OS:           runtime.GOOS,
 				Architecture: runtime.GOARCH, // this may fail on armhf due to normalization?
 			},
-		},
-		{
-			platform:    "       ",
-			expectedErr: "is an invalid component",
-		},
-		{
-			platform:    "/",
-			expectedErr: "is an invalid component",
 		},
 		{
 			platform: runtime.GOOS,
@@ -108,6 +101,57 @@ func TestImportWithCustomPlatform(t *testing.T) {
 				Architecture: "sparc64",
 			},
 		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.platform, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+			reference := "import-with-platform:tc-" + strconv.Itoa(i)
+
+			_, err = client.ImageImport(ctx,
+				imagetypes.ImportSource{Source: imageRdr, SourceName: "-"},
+				reference,
+				imagetypes.ImportOptions{Platform: tc.platform})
+			assert.NilError(t, err)
+
+			inspect, _, err := client.ImageInspectWithRaw(ctx, reference)
+			assert.NilError(t, err)
+			assert.Equal(t, inspect.Os, tc.expected.OS)
+			assert.Equal(t, inspect.Architecture, tc.expected.Architecture)
+		})
+	}
+}
+
+func TestImportWithCustomPlatformReject(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "TODO enable on windows")
+	skip.If(t, testEnv.UsingSnapshotter(), "we support importing images/other platforms w/ containerd image store")
+
+	ctx := setupTest(t)
+
+	client := testEnv.APIClient()
+
+	// Construct an empty tar archive.
+	var tarBuffer bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuffer)
+	err := tw.Close()
+	assert.NilError(t, err)
+	imageRdr := io.MultiReader(&tarBuffer, io.LimitReader(testutil.DevZero, 0))
+
+	tests := []struct {
+		name        string
+		platform    string
+		expected    image.V1Image
+		expectedErr string
+	}{
+		{
+			platform:    "       ",
+			expectedErr: "is an invalid OS component",
+		},
+		{
+			platform:    "/",
+			expectedErr: "is an invalid OS component",
+		},
 		{
 			platform:    "macos",
 			expectedErr: "operating system is not supported",
@@ -126,24 +170,16 @@ func TestImportWithCustomPlatform(t *testing.T) {
 	}
 
 	for i, tc := range tests {
-		tc := tc
 		t.Run(tc.platform, func(t *testing.T) {
 			ctx := testutil.StartSpan(ctx, t)
 			reference := "import-with-platform:tc-" + strconv.Itoa(i)
 			_, err = client.ImageImport(ctx,
-				types.ImageImportSource{Source: imageRdr, SourceName: "-"},
+				imagetypes.ImportSource{Source: imageRdr, SourceName: "-"},
 				reference,
-				types.ImageImportOptions{Platform: tc.platform})
-			if tc.expectedErr != "" {
-				assert.ErrorContains(t, err, tc.expectedErr)
-			} else {
-				assert.NilError(t, err)
+				imagetypes.ImportOptions{Platform: tc.platform})
 
-				inspect, _, err := client.ImageInspectWithRaw(ctx, reference)
-				assert.NilError(t, err)
-				assert.Equal(t, inspect.Os, tc.expected.OS)
-				assert.Equal(t, inspect.Architecture, tc.expected.Architecture)
-			}
+			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorContains(err, tc.expectedErr))
 		})
 	}
 }

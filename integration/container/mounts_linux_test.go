@@ -6,17 +6,18 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api"
 	containertypes "github.com/docker/docker/api/types/container"
 	mounttypes "github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/testutil"
+	"github.com/docker/docker/volume"
 	"github.com/moby/sys/mount"
 	"github.com/moby/sys/mountinfo"
 	"gotest.tools/v3/assert"
@@ -25,6 +26,10 @@ import (
 	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
 )
+
+// testNonExistingPlugin is a special plugin-name, which overrides defaultTimeOut in tests.
+// this is a copy of https://github.com/moby/moby/blob/9e00a63d65434cdedc444e79a2b33a7c202b10d8/pkg/plugins/client.go#L253-L254
+const testNonExistingPlugin = "this-plugin-does-not-exist"
 
 func TestContainerNetworkMountsNoChown(t *testing.T) {
 	// chown only applies to Linux bind mounted volumes; must be same host to verify
@@ -67,7 +72,7 @@ func TestContainerNetworkMountsNoChown(t *testing.T) {
 	ctrCreate, err := cli.ContainerCreate(ctx, &config, &hostConfig, &network.NetworkingConfig{}, nil, "")
 	assert.NilError(t, err)
 	// container will exit immediately because of no tty, but we only need the start sequence to test the condition
-	err = cli.ContainerStart(ctx, ctrCreate.ID, types.ContainerStartOptions{})
+	err = cli.ContainerStart(ctx, ctrCreate.ID, containertypes.StartOptions{})
 	assert.NilError(t, err)
 
 	// Check that host-located bind mount network file did not change ownership when the container was started
@@ -192,7 +197,7 @@ func TestMountDaemonRoot(t *testing.T) {
 					}
 
 					defer func() {
-						if err := apiClient.ContainerRemove(ctx, c.ID, types.ContainerRemoveOptions{Force: true}); err != nil {
+						if err := apiClient.ContainerRemove(ctx, c.ID, containertypes.RemoveOptions{Force: true}); err != nil {
 							panic(err)
 						}
 					}()
@@ -217,7 +222,6 @@ func TestMountDaemonRoot(t *testing.T) {
 
 func TestContainerBindMountNonRecursive(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
-	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.40"), "BindOptions.NonRecursive requires API v1.40")
 	skip.If(t, testEnv.IsRootless, "cannot be tested because RootlessKit executes the daemon in private mount namespace (https://github.com/rootless-containers/rootlesskit/issues/97)")
 
 	ctx := setupTest(t)
@@ -266,7 +270,7 @@ func TestContainerBindMountNonRecursive(t *testing.T) {
 	}
 
 	for _, c := range containers {
-		poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, c), poll.WithDelay(100*time.Millisecond))
+		poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, c))
 	}
 }
 
@@ -312,7 +316,7 @@ func TestContainerVolumesMountedAsShared(t *testing.T) {
 
 	apiClient := testEnv.APIClient()
 	containerID := container.Run(ctx, t, apiClient, container.WithPrivileged(true), container.WithMount(sharedMount), container.WithCmd(bindMountCmd...))
-	poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, containerID), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, containerID))
 
 	// Make sure a bind mount under a shared volume propagated to host.
 	if mounted, _ := mountinfo.Mounted(tmpDir1Mnt); !mounted {
@@ -394,6 +398,60 @@ func TestContainerVolumesMountedAsSlave(t *testing.T) {
 	}
 }
 
+// TestContainerVolumeAnonymous verifies that anonymous volumes created through
+// the Mounts API get a random name generated, and have the "AnonymousLabel"
+// (com.docker.volume.anonymous) label set.
+//
+// regression test for https://github.com/moby/moby/issues/48748
+func TestContainerVolumeAnonymous(t *testing.T) {
+	skip.If(t, testEnv.IsRemoteDaemon)
+
+	ctx := setupTest(t)
+	apiClient := testEnv.APIClient()
+
+	t.Run("no driver specified", func(t *testing.T) {
+		mntOpts := mounttypes.Mount{Type: mounttypes.TypeVolume, Target: "/foo"}
+		cID := container.Create(ctx, t, apiClient, container.WithMount(mntOpts))
+
+		inspect := container.Inspect(ctx, t, apiClient, cID)
+		assert.Assert(t, is.Len(inspect.HostConfig.Mounts, 1))
+		assert.Check(t, is.Equal(inspect.HostConfig.Mounts[0], mntOpts))
+
+		assert.Assert(t, is.Len(inspect.Mounts, 1))
+		vol := inspect.Mounts[0]
+		assert.Check(t, is.Len(vol.Name, 64), "volume name should be 64 bytes (from stringid.GenerateRandomID())")
+		assert.Check(t, is.Equal(vol.Driver, volume.DefaultDriverName))
+
+		volInspect, err := apiClient.VolumeInspect(ctx, vol.Name)
+		assert.NilError(t, err)
+
+		// see [daemon.AnonymousLabel]; we don't want to import the daemon package here.
+		const expectedAnonymousLabel = "com.docker.volume.anonymous"
+		assert.Check(t, is.Contains(volInspect.Labels, expectedAnonymousLabel))
+		assert.Check(t, is.Equal(volInspect.Driver, volume.DefaultDriverName))
+	})
+
+	// Verify that specifying a custom driver is still taken into account.
+	t.Run("custom driver", func(t *testing.T) {
+		config := container.NewTestConfig(container.WithMount(mounttypes.Mount{
+			Type:   mounttypes.TypeVolume,
+			Target: "/foo",
+			VolumeOptions: &mounttypes.VolumeOptions{
+				DriverConfig: &mounttypes.Driver{
+					Name: testNonExistingPlugin,
+				},
+			},
+		}))
+		_, err := apiClient.ContainerCreate(ctx, config.Config, config.HostConfig, config.NetworkingConfig, config.Platform, config.Name)
+		// We use [testNonExistingPlugin] for this, which produces an error
+		// when used, which we use as indicator that the driver was passed
+		// through. We should have a cleaner way for this, but that would
+		// require a custom volume plugin to be installed.
+		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorContains(err, fmt.Sprintf(`plugin %q not found`, testNonExistingPlugin)))
+	})
+}
+
 // Regression test for #38995 and #43390.
 func TestContainerCopyLeaksMounts(t *testing.T) {
 	ctx := setupTest(t)
@@ -428,6 +486,78 @@ func TestContainerCopyLeaksMounts(t *testing.T) {
 	assert.Equal(t, mountsBefore, mountsAfter)
 }
 
+func TestContainerBindMountReadOnlyDefault(t *testing.T) {
+	skip.If(t, testEnv.IsRemoteDaemon)
+	skip.If(t, !isRROSupported(), "requires recursive read-only mounts")
+
+	ctx := setupTest(t)
+
+	// The test will run a container with a simple readonly /dev bind mount (-v /dev:/dev:ro)
+	// It will then check /proc/self/mountinfo for the mount type of /dev/shm (submount of /dev)
+	// If /dev/shm is rw, that will mean that the read-only mounts are NOT recursive by default.
+	const nonRecursive = " /dev/shm rw,"
+	// If /dev/shm is ro, that will mean that the read-only mounts ARE recursive by default.
+	const recursive = " /dev/shm ro,"
+
+	for _, tc := range []struct {
+		clientVersion string
+		expectedOut   string
+		name          string
+	}{
+		{clientVersion: "", expectedOut: recursive, name: "latest should be the same as 1.44"},
+		{clientVersion: "1.44", expectedOut: recursive, name: "submount should be recursive by default on 1.44"},
+
+		{clientVersion: "1.43", expectedOut: nonRecursive, name: "older than 1.44 should be non-recursive by default"},
+
+		// TODO: Remove when MinSupportedAPIVersion >= 1.44
+		{clientVersion: api.MinSupportedAPIVersion, expectedOut: nonRecursive, name: "minimum API should be non-recursive by default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apiClient := testEnv.APIClient()
+
+			minDaemonVersion := tc.clientVersion
+			if minDaemonVersion == "" {
+				minDaemonVersion = "1.44"
+			}
+			skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), minDaemonVersion), "requires API v"+minDaemonVersion)
+
+			if tc.clientVersion != "" {
+				c, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion(tc.clientVersion))
+				assert.NilError(t, err, "failed to create client with version v%s", tc.clientVersion)
+				apiClient = c
+			}
+
+			for _, tc2 := range []struct {
+				subname  string
+				mountOpt func(*container.TestContainerConfig)
+			}{
+				{"mount", container.WithMount(mounttypes.Mount{
+					Type:     mounttypes.TypeBind,
+					Source:   "/dev",
+					Target:   "/dev",
+					ReadOnly: true,
+				})},
+				{"bind mount", container.WithBindRaw("/dev:/dev:ro")},
+			} {
+				t.Run(tc2.subname, func(t *testing.T) {
+					cid := container.Run(ctx, t, apiClient, tc2.mountOpt,
+						container.WithCmd("sh", "-c", "grep /dev/shm /proc/self/mountinfo"),
+					)
+					out, err := container.Output(ctx, apiClient, cid)
+					assert.NilError(t, err)
+
+					assert.Check(t, is.Equal(out.Stderr, ""))
+					// Output should be either:
+					// 545 526 0:160 / /dev/shm ro,nosuid,nodev,noexec,relatime shared:90 - tmpfs shm rw,size=65536k
+					// or
+					// 545 526 0:160 / /dev/shm rw,nosuid,nodev,noexec,relatime shared:90 - tmpfs shm rw,size=65536k
+					assert.Check(t, is.Contains(out.Stdout, tc.expectedOut))
+				})
+			}
+		})
+	}
+}
+
 func TestContainerBindMountRecursivelyReadOnly(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.44"), "requires API v1.44")
@@ -452,7 +582,7 @@ func TestContainerBindMountRecursivelyReadOnly(t *testing.T) {
 		}
 	}()
 
-	rroSupported := kernel.CheckKernelVersion(5, 12, 0)
+	rroSupported := isRROSupported()
 
 	nonRecursiveVerifier := []string{`/bin/sh`, `-xc`, `touch /foo/mnt/file; [ $? = 0 ]`}
 	forceRecursiveVerifier := []string{`/bin/sh`, `-xc`, `touch /foo/mnt/file; [ $? != 0 ]`}
@@ -503,6 +633,10 @@ func TestContainerBindMountRecursivelyReadOnly(t *testing.T) {
 	}
 
 	for _, c := range containers {
-		poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, c), poll.WithDelay(100*time.Millisecond))
+		poll.WaitOn(t, container.IsSuccessful(ctx, apiClient, c))
 	}
+}
+
+func isRROSupported() bool {
+	return kernel.CheckKernelVersion(5, 12, 0)
 }

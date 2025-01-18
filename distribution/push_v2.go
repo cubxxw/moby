@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/schema1"
@@ -297,16 +297,6 @@ func (pd *pushDescriptor) DiffID() layer.DiffID {
 }
 
 func (pd *pushDescriptor) Upload(ctx context.Context, progressOutput progress.Output) (distribution.Descriptor, error) {
-	// Skip foreign layers unless this registry allows nondistributable artifacts.
-	if !pd.endpoint.AllowNondistributableArtifacts {
-		if fs, ok := pd.layer.(distribution.Describable); ok {
-			if d := fs.Descriptor(); len(d.URLs) > 0 {
-				progress.Update(progressOutput, pd.ID(), "Skipped foreign layer")
-				return d, nil
-			}
-		}
-	}
-
 	diffID := pd.DiffID()
 
 	pd.pushState.Lock()
@@ -555,11 +545,11 @@ func (pd *pushDescriptor) layerAlreadyExists(
 			break
 		}
 		meta := &candidates[i]
-		if _, exists := digestToMetadata[meta.Digest]; exists {
+		if _, ok := digestToMetadata[meta.Digest]; ok {
 			// keep reference just to the first mapping (the best mount candidate)
 			continue
 		}
-		if _, exists := pd.checkedDigests[meta.Digest]; exists {
+		if _, ok := pd.checkedDigests[meta.Digest]; ok {
 			// existence of this digest has already been tested
 			continue
 		}

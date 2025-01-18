@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
@@ -240,7 +240,7 @@ func TestManifestStore(t *testing.T) {
 		ref, desc, mg, store, cs, teardown := setupTest(t)
 		defer teardown(t)
 
-		// first add the manifest to the coontent store
+		// first add the manifest to the content store
 		writeManifest(t, cs, desc)
 
 		// now do the get
@@ -362,6 +362,7 @@ func TestDetectManifestBlobMediaType(t *testing.T) {
 		"mediaType and fsLayers set": {[]byte(`{"mediaType": "bananas", "fsLayers": []}`), "bananas"},
 	}
 
+	t.Setenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE", "1")
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			mt, err := detectManifestBlobMediaType(tc.json)
@@ -431,6 +432,7 @@ func TestDetectManifestBlobMediaTypeInvalid(t *testing.T) {
 		},
 	}
 
+	t.Setenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE", "1")
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			mt, err := detectManifestBlobMediaType(tc.json)

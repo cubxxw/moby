@@ -15,9 +15,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/daemon"
+	"github.com/docker/docker/internal/testutils/specialimage"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/testutil"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/assert/cmp"
@@ -40,20 +43,13 @@ func dockerCmdWithError(args ...string) (string, int, error) {
 }
 
 // Deprecated: use cli.Docker or cli.DockerCmd
-func dockerCmd(c testing.TB, args ...string) (string, int) {
-	c.Helper()
-	result := cli.DockerCmd(c, args...)
-	return result.Combined(), result.ExitCode
-}
-
-// Deprecated: use cli.Docker or cli.DockerCmd
 func dockerCmdWithResult(args ...string) *icmd.Result {
 	return cli.Docker(cli.Args(args...))
 }
 
 func findContainerIP(c *testing.T, id string, network string) string {
 	c.Helper()
-	out, _ := dockerCmd(c, "inspect", fmt.Sprintf("--format='{{ .NetworkSettings.Networks.%s.IPAddress }}'", network), id)
+	out := cli.DockerCmd(c, "inspect", fmt.Sprintf("--format='{{ .NetworkSettings.Networks.%s.IPAddress }}'", network), id).Stdout()
 	return strings.Trim(out, " \r\n'")
 }
 
@@ -136,30 +132,24 @@ func inspectMountSourceField(name, destination string) (string, error) {
 var errMountNotFound = errors.New("mount point not found")
 
 // Deprecated: use cli.Docker
-func inspectMountPoint(name, destination string) (types.MountPoint, error) {
+func inspectMountPoint(name, destination string) (container.MountPoint, error) {
 	out, err := inspectFilter(name, "json .Mounts")
 	if err != nil {
-		return types.MountPoint{}, err
+		return container.MountPoint{}, err
 	}
 
-	var mp []types.MountPoint
+	var mp []container.MountPoint
 	if err := json.Unmarshal([]byte(out), &mp); err != nil {
-		return types.MountPoint{}, err
+		return container.MountPoint{}, err
 	}
 
-	var m *types.MountPoint
 	for _, c := range mp {
 		if c.Destination == destination {
-			m = &c
-			break
+			return c, nil
 		}
 	}
 
-	if m == nil {
-		return types.MountPoint{}, errMountNotFound
-	}
-
-	return *m, nil
+	return container.MountPoint{}, errMountNotFound
 }
 
 func getIDByName(c *testing.T, name string) string {
@@ -187,8 +177,8 @@ func buildImage(name string, cmdOperators ...cli.CmdOperator) *icmd.Result {
 func writeFile(dst, content string, c *testing.T) {
 	c.Helper()
 	// Create subdirectories if necessary
-	assert.Assert(c, os.MkdirAll(path.Dir(dst), 0o700) == nil)
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o700)
+	assert.NilError(c, os.MkdirAll(path.Dir(dst), 0o700))
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	assert.NilError(c, err)
 	defer f.Close()
 	// Write content (truncate if it exists)
@@ -216,9 +206,7 @@ func runCommandAndReadContainerFile(c *testing.T, filename string, command strin
 	result := icmd.RunCommand(command, args...)
 	result.Assert(c, icmd.Success)
 	contID := strings.TrimSpace(result.Combined())
-	if err := waitRun(contID); err != nil {
-		c.Fatalf("%v: %q", contID, err)
-	}
+	cli.WaitRun(c, contID)
 	return readContainerFile(c, contID, filename)
 }
 
@@ -309,12 +297,6 @@ func createTmpFile(c *testing.T, content string) string {
 	return filename
 }
 
-// waitRun will wait for the specified container to be running, maximum 5 seconds.
-// Deprecated: use cli.WaitFor
-func waitRun(contID string) error {
-	return daemon.WaitInspectWithArgs(dockerBinary, contID, "{{.State.Running}}", "true", 5*time.Second)
-}
-
 // waitInspect will wait for the specified container to have the specified string
 // in the inspect output. It will wait until the specified timeout (in seconds)
 // is reached.
@@ -365,9 +347,9 @@ func getGoroutineNumber(ctx context.Context, apiClient client.APIClient) (int, e
 	return info.NGoroutines, nil
 }
 
-func waitForStableGourtineCount(ctx context.Context, t poll.TestingT, apiClient client.APIClient) int {
+func waitForStableGoroutineCount(ctx context.Context, t poll.TestingT, apiClient client.APIClient) int {
 	var out int
-	poll.WaitOn(t, stableGoroutineCount(ctx, apiClient, &out), poll.WithTimeout(30*time.Second))
+	poll.WaitOn(t, stableGoroutineCount(ctx, apiClient, &out), poll.WithDelay(time.Second), poll.WithTimeout(30*time.Second))
 	return out
 }
 
@@ -392,7 +374,7 @@ func stableGoroutineCount(ctx context.Context, apiClient client.APIClient, count
 			nRoutines = n
 		}
 
-		if numStable > 3 {
+		if numStable > 6 {
 			*count = n
 			return poll.Success()
 		}
@@ -412,7 +394,7 @@ func checkGoroutineCount(ctx context.Context, apiClient client.APIClient, expect
 				t.Log("Waiting for goroutines to stabilize")
 				first = false
 			}
-			return poll.Continue("exepcted %d goroutines, got %d", expected, n)
+			return poll.Continue("expected %d goroutines, got %d", expected, n)
 		}
 		return poll.Success()
 	}
@@ -426,7 +408,7 @@ func waitForGoroutines(ctx context.Context, t poll.TestingT, apiClient client.AP
 func getErrorMessage(c *testing.T, body []byte) string {
 	c.Helper()
 	var resp types.ErrorResponse
-	assert.Assert(c, json.Unmarshal(body, &resp) == nil)
+	assert.NilError(c, json.Unmarshal(body, &resp))
 	return strings.TrimSpace(resp.Message)
 }
 
@@ -452,7 +434,7 @@ func pollCheck(t *testing.T, f checkF, compare func(x interface{}) assert.BoolOr
 		default:
 			panic(fmt.Errorf("pollCheck: type %T not implemented", r))
 		}
-		return poll.Continue(comment)
+		return poll.Continue("%v", comment)
 	}
 }
 
@@ -478,4 +460,45 @@ func sumAsIntegers(vals ...interface{}) interface{} {
 		s += v.(int)
 	}
 	return s
+}
+
+func loadSpecialImage(c *testing.T, imageFunc specialimage.SpecialImageFunc) string {
+	tmpDir := c.TempDir()
+
+	imgDir := filepath.Join(tmpDir, "image")
+	assert.NilError(c, os.Mkdir(imgDir, 0o755))
+
+	_, err := imageFunc(imgDir)
+	assert.NilError(c, err)
+
+	rc, err := archive.TarWithOptions(imgDir, &archive.TarOptions{})
+	assert.NilError(c, err)
+	defer rc.Close()
+
+	imgTar := filepath.Join(tmpDir, "image.tar")
+	tarFile, err := os.OpenFile(imgTar, os.O_CREATE|os.O_WRONLY, 0o644)
+	assert.NilError(c, err)
+
+	defer tarFile.Close()
+
+	_, err = io.Copy(tarFile, rc)
+	assert.NilError(c, err)
+
+	tarFile.Close()
+
+	out := cli.DockerCmd(c, "load", "-i", imgTar).Stdout()
+
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+
+		if _, imageID, hasID := strings.Cut(line, "Loaded image ID: "); hasID {
+			return imageID
+		}
+		if _, imageRef, hasRef := strings.Cut(line, "Loaded image: "); hasRef {
+			return imageRef
+		}
+	}
+
+	c.Fatalf("failed to extract image ref from %q", out)
+	return ""
 }

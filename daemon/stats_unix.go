@@ -3,20 +3,24 @@
 package daemon // import "github.com/docker/docker/daemon"
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	statsV1 "github.com/containerd/cgroups/v3/cgroup1/stats"
 	statsV2 "github.com/containerd/cgroups/v3/cgroup2/stats"
-	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	"github.com/pkg/errors"
 )
 
-func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []types.BlkioStatEntry {
-	out := make([]types.BlkioStatEntry, len(entries))
+func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []containertypes.BlkioStatEntry {
+	out := make([]containertypes.BlkioStatEntry, len(entries))
 	for i, re := range entries {
-		out[i] = types.BlkioStatEntry{
+		out[i] = containertypes.BlkioStatEntry{
 			Major: re.Major,
 			Minor: re.Minor,
 			Op:    re.Op,
@@ -26,7 +30,7 @@ func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []types.BlkioStatEntry {
 	return out
 }
 
-func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
+func (daemon *Daemon) stats(c *container.Container) (*containertypes.StatsResponse, error) {
 	c.Lock()
 	task, err := c.GetRunningTask()
 	c.Unlock()
@@ -40,8 +44,9 @@ func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
 		}
 		return nil, err
 	}
-	s := &types.StatsJSON{}
-	s.Read = cs.Read
+	s := &containertypes.StatsResponse{
+		Read: cs.Read,
+	}
 	stats := cs.Metrics
 	switch t := stats.(type) {
 	case *statsV1.Metrics:
@@ -53,9 +58,9 @@ func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
 	}
 }
 
-func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*types.StatsJSON, error) {
+func (daemon *Daemon) statsV1(s *containertypes.StatsResponse, stats *statsV1.Metrics) (*containertypes.StatsResponse, error) {
 	if stats.Blkio != nil {
-		s.BlkioStats = types.BlkioStats{
+		s.BlkioStats = containertypes.BlkioStats{
 			IoServiceBytesRecursive: copyBlkioEntry(stats.Blkio.IoServiceBytesRecursive),
 			IoServicedRecursive:     copyBlkioEntry(stats.Blkio.IoServicedRecursive),
 			IoQueuedRecursive:       copyBlkioEntry(stats.Blkio.IoQueuedRecursive),
@@ -67,14 +72,14 @@ func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*type
 		}
 	}
 	if stats.CPU != nil {
-		s.CPUStats = types.CPUStats{
-			CPUUsage: types.CPUUsage{
+		s.CPUStats = containertypes.CPUStats{
+			CPUUsage: containertypes.CPUUsage{
 				TotalUsage:        stats.CPU.Usage.Total,
 				PercpuUsage:       stats.CPU.Usage.PerCPU,
 				UsageInKernelmode: stats.CPU.Usage.Kernel,
 				UsageInUsermode:   stats.CPU.Usage.User,
 			},
-			ThrottlingData: types.ThrottlingData{
+			ThrottlingData: containertypes.ThrottlingData{
 				Periods:          stats.CPU.Throttling.Periods,
 				ThrottledPeriods: stats.CPU.Throttling.ThrottledPeriods,
 				ThrottledTime:    stats.CPU.Throttling.ThrottledTime,
@@ -118,7 +123,7 @@ func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*type
 			"total_unevictable":         stats.Memory.TotalUnevictable,
 		}
 		if stats.Memory.Usage != nil {
-			s.MemoryStats = types.MemoryStats{
+			s.MemoryStats = containertypes.MemoryStats{
 				Stats:    raw,
 				Usage:    stats.Memory.Usage.Usage,
 				MaxUsage: stats.Memory.Usage.Max,
@@ -126,7 +131,7 @@ func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*type
 				Failcnt:  stats.Memory.Usage.Failcnt,
 			}
 		} else {
-			s.MemoryStats = types.MemoryStats{
+			s.MemoryStats = containertypes.MemoryStats{
 				Stats: raw,
 			}
 		}
@@ -138,7 +143,7 @@ func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*type
 	}
 
 	if stats.Pids != nil {
-		s.PidsStats = types.PidsStats{
+		s.PidsStats = containertypes.PidsStats{
 			Current: stats.Pids.Current,
 			Limit:   stats.Pids.Limit,
 		}
@@ -147,18 +152,18 @@ func (daemon *Daemon) statsV1(s *types.StatsJSON, stats *statsV1.Metrics) (*type
 	return s, nil
 }
 
-func (daemon *Daemon) statsV2(s *types.StatsJSON, stats *statsV2.Metrics) (*types.StatsJSON, error) {
+func (daemon *Daemon) statsV2(s *containertypes.StatsResponse, stats *statsV2.Metrics) (*containertypes.StatsResponse, error) {
 	if stats.Io != nil {
-		var isbr []types.BlkioStatEntry
+		var isbr []containertypes.BlkioStatEntry
 		for _, re := range stats.Io.Usage {
 			isbr = append(isbr,
-				types.BlkioStatEntry{
+				containertypes.BlkioStatEntry{
 					Major: re.Major,
 					Minor: re.Minor,
 					Op:    "read",
 					Value: re.Rbytes,
 				},
-				types.BlkioStatEntry{
+				containertypes.BlkioStatEntry{
 					Major: re.Major,
 					Minor: re.Minor,
 					Op:    "write",
@@ -166,21 +171,21 @@ func (daemon *Daemon) statsV2(s *types.StatsJSON, stats *statsV2.Metrics) (*type
 				},
 			)
 		}
-		s.BlkioStats = types.BlkioStats{
+		s.BlkioStats = containertypes.BlkioStats{
 			IoServiceBytesRecursive: isbr,
 			// Other fields are unsupported
 		}
 	}
 
 	if stats.CPU != nil {
-		s.CPUStats = types.CPUStats{
-			CPUUsage: types.CPUUsage{
+		s.CPUStats = containertypes.CPUStats{
+			CPUUsage: containertypes.CPUUsage{
 				TotalUsage: stats.CPU.UsageUsec * 1000,
 				// PercpuUsage is not supported
 				UsageInKernelmode: stats.CPU.SystemUsec * 1000,
 				UsageInUsermode:   stats.CPU.UserUsec * 1000,
 			},
-			ThrottlingData: types.ThrottlingData{
+			ThrottlingData: containertypes.ThrottlingData{
 				Periods:          stats.CPU.NrPeriods,
 				ThrottledPeriods: stats.CPU.NrThrottled,
 				ThrottledTime:    stats.CPU.ThrottledUsec * 1000,
@@ -189,7 +194,7 @@ func (daemon *Daemon) statsV2(s *types.StatsJSON, stats *statsV2.Metrics) (*type
 	}
 
 	if stats.Memory != nil {
-		s.MemoryStats = types.MemoryStats{
+		s.MemoryStats = containertypes.MemoryStats{
 			// Stats is not compatible with v1
 			Stats: map[string]uint64{
 				"anon":                   stats.Memory.Anon,
@@ -240,7 +245,7 @@ func (daemon *Daemon) statsV2(s *types.StatsJSON, stats *statsV2.Metrics) (*type
 	}
 
 	if stats.Pids != nil {
-		s.PidsStats = types.PidsStats{
+		s.PidsStats = containertypes.PidsStats{
 			Current: stats.Pids.Current,
 			Limit:   stats.Pids.Limit,
 		}
@@ -263,7 +268,7 @@ func (daemon *Daemon) getNetworkSandboxID(c *container.Container) (string, error
 	return curr.NetworkSettings.SandboxID, nil
 }
 
-func (daemon *Daemon) getNetworkStats(c *container.Container) (map[string]types.NetworkStats, error) {
+func (daemon *Daemon) getNetworkStats(c *container.Container) (map[string]containertypes.NetworkStats, error) {
 	sandboxID, err := daemon.getNetworkSandboxID(c)
 	if err != nil {
 		return nil, err
@@ -279,10 +284,10 @@ func (daemon *Daemon) getNetworkStats(c *container.Container) (map[string]types.
 		return nil, err
 	}
 
-	stats := make(map[string]types.NetworkStats)
+	stats := make(map[string]containertypes.NetworkStats)
 	// Convert libnetwork nw stats into api stats
 	for ifName, ifStats := range lnstats {
-		stats[ifName] = types.NetworkStats{
+		stats[ifName] = containertypes.NetworkStats{
 			RxBytes:   ifStats.RxBytes,
 			RxPackets: ifStats.RxPackets,
 			RxErrors:  ifStats.RxErrors,
@@ -295,4 +300,61 @@ func (daemon *Daemon) getNetworkStats(c *container.Container) (map[string]types.
 	}
 
 	return stats, nil
+}
+
+const (
+	// The value comes from `C.sysconf(C._SC_CLK_TCK)`, and
+	// on Linux it's a constant which is safe to be hard coded,
+	// so we can avoid using cgo here. For details, see:
+	// https://github.com/containerd/cgroups/pull/12
+	clockTicksPerSecond  = 100
+	nanoSecondsPerSecond = 1e9
+)
+
+// getSystemCPUUsage returns the host system's cpu usage in
+// nanoseconds and number of online CPUs. An error is returned
+// if the format of the underlying file does not match.
+//
+// Uses /proc/stat defined by POSIX. Looks for the cpu
+// statistics line and then sums up the first seven fields
+// provided. See `man 5 proc` for details on specific field
+// information.
+func getSystemCPUUsage() (cpuUsage uint64, cpuNum uint32, err error) {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) < 4 || line[:3] != "cpu" {
+			break // Assume all cpu* records are at the front, like glibc https://github.com/bminor/glibc/blob/5d00c201b9a2da768a79ea8d5311f257871c0b43/sysdeps/unix/sysv/linux/getsysstats.c#L108-L135
+		}
+		if line[3] == ' ' {
+			parts := strings.Fields(line)
+			if len(parts) < 8 {
+				return 0, 0, fmt.Errorf("invalid number of cpu fields")
+			}
+			var totalClockTicks uint64
+			for _, i := range parts[1:8] {
+				v, err := strconv.ParseUint(i, 10, 64)
+				if err != nil {
+					return 0, 0, fmt.Errorf("Unable to convert value %s to int: %w", i, err)
+				}
+				totalClockTicks += v
+			}
+			cpuUsage = (totalClockTicks * nanoSecondsPerSecond) /
+				clockTicksPerSecond
+		}
+		if '0' <= line[3] && line[3] <= '9' {
+			cpuNum++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, 0, fmt.Errorf("error scanning '/proc/stat' file: %w", err)
+	}
+	return
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/pkg/plugins"
 	"github.com/opencontainers/go-digest"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // Plugin represents an individual plugin.
@@ -55,6 +55,7 @@ func (p *Plugin) ScopedPath(s string) string {
 }
 
 // Client returns the plugin client.
+//
 // Deprecated: use p.Addr() and manually create the client
 func (p *Plugin) Client() *plugins.Client {
 	p.mu.RLock()
@@ -64,6 +65,7 @@ func (p *Plugin) Client() *plugins.Client {
 }
 
 // SetPClient set the plugin client.
+//
 // Deprecated: Hardcoded plugin client is deprecated
 func (p *Plugin) SetPClient(client *plugins.Client) {
 	p.mu.Lock()

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -30,7 +29,7 @@ func TestStopContainerWithTimeout(t *testing.T) {
 	apiClient := testEnv.APIClient()
 
 	testCmd := container.WithCmd("sh", "-c", "sleep 2 && exit 42")
-	testData := []struct {
+	tests := []struct {
 		doc              string
 		timeout          int
 		expectedExitCode int
@@ -55,22 +54,20 @@ func TestStopContainerWithTimeout(t *testing.T) {
 		},
 	}
 
-	for _, d := range testData {
-		d := d
-		t.Run(strconv.Itoa(d.timeout), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(strconv.Itoa(tc.timeout), func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
 			id := container.Run(ctx, t, apiClient, testCmd)
 
-			err := apiClient.ContainerStop(ctx, id, containertypes.StopOptions{Timeout: &d.timeout})
+			err := apiClient.ContainerStop(ctx, id, containertypes.StopOptions{Timeout: &tc.timeout})
 			assert.NilError(t, err)
 
-			poll.WaitOn(t, container.IsStopped(ctx, apiClient, id),
-				poll.WithDelay(100*time.Millisecond))
+			poll.WaitOn(t, container.IsStopped(ctx, apiClient, id))
 
 			inspect, err := apiClient.ContainerInspect(ctx, id)
 			assert.NilError(t, err)
-			assert.Equal(t, inspect.State.ExitCode, d.expectedExitCode)
+			assert.Equal(t, inspect.State.ExitCode, tc.expectedExitCode)
 		})
 	}
 }
@@ -79,11 +76,11 @@ func TestStopContainerWithTimeout(t *testing.T) {
 // if the request is cancelled.
 // See issue https://github.com/moby/moby/issues/45731
 func TestStopContainerWithTimeoutCancel(t *testing.T) {
-	t.Parallel()
-
 	ctx := setupTest(t)
 	apiClient := testEnv.APIClient()
 	t.Cleanup(func() { _ = apiClient.Close() })
+
+	t.Parallel()
 
 	id := container.Run(ctx, t, apiClient,
 		container.WithCmd("sh", "-c", "trap 'echo received TERM' TERM; while true; do usleep 10; done"),
@@ -128,7 +125,7 @@ func TestStopContainerWithTimeoutCancel(t *testing.T) {
 // logsContains verifies the container contains the given text in the log's stdout.
 func logsContains(ctx context.Context, client client.APIClient, containerID string, logString string) func(log poll.LogT) poll.Result {
 	return func(log poll.LogT) poll.Result {
-		logs, err := client.ContainerLogs(ctx, containerID, types.ContainerLogsOptions{
+		logs, err := client.ContainerLogs(ctx, containerID, containertypes.LogsOptions{
 			ShowStdout: true,
 		})
 		if err != nil {

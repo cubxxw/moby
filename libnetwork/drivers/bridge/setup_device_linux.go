@@ -6,22 +6,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/vishvananda/netlink"
 )
 
 // SetupDevice create a new bridge interface/
 func setupDevice(config *networkConfiguration, i *bridgeInterface) error {
-	// We only attempt to create the bridge when the requested device name is
-	// the default one. The default bridge name can be overridden with the
-	// DOCKER_TEST_CREATE_DEFAULT_BRIDGE env var. It should be used only for
-	// test purpose.
-	var defaultBridgeName string
-	if defaultBridgeName = os.Getenv("DOCKER_TEST_CREATE_DEFAULT_BRIDGE"); defaultBridgeName == "" {
-		defaultBridgeName = DefaultBridgeName
-	}
-	if config.BridgeName != defaultBridgeName && config.DefaultBridge {
+	if config.BridgeName != DefaultBridgeName && config.DefaultBridge {
 		return NonDefaultBridgeExistError(config.BridgeName)
 	}
 
@@ -42,6 +34,14 @@ func setupDevice(config *networkConfiguration, i *bridgeInterface) error {
 		return err
 	}
 
+	return nil
+}
+
+func setupMTU(config *networkConfiguration, i *bridgeInterface) error {
+	if err := i.nlh.LinkSetMTU(i.Link, config.Mtu); err != nil {
+		log.G(context.TODO()).WithError(err).Errorf("Failed to set bridge MTU %s via netlink", config.BridgeName)
+		return err
+	}
 	return nil
 }
 

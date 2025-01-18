@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/log"
 	bolt "go.etcd.io/bbolt"
 )
 

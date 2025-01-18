@@ -3,7 +3,6 @@ package client // import "github.com/docker/docker/client"
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -12,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -50,7 +49,6 @@ func TestSetHostHeader(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.host, func(t *testing.T) {
 			hostURL, err := ParseHostURL(tc.host)
 			assert.Check(t, err)
@@ -90,7 +88,7 @@ func TestPlainTextError(t *testing.T) {
 	client := &Client{
 		client: newMockClient(plainTextErrorMock(http.StatusInternalServerError, "Server error")),
 	}
-	_, err := client.ContainerList(context.Background(), types.ContainerListOptions{})
+	_, err := client.ContainerList(context.Background(), container.ListOptions{})
 	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
 }
 
@@ -126,7 +124,7 @@ func TestCanceledContext(t *testing.T) {
 
 	_, err := client.sendRequest(ctx, http.MethodGet, testEndpoint, nil, nil, nil)
 	assert.Check(t, is.ErrorType(err, errdefs.IsCancelled))
-	assert.Check(t, errors.Is(err, context.Canceled))
+	assert.Check(t, is.ErrorIs(err, context.Canceled))
 }
 
 func TestDeadlineExceededContext(t *testing.T) {
@@ -146,5 +144,5 @@ func TestDeadlineExceededContext(t *testing.T) {
 
 	_, err := client.sendRequest(ctx, http.MethodGet, testEndpoint, nil, nil, nil)
 	assert.Check(t, is.ErrorType(err, errdefs.IsDeadline))
-	assert.Check(t, errors.Is(err, context.DeadlineExceeded))
+	assert.Check(t, is.ErrorIs(err, context.DeadlineExceeded))
 }

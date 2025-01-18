@@ -15,34 +15,27 @@ import (
 
 func TestInfoAPI(t *testing.T) {
 	ctx := setupTest(t)
-	client := testEnv.APIClient()
+	apiClient := testEnv.APIClient()
 
-	info, err := client.Info(ctx)
+	info, err := apiClient.Info(ctx)
 	assert.NilError(t, err)
 
-	// always shown fields
-	stringsToCheck := []string{
-		"ID",
-		"Containers",
-		"ContainersRunning",
-		"ContainersPaused",
-		"ContainersStopped",
-		"Images",
-		"LoggingDriver",
-		"OperatingSystem",
-		"NCPU",
-		"OSType",
-		"Architecture",
-		"MemTotal",
-		"KernelVersion",
-		"Driver",
-		"ServerVersion",
-		"SecurityOptions",
-	}
-
-	out := fmt.Sprintf("%+v", info)
-	for _, linePrefix := range stringsToCheck {
-		assert.Check(t, is.Contains(out, linePrefix))
+	// TODO(thaJeztah): make sure we have other tests that run a local daemon and check other fields based on known state.
+	assert.Check(t, info.ID != "")
+	assert.Check(t, is.Equal(info.Containers, info.ContainersRunning+info.ContainersPaused+info.ContainersStopped))
+	assert.Check(t, info.LoggingDriver != "")
+	assert.Check(t, info.OperatingSystem != "")
+	assert.Check(t, info.NCPU != 0)
+	assert.Check(t, info.OSType != "")
+	assert.Check(t, info.Architecture != "")
+	assert.Check(t, info.MemTotal != 0)
+	assert.Check(t, info.KernelVersion != "")
+	assert.Check(t, info.Driver != "")
+	assert.Check(t, info.ServerVersion != "")
+	assert.Check(t, info.SystemTime != "")
+	if testEnv.DaemonInfo.OSType != "windows" {
+		// Windows currently doesn't have security-options in the info response.
+		assert.Check(t, len(info.SecurityOptions) != 0)
 	}
 }
 
@@ -91,7 +84,6 @@ func TestInfoDebug(t *testing.T) {
 	// TODO need a stable way to generate event listeners
 	// assert.Check(t, info.NEventsListener != 0)
 	assert.Check(t, info.NGoroutines != 0)
-	assert.Check(t, info.SystemTime != "")
 	assert.Equal(t, info.DockerRootDir, d.Root)
 }
 
@@ -109,12 +101,14 @@ func TestInfoInsecureRegistries(t *testing.T) {
 	defer d.Stop(t)
 
 	info := d.Info(t)
-	assert.Assert(t, is.Len(info.RegistryConfig.InsecureRegistryCIDRs, 2))
+	assert.Assert(t, is.Len(info.RegistryConfig.InsecureRegistryCIDRs, 3))
 	cidrs := []string{
 		info.RegistryConfig.InsecureRegistryCIDRs[0].String(),
 		info.RegistryConfig.InsecureRegistryCIDRs[1].String(),
+		info.RegistryConfig.InsecureRegistryCIDRs[2].String(),
 	}
 	assert.Assert(t, is.Contains(cidrs, registryCIDR))
+	assert.Assert(t, is.Contains(cidrs, "::1/128"))
 	assert.Assert(t, is.Contains(cidrs, "127.0.0.0/8"))
 	assert.DeepEqual(t, *info.RegistryConfig.IndexConfigs["docker.io"], registry.IndexInfo{Name: "docker.io", Mirrors: []string{}, Secure: true, Official: true})
 	assert.DeepEqual(t, *info.RegistryConfig.IndexConfigs[registryHost], registry.IndexInfo{Name: registryHost, Mirrors: []string{}, Secure: false, Official: false})

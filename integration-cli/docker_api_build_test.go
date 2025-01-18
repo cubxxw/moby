@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/fakecontext"
 	"github.com/docker/docker/testutil/fakegit"
@@ -336,7 +336,7 @@ func (s *DockerRegistrySuite) TestBuildCopyFromForcePull(c *testing.T) {
 	err := client.ImageTag(ctx, "busybox", repoName)
 	assert.Check(c, err)
 	// push the image to the registry
-	rc, err := client.ImagePush(ctx, repoName, types.ImagePushOptions{RegistryAuth: "{}"})
+	rc, err := client.ImagePush(ctx, repoName, image.PushOptions{RegistryAuth: "{}"})
 	assert.Check(c, err)
 	_, err = io.Copy(io.Discard, rc)
 	assert.Check(c, err)
@@ -413,8 +413,7 @@ func (s *DockerAPISuite) TestBuildAddRemoteNoDecompress(c *testing.T) {
 }
 
 func (s *DockerAPISuite) TestBuildChownOnCopy(c *testing.T) {
-	// new feature added in 1.31 - https://github.com/moby/moby/pull/34263
-	testRequires(c, DaemonIsLinux, MinimumAPIVersion("1.31"))
+	testRequires(c, DaemonIsLinux)
 	dockerfile := `FROM busybox
 		RUN echo 'test1:x:1001:1001::/bin:/bin/false' >> /etc/passwd
 		RUN echo 'test1:x:1001:' >> /etc/group

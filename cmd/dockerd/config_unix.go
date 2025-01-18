@@ -15,11 +15,9 @@ import (
 )
 
 // installConfigFlags adds flags to the pflag.FlagSet to configure the daemon
-func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
+func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) {
 	// First handle install flags which are consistent cross-platform
-	if err := installCommonConfigFlags(conf, flags); err != nil {
-		return err
-	}
+	installCommonConfigFlags(conf, flags)
 
 	// Then platform-specific install flags
 	flags.Var(opts.NewNamedRuntimeOpt("runtimes", &conf.Runtimes, config.StockRuntimeName), "add-runtime", "Register an additional OCI compatible runtime")
@@ -28,11 +26,13 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.BoolVar(&conf.EnableSelinuxSupport, "selinux-enabled", false, "Enable selinux support")
 	flags.Var(opts.NewNamedUlimitOpt("default-ulimits", &conf.Ulimits), "default-ulimit", "Default ulimits for containers")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPTables, "iptables", true, "Enable addition of iptables rules")
-	flags.BoolVar(&conf.BridgeConfig.EnableIP6Tables, "ip6tables", false, "Enable addition of ip6tables rules (experimental)")
-	flags.BoolVar(&conf.BridgeConfig.EnableIPForward, "ip-forward", true, "Enable net.ipv4.ip_forward")
+	flags.BoolVar(&conf.BridgeConfig.EnableIP6Tables, "ip6tables", true, "Enable addition of ip6tables rules")
+	flags.BoolVar(&conf.BridgeConfig.EnableIPForward, "ip-forward", true, "Enable IP forwarding in system configuration")
+	flags.BoolVar(&conf.BridgeConfig.DisableFilterForwardDrop, "ip-forward-no-drop", false, "Do not set the filter-FORWARD policy to DROP when enabling IP forwarding")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPMasq, "ip-masq", true, "Enable IP masquerading")
 	flags.BoolVar(&conf.BridgeConfig.EnableIPv6, "ipv6", false, "Enable IPv6 networking")
-	flags.StringVar(&conf.BridgeConfig.IP, "bip", "", "Specify network bridge IP")
+	flags.StringVar(&conf.BridgeConfig.IP, "bip", "", "Specify default-bridge IPv4 network")
+	flags.StringVar(&conf.BridgeConfig.IP6, "bip6", "", "Specify default-bridge IPv6 network")
 	flags.StringVarP(&conf.BridgeConfig.Iface, "bridge", "b", "", "Attach containers to a network bridge")
 	flags.StringVar(&conf.BridgeConfig.FixedCIDR, "fixed-cidr", "", "IPv4 subnet for fixed IPs")
 	flags.StringVar(&conf.BridgeConfig.FixedCIDRv6, "fixed-cidr-v6", "", "IPv6 subnet for fixed IPs")
@@ -45,9 +45,6 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.StringVar(&conf.CgroupParent, "cgroup-parent", "", "Set parent cgroup for all containers")
 	flags.StringVar(&conf.RemappedRoot, "userns-remap", "", "User/Group setting for user namespaces")
 	flags.BoolVar(&conf.LiveRestoreEnabled, "live-restore", false, "Enable live restore of docker when containers are still running")
-	// TODO(thaJeztah): Used to produce a deprecation error; remove the flag and the OOMScoreAdjust field for the next release after v25.0.0.
-	flags.IntVar(&conf.OOMScoreAdjust, "oom-score-adjust", 0, "Set the oom_score_adj for the daemon (deprecated)")
-	_ = flags.MarkDeprecated("oom-score-adjust", "and will be removed in the next release.")
 	flags.BoolVar(&conf.Init, "init", false, "Run an init in the container to forward signals and reap processes")
 	flags.StringVar(&conf.InitPath, "init-path", "", "Path to the docker-init binary")
 	flags.Int64Var(&conf.CPURealtimePeriod, "cpu-rt-period", 0, "Limit the CPU real-time period in microseconds for the parent cgroup for all containers (not supported with cgroups v2)")
@@ -61,7 +58,6 @@ func installConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	// Note that conf.BridgeConfig.UserlandProxyPath and honorXDG are configured according to the value of rootless.RunningWithRootlessKit, not the value of --rootless.
 	flags.BoolVar(&conf.Rootless, "rootless", conf.Rootless, "Enable rootless mode; typically used with RootlessKit")
 	flags.StringVar(&conf.CgroupNamespaceMode, "default-cgroupns-mode", conf.CgroupNamespaceMode, `Default mode for containers cgroup namespace ("host" | "private")`)
-	return nil
 }
 
 // configureCertsDir configures registry.CertsDir() depending on if the daemon

@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	apitypes "github.com/docker/docker/api/types"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	types "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/daemon/cluster/convert"
@@ -413,7 +414,7 @@ func (c *Cluster) Leave(ctx context.Context, force bool) error {
 			return err
 		}
 		for _, id := range nodeContainers {
-			if err := c.config.Backend.ContainerRm(id, &apitypes.ContainerRmConfig{ForceRemove: true}); err != nil {
+			if err := c.config.Backend.ContainerRm(id, &backend.ContainerRmConfig{ForceRemove: true}); err != nil {
 				log.G(ctx).Errorf("error removing %v: %v", id, err)
 			}
 		}
@@ -428,7 +429,7 @@ func (c *Cluster) Leave(ctx context.Context, force bool) error {
 }
 
 // Info returns information about the current cluster state.
-func (c *Cluster) Info() types.Info {
+func (c *Cluster) Info(ctx context.Context) types.Info {
 	info := types.Info{
 		NodeAddr: c.GetAdvertiseAddress(),
 	}
@@ -441,7 +442,7 @@ func (c *Cluster) Info() types.Info {
 		info.Error = state.err.Error()
 	}
 
-	ctx, cancel := c.getRequestContext()
+	ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 	defer cancel()
 
 	if state.IsActiveManager() {
@@ -606,7 +607,7 @@ func initClusterSpec(node *swarmnode.Node, spec types.Spec) error {
 
 func (c *Cluster) listContainerForNode(ctx context.Context, nodeID string) ([]string, error) {
 	var ids []string
-	containers, err := c.config.Backend.Containers(ctx, &apitypes.ContainerListOptions{
+	containers, err := c.config.Backend.Containers(ctx, &container.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("label", "com.docker.swarm.node.id="+nodeID)),
 	})
 	if err != nil {

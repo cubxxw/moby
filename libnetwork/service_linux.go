@@ -12,7 +12,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/ishidawataru/sctp"
@@ -57,7 +57,7 @@ func (n *Network) findLBEndpointSandbox() (*Endpoint, *Sandbox, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("Unable to get sandbox for %s(%s) in for %s", ep.Name(), ep.ID(), n.ID())
 	}
-	sep := sb.getEndpoint(ep.ID())
+	sep := sb.GetEndpoint(ep.ID())
 	if sep == nil {
 		return nil, nil, fmt.Errorf("Load balancing endpoint %s(%s) removed from %s", ep.Name(), ep.ID(), n.ID())
 	}
@@ -77,7 +77,7 @@ func findIfaceDstName(sb *Sandbox, ep *Endpoint) string {
 	return ""
 }
 
-// Add loadbalancer backend to the loadbalncer sandbox for the network.
+// Add loadbalancer backend to the loadbalancer sandbox for the network.
 // If needed add the service as well.
 func (n *Network) addLBBackend(ip net.IP, lb *loadBalancer) {
 	if len(lb.vip) == 0 {
@@ -122,7 +122,7 @@ func (n *Network) addLBBackend(ip net.IP, lb *loadBalancer) {
 
 		if sb.ingress {
 			var gwIP net.IP
-			if ep := sb.getGatewayEndpoint(); ep != nil {
+			if ep, _ := sb.getGatewayEndpoint(); ep != nil {
 				gwIP = ep.Iface().Address().IP
 			}
 			if err := programIngress(gwIP, lb.service.ingressPorts, false); err != nil {
@@ -223,8 +223,8 @@ func (n *Network) rmLBBackend(ip net.IP, lb *loadBalancer, rmService bool, fullR
 
 		if sb.ingress {
 			var gwIP net.IP
-			if ep := sb.getGatewayEndpoint(); ep != nil {
-				gwIP = ep.Iface().Address().IP
+			if gwEP, _ := sb.getGatewayEndpoint(); gwEP != nil {
+				gwIP = gwEP.Iface().Address().IP
 			}
 			if err := programIngress(gwIP, lb.service.ingressPorts, true); err != nil {
 				log.G(context.TODO()).Errorf("Failed to delete ingress: %v", err)
@@ -363,7 +363,10 @@ func programIngress(gwIP net.IP, ingressPorts []*PortConfig, isDelete bool) erro
 			if err := iptable.RawCombinedOutput("-I", "FORWARD", "-j", ingressChain); err != nil {
 				return fmt.Errorf("failed to add jump rule to %s in filter table forward chain: %v", ingressChain, err)
 			}
-			arrangeUserFilterRule()
+			// The jump to DOCKER-USER needs to be before the jump to DOCKER-INGRESS.
+			if err := setupUserChain(iptables.IPv4); err != nil {
+				log.G(context.TODO()).Warnf("Failed to restore "+userChain+" after creating "+ingressChain+": %v", err)
+			}
 		}
 
 		oifName, err := findOIFName(gwIP)
@@ -422,7 +425,7 @@ func programIngress(gwIP net.IP, ingressPorts []*PortConfig, isDelete bool) erro
 		// Filter table rules to allow a published service to be accessible in the local node from..
 		// 1) service tasks attached to other networks
 		// 2) unmanaged containers on bridge networks
-		rule := []string{addDelOpt, ingressChain, "-m", "state", "-p", protocol, "--sport", publishedPort, "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+		rule := []string{addDelOpt, ingressChain, "-p", protocol, "--sport", publishedPort, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
 		if portErr = iptable.RawCombinedOutput(rule...); portErr != nil {
 			err := fmt.Errorf("set up rule failed, %v: %v", rule, portErr)
 			if !isDelete {
@@ -430,7 +433,7 @@ func programIngress(gwIP net.IP, ingressPorts []*PortConfig, isDelete bool) erro
 			}
 			log.G(context.TODO()).Warn(err)
 		}
-		rollbackRule := []string{rollbackAddDelOpt, ingressChain, "-m", "state", "-p", protocol, "--sport", publishedPort, "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+		rollbackRule := []string{rollbackAddDelOpt, ingressChain, "-p", protocol, "--sport", publishedPort, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
 		rollbackRules = append(rollbackRules, rollbackRule)
 
 		rule = []string{addDelOpt, ingressChain, "-p", protocol, "--dport", publishedPort, "-j", "ACCEPT"}
@@ -450,26 +453,6 @@ func programIngress(gwIP net.IP, ingressPorts []*PortConfig, isDelete bool) erro
 	}
 
 	return nil
-}
-
-// In the filter table FORWARD chain the first rule should be to jump to
-// DOCKER-USER so the user is able to filter packet first.
-// The second rule should be jump to INGRESS-CHAIN.
-// This chain has the rules to allow access to the published ports for swarm tasks
-// from local bridge networks and docker_gwbridge (ie:taks on other swarm networks)
-func arrangeIngressFilterRule() {
-	// TODO IPv6 support
-	iptable := iptables.GetIptable(iptables.IPv4)
-	if iptable.ExistChain(ingressChain, iptables.Filter) {
-		if iptable.Exists(iptables.Filter, "FORWARD", "-j", ingressChain) {
-			if err := iptable.RawCombinedOutput("-D", "FORWARD", "-j", ingressChain); err != nil {
-				log.G(context.TODO()).Warnf("failed to delete jump rule to ingressChain in filter table: %v", err)
-			}
-		}
-		if err := iptable.RawCombinedOutput("-I", "FORWARD", "-j", ingressChain); err != nil {
-			log.G(context.TODO()).Warnf("failed to add jump rule to ingressChain in filter table: %v", err)
-		}
-	}
 }
 
 func findOIFName(ip net.IP) (string, error) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/daemon/logger/jsonfilelog"
 	"github.com/docker/docker/daemon/logger/local"
 	"github.com/docker/docker/integration/internal/container"
@@ -29,7 +29,7 @@ func TestLogsFollowTailEmpty(t *testing.T) {
 
 	id := container.Run(ctx, t, apiClient, container.WithCmd("sleep", "100000"))
 
-	logs, err := apiClient.ContainerLogs(ctx, id, types.ContainerLogsOptions{ShowStdout: true, Tail: "2"})
+	logs, err := apiClient.ContainerLogs(ctx, id, containertypes.LogsOptions{ShowStdout: true, Tail: "2"})
 	if logs != nil {
 		defer logs.Close()
 	}
@@ -53,9 +53,9 @@ func testLogs(t *testing.T, logDriver string) {
 	ctx := setupTest(t)
 	apiClient := testEnv.APIClient()
 
-	testCases := []struct {
+	tests := []struct {
 		desc        string
-		logOps      types.ContainerLogsOptions
+		logOps      containertypes.LogsOptions
 		expectedOut string
 		expectedErr string
 		tty         bool
@@ -64,7 +64,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "tty/stdout and stderr",
 			tty:  true,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: true,
 				ShowStderr: true,
 			},
@@ -73,7 +73,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "tty/only stdout",
 			tty:  true,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: true,
 				ShowStderr: false,
 			},
@@ -82,7 +82,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "tty/only stderr",
 			tty:  true,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: false,
 				ShowStderr: true,
 			},
@@ -92,7 +92,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "without tty/stdout and stderr",
 			tty:  false,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: true,
 				ShowStderr: true,
 			},
@@ -102,7 +102,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "without tty/only stdout",
 			tty:  false,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: true,
 				ShowStderr: false,
 			},
@@ -112,7 +112,7 @@ func testLogs(t *testing.T, logDriver string) {
 		{
 			desc: "without tty/only stderr",
 			tty:  false,
-			logOps: types.ContainerLogsOptions{
+			logOps: containertypes.LogsOptions{
 				ShowStdout: false,
 				ShowStderr: true,
 			},
@@ -126,23 +126,20 @@ func testLogs(t *testing.T, logDriver string) {
 		pollTimeout = StopContainerWindowsPollTimeout
 	}
 
-	for _, tC := range testCases {
-		tC := tC
-		t.Run(tC.desc, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
-			tty := tC.tty
+			tty := tc.tty
 			id := container.Run(ctx, t, apiClient,
 				container.WithCmd("sh", "-c", "echo -n this is fine; echo -n accidents happen >&2"),
 				container.WithTty(tty),
 				container.WithLogDriver(logDriver),
 			)
-			defer apiClient.ContainerRemove(ctx, id, types.ContainerRemoveOptions{Force: true})
+			defer apiClient.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
 
-			poll.WaitOn(t, container.IsStopped(ctx, apiClient, id),
-				poll.WithDelay(time.Millisecond*100),
-				poll.WithTimeout(pollTimeout))
+			poll.WaitOn(t, container.IsStopped(ctx, apiClient, id), poll.WithTimeout(pollTimeout))
 
-			logs, err := apiClient.ContainerLogs(ctx, id, tC.logOps)
+			logs, err := apiClient.ContainerLogs(ctx, id, tc.logOps)
 			assert.NilError(t, err)
 			defer logs.Close()
 
@@ -166,7 +163,7 @@ func testLogs(t *testing.T, logDriver string) {
 				// This is a workaround for the backspace being outputted in an unexpected place
 				// which breaks the parsed output: https://github.com/moby/moby/issues/43710
 				if strings.Contains(testEnv.DaemonInfo.OperatingSystem, "Windows Server Version 1809") {
-					if tC.logOps.ShowStdout {
+					if tc.logOps.ShowStdout {
 						assert.Check(t, cmp.Contains(stdout.String(), "this is fine"))
 						assert.Check(t, cmp.Contains(stdout.String(), "accidents happen"))
 					} else {
@@ -176,8 +173,8 @@ func testLogs(t *testing.T, logDriver string) {
 				}
 			}
 
-			assert.DeepEqual(t, stdoutStr, tC.expectedOut)
-			assert.DeepEqual(t, stderr.String(), tC.expectedErr)
+			assert.DeepEqual(t, stdoutStr, tc.expectedOut)
+			assert.DeepEqual(t, stderr.String(), tc.expectedErr)
 		})
 	}
 }

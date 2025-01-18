@@ -3,6 +3,7 @@
 package ipvlan
 
 import (
+	"context"
 	"net"
 	"sync"
 
@@ -62,11 +63,12 @@ type network struct {
 }
 
 // Register initializes and registers the libnetwork ipvlan driver.
-func Register(r driverapi.Registerer, config map[string]interface{}) error {
+func Register(r driverapi.Registerer, store *datastore.Store, config map[string]interface{}) error {
 	d := &driver{
+		store:    store,
 		networks: networkTable{},
 	}
-	if err := d.initStore(config); err != nil {
+	if err := d.initStore(); err != nil {
 		return err
 	}
 	return r.RegisterDriver(NetworkType, d, driverapi.Capability{
@@ -95,7 +97,7 @@ func (d *driver) IsBuiltIn() bool {
 	return true
 }
 
-func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
+func (d *driver) ProgramExternalConnectivity(_ context.Context, nid, eid string, options map[string]interface{}) error {
 	return nil
 }
 

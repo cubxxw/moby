@@ -1,10 +1,9 @@
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,9 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/ioutils"
+	"github.com/moby/sys/userns"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
@@ -291,8 +289,15 @@ func TestUntarPathWithInvalidDest(t *testing.T) {
 	// Create a src file
 	srcFile := filepath.Join(tempFolder, "src")
 	tarFile := filepath.Join(tempFolder, "src.tar")
-	os.Create(srcFile)
-	os.Create(invalidDestFolder) // being a file (not dir) should cause an error
+	f, err := os.Create(srcFile)
+	if assert.Check(t, err) {
+		_ = f.Close()
+	}
+
+	d, err := os.Create(invalidDestFolder) // being a file (not dir) should cause an error
+	if assert.Check(t, err) {
+		_ = d.Close()
+	}
 
 	// Translate back to Unix semantics as next exec.Command is run under sh
 	srcFileU := srcFile
@@ -331,7 +336,10 @@ func TestUntarPath(t *testing.T) {
 	defer os.RemoveAll(tmpFolder)
 	srcFile := filepath.Join(tmpFolder, "src")
 	tarFile := filepath.Join(tmpFolder, "src.tar")
-	os.Create(filepath.Join(tmpFolder, "src"))
+	f, err := os.Create(filepath.Join(tmpFolder, "src"))
+	if assert.Check(t, err) {
+		_ = f.Close()
+	}
 
 	destFolder := filepath.Join(tmpFolder, "dest")
 	err = os.MkdirAll(destFolder, 0o740)
@@ -370,7 +378,10 @@ func TestUntarPathWithDestinationFile(t *testing.T) {
 	defer os.RemoveAll(tmpFolder)
 	srcFile := filepath.Join(tmpFolder, "src")
 	tarFile := filepath.Join(tmpFolder, "src.tar")
-	os.Create(filepath.Join(tmpFolder, "src"))
+	f, err := os.Create(filepath.Join(tmpFolder, "src"))
+	if assert.Check(t, err) {
+		_ = f.Close()
+	}
 
 	// Translate back to Unix semantics as next exec.Command is run under sh
 	srcFileU := srcFile
@@ -385,9 +396,9 @@ func TestUntarPathWithDestinationFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	destFile := filepath.Join(tmpFolder, "dest")
-	_, err = os.Create(destFile)
-	if err != nil {
-		t.Fatalf("Fail to create the destination file")
+	f, err = os.Create(destFile)
+	if assert.Check(t, err) {
+		_ = f.Close()
 	}
 	err = defaultUntarPath(tarFile, destFile)
 	if err == nil {
@@ -406,7 +417,10 @@ func TestUntarPathWithDestinationSrcFileAsFolder(t *testing.T) {
 	defer os.RemoveAll(tmpFolder)
 	srcFile := filepath.Join(tmpFolder, "src")
 	tarFile := filepath.Join(tmpFolder, "src.tar")
-	os.Create(srcFile)
+	f, err := os.Create(srcFile)
+	if assert.Check(t, err) {
+		_ = f.Close()
+	}
 
 	// Translate back to Unix semantics as next exec.Command is run under sh
 	srcFileU := srcFile
@@ -562,9 +576,9 @@ func TestCopyFileWithTarInexistentDestWillCreateIt(t *testing.T) {
 	defer os.RemoveAll(tempFolder)
 	srcFile := filepath.Join(tempFolder, "src")
 	inexistentDestFolder := filepath.Join(tempFolder, "doesnotexists")
-	_, err = os.Create(srcFile)
-	if err != nil {
-		t.Fatal(err)
+	f, err := os.Create(srcFile)
+	if assert.Check(t, err) {
+		_ = f.Close()
 	}
 	err = defaultCopyFileWithTar(srcFile, inexistentDestFolder)
 	if err != nil {
@@ -679,7 +693,7 @@ func tarUntar(t *testing.T, origin string, options *TarOptions) ([]Change, error
 	defer archive.Close()
 
 	buf := make([]byte, 10)
-	if _, err := archive.Read(buf); err != nil {
+	if _, err := io.ReadFull(archive, buf); err != nil {
 		return nil, err
 	}
 	wrap := io.MultiReader(bytes.NewReader(buf), archive)
@@ -789,7 +803,7 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		},
 	}
 
-	cases := []struct {
+	tests := []struct {
 		opts        *TarOptions
 		expectedUID int
 		expectedGID int
@@ -800,21 +814,23 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1, GID: 1}, NoLchown: true}, 1, 1},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1000, GID: 1000}, NoLchown: true}, 1000, 1000},
 	}
-	for _, testCase := range cases {
-		reader, err := TarWithOptions(filePath, testCase.opts)
-		assert.NilError(t, err)
-		tr := tar.NewReader(reader)
-		defer reader.Close()
-		for {
-			hdr, err := tr.Next()
-			if err == io.EOF {
-				// end of tar archive
-				break
-			}
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
+			reader, err := TarWithOptions(filePath, tc.opts)
 			assert.NilError(t, err)
-			assert.Check(t, is.Equal(hdr.Uid, testCase.expectedUID), "Uid equals expected value")
-			assert.Check(t, is.Equal(hdr.Gid, testCase.expectedGID), "Gid equals expected value")
-		}
+			tr := tar.NewReader(reader)
+			defer reader.Close()
+			for {
+				hdr, err := tr.Next()
+				if err == io.EOF {
+					// end of tar archive
+					break
+				}
+				assert.NilError(t, err)
+				assert.Check(t, is.Equal(hdr.Uid, tc.expectedUID), "Uid equals expected value")
+				assert.Check(t, is.Equal(hdr.Gid, tc.expectedGID), "Gid equals expected value")
+			}
+		})
 	}
 }
 
@@ -834,7 +850,7 @@ func TestTarWithOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
+	tests := []struct {
 		opts       *TarOptions
 		numChanges int
 	}{
@@ -844,14 +860,14 @@ func TestTarWithOptions(t *testing.T) {
 		{&TarOptions{IncludeFiles: []string{"1", "1"}}, 2},
 		{&TarOptions{IncludeFiles: []string{"1"}, RebaseNames: map[string]string{"1": "test"}}, 4},
 	}
-	for _, testCase := range cases {
-		changes, err := tarUntar(t, origin, testCase.opts)
+	for _, tc := range tests {
+		changes, err := tarUntar(t, origin, tc.opts)
 		if err != nil {
 			t.Fatalf("Error tar/untar when testing inclusion/exclusion: %s", err)
 		}
-		if len(changes) != testCase.numChanges {
+		if len(changes) != tc.numChanges {
 			t.Errorf("Expected %d changes, got %d for %+v:",
-				testCase.numChanges, len(changes), testCase.opts)
+				tc.numChanges, len(changes), tc.opts)
 		}
 	}
 }
@@ -1205,16 +1221,16 @@ func TestUntarInvalidSymlink(t *testing.T) {
 
 func TestTempArchiveCloseMultipleTimes(t *testing.T) {
 	reader := io.NopCloser(strings.NewReader("hello"))
-	tempArchive, err := NewTempArchive(reader, "")
+	tmpArchive, err := newTempArchive(reader, "")
 	assert.NilError(t, err)
 	buf := make([]byte, 10)
-	n, err := tempArchive.Read(buf)
+	n, err := tmpArchive.Read(buf)
 	assert.NilError(t, err)
 	if n != 5 {
 		t.Fatalf("Expected to read 5 bytes. Read %d instead", n)
 	}
 	for i := 0; i < 3; i++ {
-		if err = tempArchive.Close(); err != nil {
+		if err = tmpArchive.Close(); err != nil {
 			t.Fatalf("i=%d. Unexpected error closing temp archive: %v", i, err)
 		}
 	}
@@ -1237,7 +1253,7 @@ func TestXGlobalNoParent(t *testing.T) {
 
 	_, err = os.Lstat(filepath.Join(tmpDir, "foo"))
 	assert.Check(t, err != nil)
-	assert.Check(t, errors.Is(err, os.ErrNotExist))
+	assert.Check(t, is.ErrorIs(err, os.ErrNotExist))
 }
 
 // TestImpliedDirectoryPermissions ensures that directories implied by paths in the tar file, but without their own
@@ -1289,7 +1305,7 @@ func TestImpliedDirectoryPermissions(t *testing.T) {
 
 func TestReplaceFileTarWrapper(t *testing.T) {
 	filesInArchive := 20
-	testcases := []struct {
+	tests := []struct {
 		doc       string
 		filename  string
 		modifier  TarModifierFunc
@@ -1326,16 +1342,16 @@ func TestReplaceFileTarWrapper(t *testing.T) {
 		},
 	}
 
-	for _, testcase := range testcases {
+	for _, tc := range tests {
 		sourceArchive, cleanup := buildSourceArchive(t, filesInArchive)
 		defer cleanup()
 
 		resultArchive := ReplaceFileTarWrapper(
 			sourceArchive,
-			map[string]TarModifierFunc{testcase.filename: testcase.modifier})
+			map[string]TarModifierFunc{tc.filename: tc.modifier})
 
-		actual := readFileFromArchive(t, resultArchive, testcase.filename, testcase.fileCount, testcase.doc)
-		assert.Check(t, is.Equal(testcase.expected, actual), testcase.doc)
+		actual := readFileFromArchive(t, resultArchive, tc.filename, tc.fileCount, tc.doc)
+		assert.Check(t, is.Equal(tc.expected, actual), tc.doc)
 	}
 }
 
@@ -1426,30 +1442,27 @@ func TestDisablePigz(t *testing.T) {
 	t.Setenv("MOBY_DISABLE_PIGZ", "true")
 
 	r := testDecompressStream(t, "gz", "gzip -f")
-	// For the bufio pool
-	outsideReaderCloserWrapper := r.(*ioutils.ReadCloserWrapper)
-	// For the context canceller
-	contextReaderCloserWrapper := outsideReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
 
-	assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
+	// wrapped in closer to cancel contex and release buffer to pool
+	wrapper := r.(*readCloserWrapper)
+
+	assert.Equal(t, reflect.TypeOf(wrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 }
 
 func TestPigz(t *testing.T) {
 	r := testDecompressStream(t, "gz", "gzip -f")
-	// For the bufio pool
-	outsideReaderCloserWrapper := r.(*ioutils.ReadCloserWrapper)
-	// For the context canceller
-	contextReaderCloserWrapper := outsideReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
+	// wrapper for buffered reader and context cancel
+	wrapper := r.(*readCloserWrapper)
 
 	_, err := exec.LookPath("unpigz")
 	if err == nil {
 		t.Log("Tested whether Pigz is used, as it installed")
 		// For the command wait wrapper
-		cmdWaitCloserWrapper := contextReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
+		cmdWaitCloserWrapper := wrapper.Reader.(*readCloserWrapper)
 		assert.Equal(t, reflect.TypeOf(cmdWaitCloserWrapper.Reader), reflect.TypeOf(&io.PipeReader{}))
 	} else {
 		t.Log("Tested whether Pigz is not used, as it not installed")
-		assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
+		assert.Equal(t, reflect.TypeOf(wrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 	}
 }
 

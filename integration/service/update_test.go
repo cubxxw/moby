@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	networktypes "github.com/docker/docker/api/types/network"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/network"
 	"github.com/docker/docker/integration/internal/swarm"
@@ -222,7 +223,7 @@ func TestServiceUpdateNetwork(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, cli, serviceID, instances), swarm.ServicePoll)
 	service := getService(ctx, t, cli, serviceID)
-	netInfo, err := cli.NetworkInspect(ctx, testNet, types.NetworkInspectOptions{
+	netInfo, err := cli.NetworkInspect(ctx, testNet, networktypes.InspectOptions{
 		Verbose: true,
 		Scope:   "swarm",
 	})
@@ -235,7 +236,7 @@ func TestServiceUpdateNetwork(t *testing.T) {
 	assert.NilError(t, err)
 	poll.WaitOn(t, serviceIsUpdated(ctx, cli, serviceID), swarm.ServicePoll)
 
-	netInfo, err = cli.NetworkInspect(ctx, testNet, types.NetworkInspectOptions{
+	netInfo, err = cli.NetworkInspect(ctx, testNet, networktypes.InspectOptions{
 		Verbose: true,
 		Scope:   "swarm",
 	})
@@ -252,10 +253,6 @@ func TestServiceUpdateNetwork(t *testing.T) {
 
 // TestServiceUpdatePidsLimit tests creating and updating a service with PidsLimit
 func TestServiceUpdatePidsLimit(t *testing.T) {
-	skip.If(
-		t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.41"),
-		"setting pidslimit for services is not supported before api v1.41",
-	)
 	skip.If(t, testEnv.DaemonInfo.OSType != "linux")
 	tests := []struct {
 		name      string
@@ -290,7 +287,6 @@ func TestServiceUpdatePidsLimit(t *testing.T) {
 		service   swarmtypes.Service
 	)
 	for i, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := testutil.StartSpan(ctx, t)
 			if i == 0 {
@@ -328,7 +324,7 @@ func TestServiceUpdatePidsLimit(t *testing.T) {
 	assert.NilError(t, err)
 }
 
-func getServiceTaskContainer(ctx context.Context, t *testing.T, cli client.APIClient, serviceID string) types.ContainerJSON {
+func getServiceTaskContainer(ctx context.Context, t *testing.T, cli client.APIClient, serviceID string) container.InspectResponse {
 	t.Helper()
 	tasks, err := cli.TaskList(ctx, types.TaskListOptions{
 		Filters: filters.NewArgs(

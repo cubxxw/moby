@@ -8,16 +8,15 @@ import (
 	"strings"
 	"time"
 
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/containerfs"
+	"github.com/docker/docker/internal/containerfs"
+	"github.com/docker/docker/internal/metrics"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/pkg/errors"
 )
@@ -26,11 +25,11 @@ import (
 // is returned if the container is not found, or if the remove
 // fails. If the remove succeeds, the container name is released, and
 // network links are removed.
-func (daemon *Daemon) ContainerRm(name string, config *types.ContainerRmConfig) error {
+func (daemon *Daemon) ContainerRm(name string, config *backend.ContainerRmConfig) error {
 	return daemon.containerRm(&daemon.config().Config, name, config)
 }
 
-func (daemon *Daemon) containerRm(cfg *config.Config, name string, opts *types.ContainerRmConfig) error {
+func (daemon *Daemon) containerRm(cfg *config.Config, name string, opts *backend.ContainerRmConfig) error {
 	start := time.Now()
 	ctr, err := daemon.GetContainer(name)
 	if err != nil {
@@ -54,7 +53,7 @@ func (daemon *Daemon) containerRm(cfg *config.Config, name string, opts *types.C
 	}
 
 	err = daemon.cleanupContainer(ctr, *opts)
-	containerActions.WithValues("delete").UpdateSince(start)
+	metrics.ContainerActions.WithValues("delete").UpdateSince(start)
 
 	return err
 }
@@ -87,7 +86,7 @@ func (daemon *Daemon) rmLink(cfg *config.Config, container *container.Container,
 
 // cleanupContainer unregisters a container from the daemon, stops stats
 // collection and cleanly removes contents and metadata from the filesystem.
-func (daemon *Daemon) cleanupContainer(container *container.Container, config types.ContainerRmConfig) error {
+func (daemon *Daemon) cleanupContainer(container *container.Container, config backend.ContainerRmConfig) error {
 	if container.IsRunning() {
 		if !config.ForceRemove {
 			if state := container.StateString(); state == "paused" {
@@ -125,35 +124,30 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ty
 	container.Lock()
 	container.Dead = true
 
+	// Copy RWLayer for releasing and clear the reference while holding the container lock.
+	rwLayer := container.RWLayer
+	container.RWLayer = nil
+
 	// Save container state to disk. So that if error happens before
 	// container meta file got removed from disk, then a restart of
 	// docker should not make a dead container alive.
-	if err := container.CheckpointTo(daemon.containersReplica); err != nil && !os.IsNotExist(err) {
+	if err := container.CheckpointTo(context.WithoutCancel(context.TODO()), daemon.containersReplica); err != nil && !os.IsNotExist(err) {
 		log.G(context.TODO()).Errorf("Error saving dying container to disk: %v", err)
 	}
 	container.Unlock()
 
 	// When container creation fails and `RWLayer` has not been created yet, we
 	// do not call `ReleaseRWLayer`
-	if container.RWLayer != nil {
-		if err := daemon.imageService.ReleaseLayer(container.RWLayer); err != nil {
+	if rwLayer != nil {
+		if err := daemon.imageService.ReleaseLayer(rwLayer); err != nil {
+			// Restore the reference on error as it possibly was not released.
+			container.Lock()
+			container.RWLayer = rwLayer
+			container.Unlock()
+
 			err = errors.Wrapf(err, "container %s", container.ID)
 			container.SetRemovalError(err)
 			return err
-		}
-		container.RWLayer = nil
-	} else {
-		if daemon.UsesSnapshotter() {
-			ls := daemon.containerdClient.LeasesService()
-			lease := leases.Lease{
-				ID: container.ID,
-			}
-			if err := ls.Delete(context.Background(), lease, leases.SynchronousDelete); err != nil {
-				if !cerrdefs.IsNotFound(err) {
-					container.SetRemovalError(err)
-					return err
-				}
-			}
 		}
 	}
 
@@ -161,6 +155,8 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ty
 	// so that other goroutines don't attempt to concurrently open files
 	// within it. Having any file open on Windows (without the
 	// FILE_SHARE_DELETE flag) will block it from being deleted.
+	//
+	// TODO(thaJeztah): should this be moved to the "container" itself, or possibly be delegated to the graphdriver or snapshotter?
 	container.Lock()
 	err := containerfs.EnsureRemoveAll(container.Root)
 	container.Unlock()
@@ -181,7 +177,7 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ty
 		daemon.releaseName(name)
 	}
 	container.SetRemoved()
-	stateCtr.del(container.ID)
+	metrics.StateCtr.Delete(container.ID)
 
 	daemon.LogContainerEvent(container, events.ActionDestroy)
 	return nil

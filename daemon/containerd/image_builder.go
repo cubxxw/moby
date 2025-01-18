@@ -1,7 +1,9 @@
 package containerd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,37 +11,57 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/rootfs"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/rootfs"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/backend"
-	imagetypes "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/registry"
-	registrypkg "github.com/docker/docker/registry"
-
-	// "github.com/docker/docker/api/types/container"
-	containerdimages "github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/image"
 	dimage "github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/stringid"
+	registrypkg "github.com/docker/docker/registry"
+	imagespec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const imageLabelClassicBuilderParent = "org.mobyproject.image.parent"
+const (
+	// Digest of the image which was the base image of the committed container.
+	imageLabelClassicBuilderParent = "org.mobyproject.image.parent"
+
+	// "1" means that the image was created directly from the "FROM scratch".
+	imageLabelClassicBuilderFromScratch = "org.mobyproject.image.fromscratch"
+
+	// digest of the ContainerConfig stored in the content store.
+	imageLabelClassicBuilderContainerConfig = "org.mobyproject.image.containerconfig"
+)
+
+const (
+	// gc.ref label that associates the ContainerConfig content blob with the
+	// corresponding Config content.
+	contentLabelGcRefContainerConfig = "containerd.io/gc.ref.content.moby/container.config"
+
+	// Digest of the image this ContainerConfig blobs describes.
+	// Only ContainerConfig content should be labelled with it.
+	contentLabelClassicBuilderImage = "org.mobyproject.content.image"
+)
 
 // GetImageAndReleasableLayer returns an image and releaseable layer for a
 // reference or ID. Every call to GetImageAndReleasableLayer MUST call
@@ -62,7 +84,7 @@ func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID s
 
 	if opts.PullOption != backend.PullOptionForcePull {
 		// TODO(laurazard): same as below
-		img, err := i.GetImage(ctx, refOrID, image.GetImageOpts{Platform: opts.Platform})
+		img, err := i.GetImage(ctx, refOrID, backend.GetImageOpts{Platform: opts.Platform})
 		if err != nil && opts.PullOption == backend.PullOptionNoPull {
 			return nil, nil, err
 		}
@@ -84,10 +106,11 @@ func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID s
 		}
 	}
 
-	ctx, _, err := i.client.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(1*time.Hour))
+	ctx, release, err := i.withLease(ctx, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create lease for commit: %w", err)
 	}
+	defer release()
 
 	// TODO(laurazard): do we really need a new method here to pull the image?
 	imgDesc, err := i.pullForBuilder(ctx, refOrID, opts.AuthConfig, opts.Output, opts.Platform)
@@ -97,7 +120,7 @@ func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID s
 
 	// TODO(laurazard): pullForBuilder should return whatever we
 	// need here instead of having to go and get it again
-	img, err := i.GetImage(ctx, refOrID, imagetypes.GetImageOpts{
+	img, err := i.GetImage(ctx, refOrID, backend.GetImageOpts{
 		Platform: opts.Platform,
 	})
 	if err != nil {
@@ -134,7 +157,7 @@ func (i *ImageService) pullForBuilder(ctx context.Context, name string, authConf
 		return nil, err
 	}
 
-	img, err := i.GetImage(ctx, name, imagetypes.GetImageOpts{Platform: platform})
+	img, err := i.GetImage(ctx, name, backend.GetImageOpts{Platform: platform})
 	if err != nil {
 		if errdefs.IsNotFound(err) && img != nil && platform != nil {
 			imgPlat := ocispec.Platform{
@@ -181,12 +204,12 @@ func newROLayerForImage(ctx context.Context, imgDesc *ocispec.Descriptor, i *Ima
 		platMatcher = platforms.Only(*platform)
 	}
 
-	confDesc, err := containerdimages.Config(ctx, i.client.ContentStore(), *imgDesc, platMatcher)
+	confDesc, err := c8dimages.Config(ctx, i.content, *imgDesc, platMatcher)
 	if err != nil {
 		return nil, err
 	}
 
-	diffIDs, err := containerdimages.RootFS(ctx, i.client.ContentStore(), confDesc)
+	diffIDs, err := c8dimages.RootFS(ctx, i.content, confDesc)
 	if err != nil {
 		return nil, err
 	}
@@ -212,9 +235,9 @@ func newROLayerForImage(ctx context.Context, imgDesc *ocispec.Descriptor, i *Ima
 
 func createLease(ctx context.Context, lm leases.Manager) (context.Context, leases.Lease, error) {
 	lease, err := lm.Create(ctx,
-		leases.WithExpiration(time.Hour*24),
+		leases.WithExpiration(leaseExpireDuration),
 		leases.WithLabels(map[string]string{
-			"org.mobyproject.lease.classicbuilder": "true",
+			pruneLeaseLabel: "true",
 		}),
 	)
 	if err != nil {
@@ -328,6 +351,22 @@ func (rw *rwlayer) Commit() (_ builder.ROLayer, outErr error) {
 		}
 	}()
 
+	// Unmount the layer, required by the containerd windows snapshotter.
+	// The windowsfilter graphdriver does this inside its own Diff method.
+	//
+	// The only place that calls this in-tree is (b *Builder) exportImage and
+	// that is called from the end of (b *Builder) performCopy which has a
+	// `defer rwLayer.Release()` pending.
+	//
+	// After the snapshotter.Commit the source snapshot is deleted anyway and
+	// it shouldn't be accessed afterwards.
+	if rw.root != "" {
+		if err := mount.UnmountAll(rw.root, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.G(ctx).WithError(err).WithField("root", rw.root).Error("failed to unmount RWLayer")
+			return nil, err
+		}
+	}
+
 	err = snapshotter.Commit(ctx, key, rw.key)
 	if err != nil && !cerrdefs.IsAlreadyExists(err) {
 		return nil, err
@@ -367,7 +406,7 @@ func (rw *rwlayer) Release() (outErr error) {
 	}
 
 	if err := mount.UnmountAll(rw.root, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.G(context.TODO()).WithError(err).WithField("root", rw.root).Error("failed to unmount ROLayer")
+		log.G(context.TODO()).WithError(err).WithField("root", rw.root).Error("failed to unmount RWLayer")
 		return err
 	}
 	if err := os.Remove(rw.root); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -409,7 +448,7 @@ func (i *ImageService) CreateImage(ctx context.Context, config []byte, parent st
 		if err != nil {
 			return nil, err
 		}
-		parentImageManifest, err := containerdimages.Manifest(ctx, i.client.ContentStore(), parentDesc, platforms.Default())
+		parentImageManifest, err := c8dimages.Manifest(ctx, i.content, parentDesc, platforms.Default())
 		if err != nil {
 			return nil, err
 		}
@@ -418,7 +457,7 @@ func (i *ImageService) CreateImage(ctx context.Context, config []byte, parent st
 		parentDigest = parentDesc.Digest
 	}
 
-	cs := i.client.ContentStore()
+	cs := i.content
 
 	ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: layerDigest})
 	if err != nil {
@@ -437,54 +476,149 @@ func (i *ImageService) CreateImage(ctx context.Context, config []byte, parent st
 		}
 
 		layers = append(layers, ocispec.Descriptor{
-			MediaType: containerdimages.MediaTypeDockerSchema2LayerGzip,
+			MediaType: c8dimages.MediaTypeDockerSchema2LayerGzip,
 			Digest:    layerDigest,
 			Size:      info.Size,
 		})
 	}
 
-	// necessary to prevent the contents from being GC'd
-	// between writing them here and creating an image
-	ctx, release, err := i.client.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(1*time.Hour))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := release(ctx); err != nil {
-			log.G(ctx).WithError(err).Warn("failed to release lease created for create")
-		}
-	}()
-
-	commitManifestDesc, err := writeContentsForImage(ctx, i.snapshotter, i.client.ContentStore(), ociImgToCreate, layers)
+	createdImageId, err := i.createImageOCI(ctx, ociImgToCreate, parentDigest, layers, imgToCreate.ContainerConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	// image create
-	img := containerdimages.Image{
-		Name:      danglingImageName(commitManifestDesc.Digest),
-		Target:    commitManifestDesc,
+	return dimage.Clone(imgToCreate, createdImageId), nil
+}
+
+func (i *ImageService) createImageOCI(ctx context.Context, imgToCreate imagespec.DockerOCIImage,
+	parentDigest digest.Digest, layers []ocispec.Descriptor,
+	containerConfig container.Config,
+) (dimage.ID, error) {
+	ctx, release, err := i.withLease(ctx, false)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
+	manifestDesc, ccDesc, err := writeContentsForImage(ctx, i.snapshotter, i.content, imgToCreate, layers, containerConfig)
+	if err != nil {
+		return "", err
+	}
+
+	img := c8dimages.Image{
+		Name:      danglingImageName(manifestDesc.Digest),
+		Target:    manifestDesc,
 		CreatedAt: time.Now(),
 		Labels: map[string]string{
-			imageLabelClassicBuilderParent: parentDigest.String(),
+			imageLabelClassicBuilderParent:          parentDigest.String(),
+			imageLabelClassicBuilderContainerConfig: ccDesc.Digest.String(),
 		},
 	}
 
-	createdImage, err := i.client.ImageService().Update(ctx, img)
+	if parentDigest == "" {
+		img.Labels[imageLabelClassicBuilderFromScratch] = "1"
+	}
+
+	if err := i.createOrReplaceImage(ctx, img); err != nil {
+		return "", err
+	}
+
+	id := image.ID(img.Target.Digest)
+	i.LogImageEvent(ctx, id.String(), id.String(), events.ActionCreate)
+
+	if err := i.unpackImage(ctx, i.StorageDriver(), img, manifestDesc); err != nil {
+		return "", err
+	}
+
+	return id, nil
+}
+
+// writeContentsForImage will commit oci image config and manifest into containerd's content store.
+func writeContentsForImage(ctx context.Context, snName string, cs content.Store,
+	newConfig imagespec.DockerOCIImage, layers []ocispec.Descriptor,
+	containerConfig container.Config,
+) (
+	manifestDesc ocispec.Descriptor,
+	containerConfigDesc ocispec.Descriptor,
+	_ error,
+) {
+	newConfigJSON, err := json.Marshal(newConfig)
 	if err != nil {
-		if !cerrdefs.IsNotFound(err) {
-			return nil, err
-		}
-
-		if createdImage, err = i.client.ImageService().Create(ctx, img); err != nil {
-			return nil, fmt.Errorf("failed to create new image: %w", err)
-		}
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, err
 	}
 
-	if err := i.unpackImage(ctx, i.StorageDriver(), img, commitManifestDesc); err != nil {
-		return nil, err
+	configDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageConfig,
+		Digest:    digest.FromBytes(newConfigJSON),
+		Size:      int64(len(newConfigJSON)),
 	}
 
-	newImage := dimage.Clone(imgToCreate, dimage.ID(createdImage.Target.Digest))
-	return newImage, nil
+	newMfst := struct {
+		MediaType string `json:"mediaType,omitempty"`
+		ocispec.Manifest
+	}{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Manifest: ocispec.Manifest{
+			Versioned: specs.Versioned{
+				SchemaVersion: 2,
+			},
+			Config: configDesc,
+			Layers: layers,
+		},
+	}
+
+	newMfstJSON, err := json.MarshalIndent(newMfst, "", "    ")
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, err
+	}
+
+	newMfstDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromBytes(newMfstJSON),
+		Size:      int64(len(newMfstJSON)),
+	}
+
+	// new manifest should reference the layers and config content
+	labels := map[string]string{
+		"containerd.io/gc.ref.content.0": configDesc.Digest.String(),
+	}
+	for i, l := range layers {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.%d", i+1)] = l.Digest.String()
+	}
+
+	err = content.WriteBlob(ctx, cs, newMfstDesc.Digest.String(), bytes.NewReader(newMfstJSON), newMfstDesc, content.WithLabels(labels))
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, err
+	}
+
+	ccDesc, err := saveContainerConfig(ctx, cs, newMfstDesc.Digest, containerConfig)
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, err
+	}
+
+	// config should reference to snapshotter and container config
+	labelOpt := content.WithLabels(map[string]string{
+		fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", snName): identity.ChainID(newConfig.RootFS.DiffIDs).String(),
+		contentLabelGcRefContainerConfig:                        ccDesc.Digest.String(),
+	})
+	err = content.WriteBlob(ctx, cs, configDesc.Digest.String(), bytes.NewReader(newConfigJSON), configDesc, labelOpt)
+	if err != nil {
+		return ocispec.Descriptor{}, ocispec.Descriptor{}, err
+	}
+
+	return newMfstDesc, ccDesc, nil
+}
+
+// saveContainerConfig serializes the given ContainerConfig into a json and
+// stores it in the content store and returns its descriptor.
+func saveContainerConfig(ctx context.Context, content content.Ingester, imgID digest.Digest, containerConfig container.Config) (ocispec.Descriptor, error) {
+	containerConfigDesc, err := storeJson(ctx, content,
+		"application/vnd.docker.container.image.v1+json", containerConfig,
+		map[string]string{contentLabelClassicBuilderImage: imgID.String()},
+	)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	return containerConfigDesc, nil
 }

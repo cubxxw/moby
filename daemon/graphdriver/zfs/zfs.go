@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
+	"github.com/docker/docker/daemon/internal/mountref"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/parsers"
 	zfs "github.com/mistifyio/go-zfs/v3"
 	"github.com/moby/locker"
 	"github.com/moby/sys/mount"
@@ -118,17 +118,24 @@ func Init(base string, opt []string, idMap idtools.IdentityMapping) (graphdriver
 		options:          options,
 		filesystemsCache: filesystemsCache,
 		idMap:            idMap,
-		ctr:              graphdriver.NewRefCounter(graphdriver.NewDefaultChecker()),
+		ctr:              mountref.NewCounter(isMounted),
 		locker:           locker.New(),
 	}
 	return graphdriver.NewNaiveDiffDriver(d, idMap), nil
+}
+
+// isMounted parses /proc/mountinfo to check whether the specified path
+// is mounted.
+func isMounted(path string) bool {
+	m, _ := mountinfo.Mounted(path)
+	return m
 }
 
 func parseOptions(opt []string) (zfsOptions, error) {
 	var options zfsOptions
 	options.fsName = ""
 	for _, option := range opt {
-		key, val, err := parsers.ParseKeyValueOpt(option)
+		key, val, err := graphdriver.ParseStorageOptKeyValue(option)
 		if err != nil {
 			return options, err
 		}
@@ -175,7 +182,7 @@ type Driver struct {
 	sync.Mutex       // protects filesystem cache against concurrent access
 	filesystemsCache map[string]bool
 	idMap            idtools.IdentityMapping
-	ctr              *graphdriver.RefCounter
+	ctr              *mountref.Counter
 	locker           *locker.Locker
 }
 
@@ -353,6 +360,17 @@ func (d *Driver) Remove(id string) error {
 	name := d.zfsPath(id)
 	dataset := zfs.Dataset{Name: name}
 	err := dataset.Destroy(zfs.DestroyRecursive)
+	if err != nil {
+		var errZfs *zfs.Error
+		isZfsError := errors.As(err, &errZfs)
+		if isZfsError && strings.HasSuffix(strings.TrimSpace(errZfs.Stderr), "dataset does not exist") {
+			log.G(context.TODO()).WithFields(log.Fields{
+				"error":          err,
+				"storage-driver": "zfs",
+			}).Warnf("Tried to destroy inexistent dataset %q", name)
+			err = nil
+		}
+	}
 	if err == nil {
 		d.Lock()
 		delete(d.filesystemsCache, name)

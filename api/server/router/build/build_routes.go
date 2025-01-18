@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
@@ -25,7 +25,6 @@ import (
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
-	units "github.com/docker/go-units"
 	"github.com/pkg/errors"
 )
 
@@ -42,6 +41,7 @@ func newImageBuildOptions(ctx context.Context, r *http.Request) (*types.ImageBui
 		SuppressOutput: httputils.BoolValue(r, "q"),
 		NoCache:        httputils.BoolValue(r, "nocache"),
 		ForceRemove:    httputils.BoolValue(r, "forcerm"),
+		PullParent:     httputils.BoolValue(r, "pull"),
 		MemorySwap:     httputils.Int64ValueOrZero(r, "memswap"),
 		Memory:         httputils.Int64ValueOrZero(r, "memory"),
 		CPUShares:      httputils.Int64ValueOrZero(r, "cpushares"),
@@ -66,17 +66,14 @@ func newImageBuildOptions(ctx context.Context, r *http.Request) (*types.ImageBui
 		return nil, invalidParam{errors.New("security options are not supported on " + runtime.GOOS)}
 	}
 
-	version := httputils.VersionFromContext(ctx)
-	if httputils.BoolValue(r, "forcerm") && versions.GreaterThanOrEqualTo(version, "1.12") {
+	if httputils.BoolValue(r, "forcerm") {
 		options.Remove = true
-	} else if r.FormValue("rm") == "" && versions.GreaterThanOrEqualTo(version, "1.12") {
+	} else if r.FormValue("rm") == "" {
 		options.Remove = true
 	} else {
 		options.Remove = httputils.BoolValue(r, "rm")
 	}
-	if httputils.BoolValue(r, "pull") && versions.GreaterThanOrEqualTo(version, "1.16") {
-		options.PullParent = true
-	}
+	version := httputils.VersionFromContext(ctx)
 	if versions.GreaterThanOrEqualTo(version, "1.32") {
 		options.Platform = r.FormValue("platform")
 	}
@@ -107,7 +104,7 @@ func newImageBuildOptions(ctx context.Context, r *http.Request) (*types.ImageBui
 	}
 
 	if ulimitsJSON := r.FormValue("ulimits"); ulimitsJSON != "" {
-		buildUlimits := []*units.Ulimit{}
+		buildUlimits := []*container.Ulimit{}
 		if err := json.Unmarshal([]byte(ulimitsJSON), &buildUlimits); err != nil {
 			return nil, invalidParam{errors.Wrap(err, "error reading ulimit settings")}
 		}
@@ -248,7 +245,7 @@ func (br *buildRouter) postBuild(ctx context.Context, w http.ResponseWriter, r *
 		}
 		_, err = output.Write(streamformatter.FormatError(err))
 		if err != nil {
-			log.G(ctx).Warnf("could not write error response: %v", err)
+			log.G(ctx).WithError(err).Warn("could not write error response")
 		}
 		return nil
 	}
@@ -283,6 +280,9 @@ func (br *buildRouter) postBuild(ctx context.Context, w http.ResponseWriter, r *
 		ProgressWriter: buildProgressWriter(out, wantAux, createProgressReader),
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.G(ctx).Debug("build canceled")
+		}
 		return errf(err)
 	}
 
@@ -342,8 +342,12 @@ type flusher interface {
 	Flush()
 }
 
+type nopFlusher struct{}
+
+func (f *nopFlusher) Flush() {}
+
 func wrapOutputBufferedUntilRequestRead(rc io.ReadCloser, out io.Writer) (io.ReadCloser, io.Writer) {
-	var fl flusher = &ioutils.NopFlusher{}
+	var fl flusher = &nopFlusher{}
 	if f, ok := out.(flusher); ok {
 		fl = f
 	}

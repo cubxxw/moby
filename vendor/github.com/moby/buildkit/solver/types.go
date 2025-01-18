@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/compression"
@@ -112,6 +112,9 @@ type CacheExportOpt struct {
 	CompressionOpt *compression.Config
 	// ExportRoots defines if records for root vertexes should be exported.
 	ExportRoots bool
+	// IgnoreBacklinks defines if other cache chains for same result that did not
+	// participate in the current build should be exported.
+	IgnoreBacklinks bool
 }
 
 // CacheExporter can export the artifacts of the build chain
@@ -121,9 +124,14 @@ type CacheExporter interface {
 
 // CacheExporterTarget defines object capable of receiving exports
 type CacheExporterTarget interface {
+	// Add creates a new object record that we can then add results to and
+	// connect to other records.
 	Add(dgst digest.Digest) CacheExporterRecord
-	Visit(interface{})
-	Visited(interface{}) bool
+
+	// Visit marks a target as having been visited.
+	Visit(target any)
+	// Vistited returns true if a target has previously been marked as visited.
+	Visited(target any) bool
 }
 
 // CacheExporterRecord is a single object being exported
@@ -137,7 +145,7 @@ type CacheExporterRecord interface {
 // TODO: add closer to keep referenced data from getting deleted
 type Remote struct {
 	Descriptors []ocispecs.Descriptor
-	Provider    content.Provider
+	Provider    content.InfoReaderProvider
 }
 
 // CacheLink is a link between two cache records
@@ -228,6 +236,17 @@ type CacheRecord struct {
 	key          *CacheKey
 }
 
+func (ck *CacheRecord) TraceFields() map[string]any {
+	return map[string]any{
+		"id":            ck.ID,
+		"size":          ck.Size,
+		"createdAt":     ck.CreatedAt,
+		"priority":      ck.Priority,
+		"cache_manager": ck.cacheManager.ID(),
+		"cache_key":     ck.key.TraceFields(),
+	}
+}
+
 // CacheManager determines if there is a result that matches the cache keys
 // generated during the build that could be reused instead of fully
 // reevaluating the vertex and its inputs. There can be multiple cache
@@ -248,4 +267,6 @@ type CacheManager interface {
 
 	// Save saves a result based on a cache key
 	Save(key *CacheKey, s Result, createdAt time.Time) (*ExportableCacheKey, error)
+
+	ReleaseUnreferenced(context.Context) error
 }

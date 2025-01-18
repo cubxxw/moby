@@ -194,7 +194,7 @@ func (ep *Endpoint) Info() EndpointInfo {
 		return ep
 	}
 
-	return sb.getEndpoint(ep.ID())
+	return sb.GetEndpoint(ep.ID())
 }
 
 // Iface returns information about the interface which was assigned to
@@ -382,6 +382,40 @@ func (ep *Endpoint) SetGatewayIPv6(gw6 net.IP) error {
 	return nil
 }
 
+// hasGatewayOrDefaultRoute returns true if ep has a gateway, or a route to '0.0.0.0'/'::'.
+func (ep *Endpoint) hasGatewayOrDefaultRoute() (v4, v6 bool) {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+
+	if ep.joinInfo != nil {
+		v4 = len(ep.joinInfo.gw) > 0
+		v6 = len(ep.joinInfo.gw6) > 0
+		if !v4 || !v6 {
+			for _, route := range ep.joinInfo.StaticRoutes {
+				if route.Destination.IP.IsUnspecified() && net.IP(route.Destination.Mask).IsUnspecified() {
+					if route.Destination.IP.To4() == nil {
+						v6 = true
+					} else {
+						v4 = true
+					}
+				}
+			}
+		}
+	}
+	if ep.iface != nil && (!v4 || !v6) {
+		for _, route := range ep.iface.routes {
+			if route.IP.IsUnspecified() && net.IP(route.Mask).IsUnspecified() {
+				if route.IP.To4() == nil {
+					v6 = true
+				} else {
+					v4 = true
+				}
+			}
+		}
+	}
+	return v4, v6
+}
+
 func (ep *Endpoint) retrieveFromStore() (*Endpoint, error) {
 	n, err := ep.getNetworkFromStore()
 	if err != nil {
@@ -430,7 +464,6 @@ func (epj *endpointJoinInfo) UnmarshalJSON(b []byte) error {
 	var tStaticRoute []types.StaticRoute
 	if v, ok := epMap["StaticRoutes"]; ok {
 		tb, _ := json.Marshal(v)
-		var tStaticRoute []types.StaticRoute
 		// TODO(cpuguy83): Linter caught that we aren't checking errors here
 		// I don't know why we aren't other than potentially the data is not always expected to be right?
 		// This is why I'm not adding the error check.
@@ -440,7 +473,6 @@ func (epj *endpointJoinInfo) UnmarshalJSON(b []byte) error {
 	}
 	var StaticRoutes []*types.StaticRoute
 	for _, r := range tStaticRoute {
-		r := r
 		StaticRoutes = append(StaticRoutes, &r)
 	}
 	epj.StaticRoutes = StaticRoutes

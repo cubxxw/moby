@@ -3,7 +3,7 @@ package daemon // import "github.com/docker/docker/daemon"
 import (
 	"testing"
 
-	coci "github.com/containerd/containerd/oci"
+	coci "github.com/containerd/containerd/v2/pkg/oci"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	dconfig "github.com/docker/docker/daemon/config"
@@ -24,7 +24,7 @@ func TestWithSeccomp(t *testing.T) {
 		comment string
 	}
 
-	for _, x := range []expected{
+	for _, tc := range []expected{
 		{
 			comment: "unconfined seccompProfile runs unconfined",
 			daemon: &Daemon{
@@ -40,7 +40,9 @@ func TestWithSeccomp(t *testing.T) {
 			outSpec: oci.DefaultLinuxSpec(),
 		},
 		{
-			comment: "privileged container w/ custom profile runs unconfined",
+			// Prior to Docker v27, it had resulted in unconfined.
+			// https://github.com/moby/moby/pull/47500
+			comment: "privileged container w/ custom profile",
 			daemon: &Daemon{
 				sysInfo: &sysinfo.SysInfo{Seccomp: true},
 			},
@@ -50,8 +52,15 @@ func TestWithSeccomp(t *testing.T) {
 					Privileged: true,
 				},
 			},
-			inSpec:  oci.DefaultLinuxSpec(),
-			outSpec: oci.DefaultLinuxSpec(),
+			inSpec: oci.DefaultLinuxSpec(),
+			outSpec: func() coci.Spec {
+				s := oci.DefaultLinuxSpec()
+				profile := &specs.LinuxSeccomp{
+					DefaultAction: specs.LinuxSeccompAction("SCMP_ACT_LOG"),
+				}
+				s.Linux.Seccomp = profile
+				return s
+			}(),
 		},
 		{
 			comment: "privileged container w/ default runs unconfined",
@@ -182,14 +191,13 @@ func TestWithSeccomp(t *testing.T) {
 			}(),
 		},
 	} {
-		x := x
-		t.Run(x.comment, func(t *testing.T) {
-			opts := WithSeccomp(x.daemon, x.c)
-			err := opts(nil, nil, nil, &x.inSpec)
+		t.Run(tc.comment, func(t *testing.T) {
+			opts := WithSeccomp(tc.daemon, tc.c)
+			err := opts(nil, nil, nil, &tc.inSpec)
 
-			assert.DeepEqual(t, x.inSpec, x.outSpec)
-			if x.err != "" {
-				assert.Error(t, err, x.err)
+			assert.DeepEqual(t, tc.inSpec, tc.outSpec)
+			if tc.err != "" {
+				assert.Error(t, err, tc.err)
 			} else {
 				assert.NilError(t, err)
 			}

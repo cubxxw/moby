@@ -1,14 +1,18 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.22
+
 package testutil // import "github.com/docker/docker/testutil"
 
 import (
 	"context"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -16,7 +20,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.7.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace/noop"
 	"gotest.tools/v3/icmd"
 )
 
@@ -32,15 +37,14 @@ func (d devZero) Read(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-var (
-	tracingOnce sync.Once
-)
+var tracingOnce sync.Once
 
-// configureTracing sets up an OTLP tracing exporter for use in tests.
+// ConfigureTracing sets up an OTLP tracing exporter for use in tests.
 func ConfigureTracing() func(context.Context) {
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
 		// No OTLP endpoint configured, so don't bother setting up tracing.
 		// Since we are not using a batch exporter we don't want tracing to block up tests.
+		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func(context.Context) {}
 	}
 	var tp *trace.TracerProvider
@@ -54,9 +58,7 @@ func ConfigureTracing() func(context.Context) {
 		tp = trace.NewTracerProvider(
 			trace.WithSpanProcessor(sp),
 			trace.WithSampler(trace.AlwaysSample()),
-			trace.WithResource(resource.NewSchemaless(
-				attribute.KeyValue{Key: semconv.ServiceNameKey, Value: attribute.StringValue("integration-test-client")},
-			)),
+			trace.WithResource(resource.NewSchemaless(semconv.ServiceName("integration-test-client"))),
 		)
 		otel.SetTracerProvider(tp)
 
@@ -156,4 +158,22 @@ func SetContext(t TestingT, ctx context.Context) {
 
 func CleanupContext(t *testing.T) {
 	testContexts.Delete(t)
+}
+
+// CheckNotParallel checks if t.Parallel() was not called on the current test.
+// There's no public method to check this, so we use reflection to check the
+// internal field set by t.Parallel()
+// https://github.com/golang/go/blob/8e658eee9c7a67a8a79a8308695920ac9917566c/src/testing/testing.go#L1449
+//
+// Since this is not a public API, it might change at any time.
+func CheckNotParallel(t testing.TB) {
+	t.Helper()
+	field := reflect.ValueOf(t).Elem().FieldByName("isParallel")
+	if field.IsValid() {
+		if field.Bool() {
+			t.Fatal("t.Parallel() was called before")
+		}
+	} else {
+		t.Logf("FIXME: CheckParallel could not determine if test %s is parallel - did the t.Parallel() implementation change?", t.Name())
+	}
 }

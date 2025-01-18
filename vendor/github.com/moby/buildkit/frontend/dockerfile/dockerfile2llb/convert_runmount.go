@@ -30,7 +30,8 @@ func detectRunMount(cmd *command, allDispatchStates *dispatchStates) bool {
 			if !ok {
 				stn = &dispatchState{
 					stage:        instructions.Stage{BaseName: from},
-					deps:         make(map[*dispatchState]struct{}),
+					deps:         make(map[*dispatchState]instructions.Command),
+					paths:        make(map[string]struct{}),
 					unregistered: true,
 				}
 			}
@@ -56,7 +57,7 @@ func setCacheUIDGID(m *instructions.Mount, st llb.State) llb.State {
 	if m.Mode != nil {
 		mode = os.FileMode(*m.Mode)
 	}
-	return st.File(llb.Mkdir("/cache", mode, llb.WithUIDGID(uid, gid)), llb.WithCustomName("[internal] settings cache mount permissions"))
+	return st.File(llb.Mkdir("/cache", mode, llb.WithUIDGID(uid, gid)), llb.WithCustomName("[internal] setting cache mount permissions"))
 }
 
 func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*dispatchState, opt dispatchOpt) ([]llb.RunOption, error) {
@@ -69,7 +70,11 @@ func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*
 		}
 		st := opt.buildContext
 		if mount.From != "" {
-			st = sources[i].state
+			src := sources[i]
+			st = src.state
+			if !src.dispatched {
+				return nil, errors.Errorf("cannot mount from stage %q to %q, stage needs to be defined before current command", mount.From, mount.Target)
+			}
 		}
 		var mountOpts []llb.MountOption
 		if mount.Type == instructions.MountTypeTmpfs {
@@ -125,17 +130,18 @@ func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*
 		}
 		if src := path.Join("/", mount.Source); src != "/" {
 			mountOpts = append(mountOpts, llb.SourcePath(src))
-		} else {
-			if mount.UID != nil || mount.GID != nil || mount.Mode != nil {
-				st = setCacheUIDGID(mount, st)
-				mountOpts = append(mountOpts, llb.SourcePath("/cache"))
-			}
+		} else if mount.UID != nil || mount.GID != nil || mount.Mode != nil {
+			st = setCacheUIDGID(mount, st)
+			mountOpts = append(mountOpts, llb.SourcePath("/cache"))
 		}
 
 		out = append(out, llb.AddMount(target, st, mountOpts...))
 
 		if mount.From == "" {
 			d.ctxPaths[path.Join("/", filepath.ToSlash(mount.Source))] = struct{}{}
+		} else {
+			source := sources[i]
+			source.paths[path.Join("/", filepath.ToSlash(mount.Source))] = struct{}{}
 		}
 	}
 	return out, nil

@@ -13,7 +13,7 @@ import (
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/daemon/logger/loggerutils"
 	"github.com/docker/docker/errdefs"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	"github.com/pkg/errors"
 )
 
@@ -187,7 +187,7 @@ func messageToProto(msg *logger.Message, proto *logdriver.LogEntry, partial *log
 func protoToMessage(proto *logdriver.LogEntry) *logger.Message {
 	msg := &logger.Message{
 		Source:    proto.Source,
-		Timestamp: time.Unix(0, proto.TimeNano),
+		Timestamp: time.Unix(0, proto.TimeNano).UTC(),
 	}
 	if proto.Partial {
 		var md backend.PartialLogMetaData

@@ -7,17 +7,17 @@ import (
 )
 
 const (
-	grpcPipeName  = `\\.\pipe\containerd-containerd`
-	debugPipeName = `\\.\pipe\containerd-debug`
+	binaryName    = "containerd.exe"
+	grpcPipeName  = `\\.\pipe\docker-containerd`
+	debugPipeName = `\\.\pipe\docker-containerd-debug`
 )
 
-func (r *remote) setDefaults() {
-	if r.GRPC.Address == "" {
-		r.GRPC.Address = grpcPipeName
-	}
-	if r.Debug.Address == "" {
-		r.Debug.Address = debugPipeName
-	}
+func defaultGRPCAddress(stateDir string) string {
+	return grpcPipeName
+}
+
+func defaultDebugAddress(stateDir string) string {
+	return debugPipeName
 }
 
 func (r *remote) stopDaemon() {
@@ -40,7 +40,7 @@ func (r *remote) stopDaemon() {
 }
 
 func (r *remote) killDaemon() {
-	process.Kill(r.daemonPid)
+	_ = process.Kill(r.daemonPid)
 }
 
 func (r *remote) platformCleanup() {

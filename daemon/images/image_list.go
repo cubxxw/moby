@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/backend"
 	imagetypes "github.com/docker/docker/api/types/image"
+	timetypes "github.com/docker/docker/api/types/time"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
@@ -21,18 +22,19 @@ var acceptedImageFilterTags = map[string]bool{
 	"before":    true,
 	"since":     true,
 	"reference": true,
+	"until":     true,
 }
 
 // byCreated is a temporary type used to sort a list of images by creation
 // time.
-type byCreated []*types.ImageSummary
+type byCreated []*imagetypes.Summary
 
 func (r byCreated) Len() int           { return len(r) }
 func (r byCreated) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
 func (r byCreated) Less(i, j int) bool { return r[i].Created < r[j].Created }
 
 // Images returns a filtered list of images.
-func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) ([]*types.ImageSummary, error) {
+func (i *ImageService) Images(ctx context.Context, opts imagetypes.ListOptions) ([]*imagetypes.Summary, error) {
 	if err := opts.Filters.Validate(acceptedImageFilterTags); err != nil {
 		return nil, err
 	}
@@ -44,7 +46,7 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 
 	var beforeFilter, sinceFilter time.Time
 	err = opts.Filters.WalkValues("before", func(value string) error {
-		img, err := i.GetImage(ctx, value, imagetypes.GetImageOpts{})
+		img, err := i.GetImage(ctx, value, backend.GetImageOpts{})
 		if err != nil {
 			return err
 		}
@@ -59,8 +61,27 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 		return nil, err
 	}
 
+	err = opts.Filters.WalkValues("until", func(value string) error {
+		ts, err := timetypes.GetTimestamp(value, time.Now())
+		if err != nil {
+			return err
+		}
+		seconds, nanoseconds, err := timetypes.ParseTimestamps(ts, 0)
+		if err != nil {
+			return err
+		}
+		timestamp := time.Unix(seconds, nanoseconds)
+		if beforeFilter.IsZero() || beforeFilter.After(timestamp) {
+			beforeFilter = timestamp
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	err = opts.Filters.WalkValues("since", func(value string) error {
-		img, err := i.GetImage(ctx, value, imagetypes.GetImageOpts{})
+		img, err := i.GetImage(ctx, value, backend.GetImageOpts{})
 		if err != nil {
 			return err
 		}
@@ -83,8 +104,8 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 	}
 
 	var (
-		summaries     = make([]*types.ImageSummary, 0, len(selectedImages))
-		summaryMap    map[*image.Image]*types.ImageSummary
+		summaries     = make([]*imagetypes.Summary, 0, len(selectedImages))
+		summaryMap    map[*image.Image]*imagetypes.Summary
 		allContainers []*container.Container
 	)
 	for id, img := range selectedImages {
@@ -197,7 +218,7 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 		if opts.ContainerCount || opts.SharedSize {
 			// Lazily init summaryMap.
 			if summaryMap == nil {
-				summaryMap = make(map[*image.Image]*types.ImageSummary, len(selectedImages))
+				summaryMap = make(map[*image.Image]*imagetypes.Summary, len(selectedImages))
 			}
 			summaryMap[img] = summary
 		}
@@ -252,12 +273,12 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 	return summaries, nil
 }
 
-func newImageSummary(image *image.Image, size int64) *types.ImageSummary {
+func newImageSummary(image *image.Image, size int64) *imagetypes.Summary {
 	var created int64
 	if image.Created != nil {
 		created = image.Created.Unix()
 	}
-	summary := &types.ImageSummary{
+	summary := &imagetypes.Summary{
 		ParentID: image.Parent.String(),
 		ID:       image.ID().String(),
 		Created:  created,

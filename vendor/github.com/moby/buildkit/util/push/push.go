@@ -7,13 +7,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
-	"github.com/docker/distribution/reference"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/distribution/reference"
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/bklog"
@@ -191,7 +191,7 @@ func annotateDistributionSourceHandler(manager content.Manager, annotations map[
 			children[i] = child
 
 			info, err := manager.Info(ctx, child.Digest)
-			if errors.Is(err, errdefs.ErrNotFound) {
+			if errors.Is(err, cerrdefs.ErrNotFound) {
 				continue
 			} else if err != nil {
 				return nil, err

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/container"
@@ -159,7 +159,7 @@ func newBuilder(ctx context.Context, options builderOptions) (*Builder, error) {
 	if config.Platform != "" {
 		sp, err := platforms.Parse(config.Platform)
 		if err != nil {
-			return nil, err
+			return nil, errdefs.InvalidParameter(err)
 		}
 		b.platform = &sp
 	}
@@ -187,7 +187,7 @@ func buildLabelOptions(labels map[string]string, stages []instructions.Stage) {
 func (b *Builder) build(ctx context.Context, source builder.Source, dockerfile *parser.Result) (*builder.Result, error) {
 	defer b.imageSources.Unmount()
 
-	stages, metaArgs, err := instructions.Parse(dockerfile.AST)
+	stages, metaArgs, err := instructions.Parse(dockerfile.AST, nil)
 	if err != nil {
 		var uiErr *instructions.UnknownInstructionError
 		if errors.As(err, &uiErr) {
@@ -199,7 +199,7 @@ func (b *Builder) build(ctx context.Context, source builder.Source, dockerfile *
 		targetIx, found := instructions.HasStage(stages, b.options.Target)
 		if !found {
 			buildsFailed.WithValues(metricsBuildTargetNotReachableError).Inc()
-			return nil, errdefs.InvalidParameter(errors.Errorf("failed to reach build target %s in Dockerfile", b.options.Target))
+			return nil, errdefs.InvalidParameter(errors.Errorf("target stage %q could not be found", b.options.Target))
 		}
 		stages = stages[:targetIx+1]
 	}
@@ -228,9 +228,10 @@ func emitImageID(aux *streamformatter.AuxFormatter, state *dispatchState) error 
 
 func processMetaArg(meta instructions.ArgCommand, shlex *shell.Lex, args *BuildArgs) error {
 	// shell.Lex currently only support the concatenated string format
-	envs := convertMapToEnvList(args.GetAllAllowed())
+	envs := shell.EnvsFromSlice(convertMapToEnvList(args.GetAllAllowed()))
 	if err := meta.Expand(func(word string) (string, error) {
-		return shlex.ProcessWord(word, envs)
+		newword, _, err := shlex.ProcessWord(word, envs)
+		return newword, err
 	}); err != nil {
 		return err
 	}
@@ -357,20 +358,20 @@ func BuildFromConfig(ctx context.Context, config *container.Config, changes []st
 		commands = append(commands, cmd)
 	}
 
-	dispatchRequest := newDispatchRequest(b, dockerfile.EscapeToken, nil, NewBuildArgs(b.options.BuildArgs), newStagesBuildResults())
+	req := newDispatchRequest(b, dockerfile.EscapeToken, nil, NewBuildArgs(b.options.BuildArgs), newStagesBuildResults())
 	// We make mutations to the configuration, ensure we have a copy
-	dispatchRequest.state.runConfig = copyRunConfig(config)
-	dispatchRequest.state.imageID = config.Image
-	dispatchRequest.state.operatingSystem = os
+	req.state.runConfig = copyRunConfig(config)
+	req.state.imageID = config.Image
+	req.state.operatingSystem = os
 	for _, cmd := range commands {
-		err := dispatch(ctx, dispatchRequest, cmd)
+		err := dispatch(ctx, req, cmd)
 		if err != nil {
 			return nil, errdefs.InvalidParameter(err)
 		}
-		dispatchRequest.state.updateRunConfig()
+		req.state.updateRunConfig()
 	}
 
-	return dispatchRequest.state.runConfig, nil
+	return req.state.runConfig, nil
 }
 
 func convertMapToEnvList(m map[string]string) []string {
@@ -378,5 +379,16 @@ func convertMapToEnvList(m map[string]string) []string {
 	for k, v := range m {
 		result = append(result, k+"="+v)
 	}
+	return result
+}
+
+// convertKVStringsToMap converts ["key=value"] to {"key":"value"}
+func convertKVStringsToMap(values []string) map[string]string {
+	result := make(map[string]string, len(values))
+	for _, value := range values {
+		k, v, _ := strings.Cut(value, "=")
+		result[k] = v
+	}
+
 	return result
 }

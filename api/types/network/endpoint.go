@@ -13,7 +13,18 @@ type EndpointSettings struct {
 	// Configurations
 	IPAMConfig *EndpointIPAMConfig
 	Links      []string
-	Aliases    []string
+	Aliases    []string // Aliases holds the list of extra, user-specified DNS names for this endpoint.
+	// MacAddress may be used to specify a MAC address when the container is created.
+	// Once the container is running, it becomes operational data (it may contain a
+	// generated address).
+	MacAddress string
+	DriverOpts map[string]string
+
+	// GwPriority determines which endpoint will provide the default gateway
+	// for the container. The endpoint with the highest priority will be used.
+	// If multiple endpoints have the same priority, they are lexicographically
+	// sorted based on their network name, and the one that sorts first is picked.
+	GwPriority int
 	// Operational data
 	NetworkID           string
 	EndpointID          string
@@ -23,8 +34,9 @@ type EndpointSettings struct {
 	IPv6Gateway         string
 	GlobalIPv6Address   string
 	GlobalIPv6PrefixLen int
-	MacAddress          string
-	DriverOpts          map[string]string
+	// DNSNames holds all the (non fully qualified) DNS names associated to this endpoint. First entry is used to
+	// generate PTR records.
+	DNSNames []string
 }
 
 // Copy makes a deep copy of `EndpointSettings`
@@ -43,6 +55,12 @@ func (es *EndpointSettings) Copy() *EndpointSettings {
 		aliases := make([]string, 0, len(es.Aliases))
 		epCopy.Aliases = append(aliases, es.Aliases...)
 	}
+
+	if len(es.DNSNames) > 0 {
+		epCopy.DNSNames = make([]string, len(es.DNSNames))
+		copy(epCopy.DNSNames, es.DNSNames)
+	}
+
 	return &epCopy
 }
 

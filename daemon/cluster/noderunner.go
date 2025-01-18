@@ -8,12 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	types "github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/daemon/cluster/convert"
 	"github.com/docker/docker/daemon/cluster/executor/container"
 	lncluster "github.com/docker/docker/libnetwork/cluster"
+	"github.com/docker/docker/libnetwork/cnmallocator"
 	swarmapi "github.com/moby/swarmkit/v2/api"
-	swarmallocator "github.com/moby/swarmkit/v2/manager/allocator/cnmallocator"
+	"github.com/moby/swarmkit/v2/manager/allocator/networkallocator"
 	swarmnode "github.com/moby/swarmkit/v2/node"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -123,7 +125,7 @@ func (n *nodeRunner) start(conf nodeStartConfig) error {
 		ListenControlAPI:   control,
 		ListenRemoteAPI:    conf.ListenAddr,
 		AdvertiseRemoteAPI: conf.AdvertiseAddr,
-		NetworkConfig: &swarmallocator.NetworkConfig{
+		NetworkConfig: &networkallocator.Config{
 			DefaultAddrPool: conf.DefaultAddressPool,
 			SubnetSize:      conf.SubnetSize,
 			VXLANUDPPort:    conf.DataPathPort,
@@ -144,7 +146,8 @@ func (n *nodeRunner) start(conf nodeStartConfig) error {
 		ElectionTick:     n.cluster.config.RaftElectionTick,
 		UnlockKey:        conf.lockKey,
 		AutoLockManagers: conf.autolock,
-		PluginGetter:     n.cluster.config.Backend.PluginGetter(),
+		PluginGetter:     convert.SwarmPluginGetter(n.cluster.config.Backend.PluginGetter()),
+		NetworkProvider:  cnmallocator.NewProvider(n.cluster.config.Backend.PluginGetter()),
 	}
 	if conf.availability != "" {
 		avail, ok := swarmapi.NodeSpec_Availability_value[strings.ToUpper(string(conf.availability))]
@@ -279,6 +282,19 @@ func (n *nodeRunner) handleNodeExit(node *swarmnode.Node) {
 	close(n.done)
 	select {
 	case <-n.ready:
+		// there is a case where a node can be promoted to manager while
+		// another node is leaving the cluster. the node being promoted, by
+		// random chance, picks the IP of the node being demoted as the one it
+		// tries to connect to. in this case, the promotion will fail, and the
+		// whole swarm Node object packs it in.
+		//
+		// when the Node object is relaunched by this code, because it has
+		// joinAddr in the config, it attempts again to connect to the same
+		// no-longer-manager node, and crashes again. this continues forever.
+		//
+		// to avoid this case, in this block, we remove JoinAddr from the
+		// config.
+		n.config.joinAddr = ""
 		n.enableReconnectWatcher()
 	default:
 		if n.repeatedRun {

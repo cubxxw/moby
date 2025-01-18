@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.22
+
 package libnetwork
 
 import (
@@ -5,14 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/etchosts"
 	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // SandboxOption is an option setter function type used to pass various options to
@@ -64,13 +71,6 @@ type hostsPathConfig struct {
 	hostsPath       string
 	originHostsPath string
 	extraHosts      []extraHost
-	parentUpdates   []parentUpdate
-}
-
-type parentUpdate struct {
-	cid  string
-	name string
-	ip   string
 }
 
 type extraHost struct {
@@ -127,11 +127,11 @@ func (sb *Sandbox) Labels() map[string]interface{} {
 }
 
 // Delete destroys this container after detaching it from all connected endpoints.
-func (sb *Sandbox) Delete() error {
-	return sb.delete(false)
+func (sb *Sandbox) Delete(ctx context.Context) error {
+	return sb.delete(ctx, false)
 }
 
-func (sb *Sandbox) delete(force bool) error {
+func (sb *Sandbox) delete(ctx context.Context, force bool) error {
 	sb.mu.Lock()
 	if sb.inDelete {
 		sb.mu.Unlock()
@@ -157,23 +157,23 @@ func (sb *Sandbox) delete(force bool) error {
 		if ep.endpointInGWNetwork() && !force {
 			continue
 		}
-		// Retain the sanbdox if we can't obtain the network from store.
+		// Retain the sandbox if we can't obtain the network from store.
 		if _, err := c.getNetworkFromStore(ep.getNetwork().ID()); err != nil {
-			if c.isDistributedControl() {
+			if !c.isSwarmNode() {
 				retain = true
 			}
-			log.G(context.TODO()).Warnf("Failed getting network for ep %s during sandbox %s delete: %v", ep.ID(), sb.ID(), err)
+			log.G(ctx).Warnf("Failed getting network for ep %s during sandbox %s delete: %v", ep.ID(), sb.ID(), err)
 			continue
 		}
 
 		if !force {
-			if err := ep.Leave(sb); err != nil {
-				log.G(context.TODO()).Warnf("Failed detaching sandbox %s from endpoint %s: %v\n", sb.ID(), ep.ID(), err)
+			if err := ep.Leave(context.WithoutCancel(ctx), sb); err != nil {
+				log.G(ctx).Warnf("Failed detaching sandbox %s from endpoint %s: %v\n", sb.ID(), ep.ID(), err)
 			}
 		}
 
-		if err := ep.Delete(force); err != nil {
-			log.G(context.TODO()).Warnf("Failed deleting endpoint %s: %v\n", ep.ID(), err)
+		if err := ep.Delete(context.WithoutCancel(ctx), force); err != nil {
+			log.G(ctx).Warnf("Failed deleting endpoint %s: %v\n", ep.ID(), err)
 		}
 	}
 
@@ -193,12 +193,12 @@ func (sb *Sandbox) delete(force bool) error {
 
 	if sb.osSbox != nil && !sb.config.useDefaultSandBox {
 		if err := sb.osSbox.Destroy(); err != nil {
-			log.G(context.TODO()).WithError(err).Warn("error destroying network sandbox")
+			log.G(ctx).WithError(err).Warn("error destroying network sandbox")
 		}
 	}
 
 	if err := sb.storeDelete(); err != nil {
-		log.G(context.TODO()).Warnf("Failed to delete sandbox %s from store: %v", sb.ID(), err)
+		log.G(ctx).Warnf("Failed to delete sandbox %s from store: %v", sb.ID(), err)
 	}
 
 	c.mu.Lock()
@@ -240,14 +240,14 @@ func (sb *Sandbox) Rename(name string) error {
 
 // Refresh leaves all the endpoints, resets and re-applies the options,
 // re-joins all the endpoints without destroying the osl sandbox
-func (sb *Sandbox) Refresh(options ...SandboxOption) error {
+func (sb *Sandbox) Refresh(ctx context.Context, options ...SandboxOption) error {
 	// Store connected endpoints
 	epList := sb.Endpoints()
 
 	// Detach from all endpoints
 	for _, ep := range epList {
-		if err := ep.Leave(sb); err != nil {
-			log.G(context.TODO()).Warnf("Failed detaching sandbox %s from endpoint %s: %v\n", sb.ID(), ep.ID(), err)
+		if err := ep.Leave(context.WithoutCancel(ctx), sb); err != nil {
+			log.G(ctx).Warnf("Failed detaching sandbox %s from endpoint %s: %v\n", sb.ID(), ep.ID(), err)
 		}
 	}
 
@@ -256,18 +256,27 @@ func (sb *Sandbox) Refresh(options ...SandboxOption) error {
 	sb.processOptions(options...)
 
 	// Setup discovery files
-	if err := sb.setupResolutionFiles(); err != nil {
+	if err := sb.setupResolutionFiles(ctx); err != nil {
 		return err
 	}
 
 	// Re-connect to all endpoints
 	for _, ep := range epList {
-		if err := ep.Join(sb); err != nil {
-			log.G(context.TODO()).Warnf("Failed attach sandbox %s to endpoint %s: %v\n", sb.ID(), ep.ID(), err)
+		if err := ep.Join(context.WithoutCancel(ctx), sb); err != nil {
+			log.G(ctx).Warnf("Failed attach sandbox %s to endpoint %s: %v\n", sb.ID(), ep.ID(), err)
 		}
 	}
 
 	return nil
+}
+
+func (sb *Sandbox) UpdateLabels(labels map[string]interface{}) {
+	if sb.config.generic == nil {
+		sb.config.generic = make(map[string]interface{}, len(labels))
+	}
+	for k, v := range labels {
+		sb.config.generic[k] = v
+	}
 }
 
 func (sb *Sandbox) MarshalJSON() ([]byte, error) {
@@ -331,7 +340,7 @@ func (sb *Sandbox) removeEndpointRaw(ep *Endpoint) {
 	}
 }
 
-func (sb *Sandbox) getEndpoint(id string) *Endpoint {
+func (sb *Sandbox) GetEndpoint(id string) *Endpoint {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
@@ -351,13 +360,13 @@ func (sb *Sandbox) HandleQueryResp(name string, ip net.IP) {
 	}
 }
 
-func (sb *Sandbox) ResolveIP(ip string) string {
+func (sb *Sandbox) ResolveIP(ctx context.Context, ip string) string {
 	var svc string
-	log.G(context.TODO()).Debugf("IP To resolve %v", ip)
+	log.G(ctx).Debugf("IP To resolve %v", ip)
 
 	for _, ep := range sb.Endpoints() {
 		n := ep.getNetwork()
-		svc = n.ResolveIP(ip)
+		svc = n.ResolveIP(ctx, ip)
 		if len(svc) != 0 {
 			return svc
 		}
@@ -368,64 +377,28 @@ func (sb *Sandbox) ResolveIP(ip string) string {
 
 // ResolveService returns all the backend details about the containers or hosts
 // backing a service. Its purpose is to satisfy an SRV query.
-func (sb *Sandbox) ResolveService(name string) ([]*net.SRV, []net.IP) {
-	srv := []*net.SRV{}
-	ip := []net.IP{}
-
-	log.G(context.TODO()).Debugf("Service name To resolve: %v", name)
+func (sb *Sandbox) ResolveService(ctx context.Context, name string) ([]*net.SRV, []net.IP) {
+	log.G(ctx).Debugf("Service name To resolve: %v", name)
 
 	// There are DNS implementations that allow SRV queries for names not in
 	// the format defined by RFC 2782. Hence specific validations checks are
 	// not done
-	parts := strings.Split(name, ".")
-	if len(parts) < 3 {
+	if parts := strings.SplitN(name, ".", 3); len(parts) < 3 {
 		return nil, nil
 	}
 
 	for _, ep := range sb.Endpoints() {
 		n := ep.getNetwork()
 
-		srv, ip = n.ResolveService(name)
+		srv, ip := n.ResolveService(ctx, name)
 		if len(srv) > 0 {
-			break
+			return srv, ip
 		}
 	}
-	return srv, ip
+	return nil, nil
 }
 
-func getDynamicNwEndpoints(epList []*Endpoint) []*Endpoint {
-	eps := []*Endpoint{}
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if n.dynamic && !n.ingress {
-			eps = append(eps, ep)
-		}
-	}
-	return eps
-}
-
-func getIngressNwEndpoint(epList []*Endpoint) *Endpoint {
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if n.ingress {
-			return ep
-		}
-	}
-	return nil
-}
-
-func getLocalNwEndpoints(epList []*Endpoint) []*Endpoint {
-	eps := []*Endpoint{}
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if !n.dynamic && !n.ingress {
-			eps = append(eps, ep)
-		}
-	}
-	return eps
-}
-
-func (sb *Sandbox) ResolveName(name string, ipType int) ([]net.IP, bool) {
+func (sb *Sandbox) ResolveName(ctx context.Context, name string, ipType int) ([]net.IP, bool) {
 	// Embedded server owns the docker network domain. Resolution should work
 	// for both container_name and container_name.network_name
 	// We allow '.' in service name and network name. For a name a.b.c.d the
@@ -435,7 +408,7 @@ func (sb *Sandbox) ResolveName(name string, ipType int) ([]net.IP, bool) {
 	// {a.b in network c.d},
 	// {a in network b.c.d},
 
-	log.G(context.TODO()).Debugf("Name To resolve: %v", name)
+	log.G(ctx).Debugf("Name To resolve: %v", name)
 	name = strings.TrimSuffix(name, ".")
 	reqName := []string{name}
 	networkName := []string{""}
@@ -456,87 +429,91 @@ func (sb *Sandbox) ResolveName(name string, ipType int) ([]net.IP, bool) {
 
 	epList := sb.Endpoints()
 
-	// In swarm mode services with exposed ports are connected to user overlay
-	// network, ingress network and docker_gwbridge network. Name resolution
+	// In swarm mode, services with exposed ports are connected to user overlay
+	// network, ingress network and docker_gwbridge networks. Name resolution
 	// should prioritize returning the VIP/IPs on user overlay network.
-	newList := []*Endpoint{}
-	if !sb.controller.isDistributedControl() {
-		newList = append(newList, getDynamicNwEndpoints(epList)...)
-		ingressEP := getIngressNwEndpoint(epList)
-		if ingressEP != nil {
-			newList = append(newList, ingressEP)
-		}
-		newList = append(newList, getLocalNwEndpoints(epList)...)
-		epList = newList
+	//
+	// Re-order the endpoints based on the network-type they're attached to;
+	//
+	//  1. dynamic networks (user overlay networks)
+	//  2. ingress network(s)
+	//  3. local networks ("docker_gwbridge")
+	if sb.controller.isSwarmNode() {
+		sort.Sort(ByNetworkType(epList))
 	}
 
 	for i := 0; i < len(reqName); i++ {
 		// First check for local container alias
-		ip, ipv6Miss := sb.resolveName(reqName[i], networkName[i], epList, true, ipType)
-		if ip != nil {
-			return ip, false
+		if ip, ok := sb.resolveName(ctx, reqName[i], networkName[i], epList, true, ipType); ok {
+			return ip, true
 		}
-		if ipv6Miss {
-			return ip, ipv6Miss
-		}
-
 		// Resolve the actual container name
-		ip, ipv6Miss = sb.resolveName(reqName[i], networkName[i], epList, false, ipType)
-		if ip != nil {
-			return ip, false
-		}
-		if ipv6Miss {
-			return ip, ipv6Miss
+		if ip, ok := sb.resolveName(ctx, reqName[i], networkName[i], epList, false, ipType); ok {
+			return ip, true
 		}
 	}
 	return nil, false
 }
 
-func (sb *Sandbox) resolveName(req string, networkName string, epList []*Endpoint, alias bool, ipType int) ([]net.IP, bool) {
-	var ipv6Miss bool
+func (sb *Sandbox) resolveName(ctx context.Context, nameOrAlias string, networkName string, epList []*Endpoint, lookupAlias bool, ipType int) ([]net.IP, bool) {
+	ctx, span := otel.Tracer("").Start(ctx, "Sandbox.resolveName", trace.WithAttributes(
+		attribute.String("libnet.resolver.name-or-alias", nameOrAlias),
+		attribute.String("libnet.network.name", networkName),
+		attribute.Bool("libnet.resolver.alias-lookup", lookupAlias),
+		attribute.Int("libnet.resolver.ip-family", ipType)))
+	defer span.End()
 
 	for _, ep := range epList {
-		name := req
-		n := ep.getNetwork()
-
-		if networkName != "" && networkName != n.Name() {
+		if lookupAlias && len(ep.aliases) == 0 {
 			continue
 		}
 
-		if alias {
-			if ep.aliases == nil {
-				continue
-			}
+		nw := ep.getNetwork()
+		if networkName != "" && networkName != nw.Name() {
+			continue
+		}
 
-			var ok bool
+		name := nameOrAlias
+		if lookupAlias {
 			ep.mu.Lock()
-			name, ok = ep.aliases[req]
+			alias, ok := ep.aliases[nameOrAlias]
 			ep.mu.Unlock()
 			if !ok {
 				continue
 			}
+			name = alias
 		} else {
 			// If it is a regular lookup and if the requested name is an alias
 			// don't perform a svc lookup for this endpoint.
 			ep.mu.Lock()
-			if _, ok := ep.aliases[req]; ok {
-				ep.mu.Unlock()
+			_, ok := ep.aliases[nameOrAlias]
+			ep.mu.Unlock()
+			if ok {
 				continue
 			}
-			ep.mu.Unlock()
 		}
 
-		ip, miss := n.ResolveName(name, ipType)
-
-		if ip != nil {
-			return ip, false
-		}
-
-		if miss {
-			ipv6Miss = miss
+		ip, ok := nw.ResolveName(ctx, name, ipType)
+		if ok {
+			return ip, true
 		}
 	}
-	return nil, ipv6Miss
+	return nil, false
+}
+
+// hasExternalAccess returns true if any of sb's Endpoints appear to have external
+// network access.
+func (sb *Sandbox) hasExternalAccess() bool {
+	for _, ep := range sb.Endpoints() {
+		nw := ep.getNetwork()
+		if nw.Internal() || nw.Type() == "null" || nw.Type() == "host" {
+			continue
+		}
+		if v4, v6 := ep.hasGatewayOrDefaultRoute(); v4 || v6 {
+			return true
+		}
+	}
+	return false
 }
 
 // EnableService makes a managed container's service available by adding the
@@ -586,7 +563,7 @@ func (sb *Sandbox) DisableService() (err error) {
 }
 
 func (sb *Sandbox) clearNetworkResources(origEp *Endpoint) error {
-	ep := sb.getEndpoint(origEp.id)
+	ep := sb.GetEndpoint(origEp.id)
 	if ep == nil {
 		return fmt.Errorf("could not find the sandbox endpoint data for endpoint %s",
 			origEp.id)
@@ -611,41 +588,22 @@ func (sb *Sandbox) clearNetworkResources(origEp *Endpoint) error {
 		return nil
 	}
 
-	var (
-		gwepBefore, gwepAfter *Endpoint
-		index                 = -1
-	)
-	for i, e := range sb.endpoints {
-		if e == ep {
-			index = i
-		}
-		if len(e.Gateway()) > 0 && gwepBefore == nil {
-			gwepBefore = e
-		}
-		if index != -1 && gwepBefore != nil {
-			break
-		}
-	}
-
-	if index == -1 {
+	if !slices.Contains(sb.endpoints, ep) {
 		log.G(context.TODO()).Warnf("Endpoint %s has already been deleted", ep.Name())
 		sb.mu.Unlock()
 		return nil
 	}
 
+	gwepBefore4, gwepBefore6 := selectGatewayEndpoint(sb.endpoints)
 	sb.removeEndpointRaw(ep)
-	for _, e := range sb.endpoints {
-		if len(e.Gateway()) > 0 {
-			gwepAfter = e
-			break
-		}
-	}
+	gwepAfter4, gwepAfter6 := selectGatewayEndpoint(sb.endpoints)
 	delete(sb.epPriority, ep.ID())
+
 	sb.mu.Unlock()
 
-	if gwepAfter != nil && gwepBefore != gwepAfter {
-		if err := sb.updateGateway(gwepAfter); err != nil {
-			return err
+	if (gwepAfter4 != nil && gwepBefore4 != gwepAfter4) || (gwepAfter6 != nil && gwepBefore6 != gwepAfter6) {
+		if err := sb.updateGateway(gwepAfter4, gwepAfter6); err != nil {
+			return fmt.Errorf("updating gateway endpoint: %w", err)
 		}
 	}
 
@@ -654,7 +612,7 @@ func (sb *Sandbox) clearNetworkResources(origEp *Endpoint) error {
 	// not bother updating the store. The sandbox object will be
 	// deleted anyway
 	if !inDelete {
-		return sb.storeUpdate()
+		return sb.storeUpdate(context.TODO())
 	}
 
 	return nil
@@ -690,34 +648,35 @@ func (sb *Sandbox) joinLeaveEnd() {
 	}
 }
 
+// Less defines an ordering over endpoints, with better candidates for the default
+// gateway sorted first.
+//
 // <=> Returns true if a < b, false if a > b and advances to next level if a == b
 // epi.prio <=> epj.prio           # 2 < 1
 // epi.gw <=> epj.gw               # non-gw < gw
 // epi.internal <=> epj.internal   # non-internal < internal
-// epi.joininfo <=> epj.joininfo   # ipv6 < ipv4
+// epi.hasGw <=> epj.hasGw         # (gw4 and gw6) < (gw4 or gw6) < (no gw)
 // epi.name <=> epj.name           # bar < foo
 func (epi *Endpoint) Less(epj *Endpoint) bool {
-	var prioi, prioj int
-
 	sbi, _ := epi.getSandbox()
 	sbj, _ := epj.getSandbox()
 
 	// Prio defaults to 0
+	var prioi, prioj int
 	if sbi != nil {
 		prioi = sbi.epPriority[epi.ID()]
 	}
 	if sbj != nil {
 		prioj = sbj.epPriority[epj.ID()]
 	}
-
 	if prioi != prioj {
 		return prioi > prioj
 	}
 
-	gwi := epi.endpointInGWNetwork()
-	gwj := epj.endpointInGWNetwork()
-	if gwi != gwj {
-		return gwj
+	gwNeti := epi.endpointInGWNetwork()
+	gwNetj := epj.endpointInGWNetwork()
+	if gwNeti != gwNetj {
+		return gwNetj
 	}
 
 	inti := epi.getNetwork().Internal()
@@ -726,28 +685,20 @@ func (epi *Endpoint) Less(epj *Endpoint) bool {
 		return intj
 	}
 
-	jii := 0
-	if epi.joinInfo != nil {
-		if epi.joinInfo.gw != nil {
-			jii = jii + 1
+	gwCount := func(ep *Endpoint) int {
+		gw4, gw6 := ep.hasGatewayOrDefaultRoute()
+		if gw4 && gw6 {
+			return 2
 		}
-		if epi.joinInfo.gw6 != nil {
-			jii = jii + 2
+		if gw4 || gw6 {
+			return 1
 		}
+		return 0
 	}
-
-	jij := 0
-	if epj.joinInfo != nil {
-		if epj.joinInfo.gw != nil {
-			jij = jij + 1
-		}
-		if epj.joinInfo.gw6 != nil {
-			jij = jij + 2
-		}
-	}
-
-	if jii != jij {
-		return jii > jij
+	gwCounti := gwCount(epi)
+	gwCountj := gwCount(epj)
+	if gwCounti != gwCountj {
+		return gwCounti > gwCountj
 	}
 
 	return epi.network.Name() < epj.network.Name()

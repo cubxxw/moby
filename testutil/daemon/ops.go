@@ -19,6 +19,12 @@ func WithContainerdSocket(socket string) Option {
 	}
 }
 
+func WithUserNsRemap(remap string) Option {
+	return func(d *Daemon) {
+		d.usernsRemap = remap
+	}
+}
+
 // WithDefaultCgroupNamespaceMode sets the default cgroup namespace mode for the daemon
 func WithDefaultCgroupNamespaceMode(mode string) Option {
 	return func(d *Daemon) {
@@ -127,5 +133,13 @@ func WithOOMScoreAdjust(score int) Option {
 func WithEnvVars(vars ...string) Option {
 	return func(d *Daemon) {
 		d.extraEnv = append(d.extraEnv, vars...)
+	}
+}
+
+// WithResolvConf allows a test to provide content for a resolv.conf file to be used
+// as the basis for resolv.conf in the container, instead of the host's /etc/resolv.conf.
+func WithResolvConf(content string) Option {
+	return func(d *Daemon) {
+		d.resolvConfContent = content
 	}
 }

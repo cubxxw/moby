@@ -23,6 +23,7 @@ func TestDiff(t *testing.T) {
 		{Kind: containertypes.ChangeAdd, Path: "/foo/bar"},
 	}
 
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
 	items, err := apiClient.ContainerDiff(ctx, cID)
 	assert.NilError(t, err)
 	assert.DeepEqual(t, expected, items)
@@ -37,7 +38,7 @@ func TestDiffStoppedContainer(t *testing.T) {
 
 	cID := container.Run(ctx, t, apiClient, container.WithCmd("sh", "-c", `mkdir /foo; echo xyzzy > /foo/bar`))
 
-	poll.WaitOn(t, container.IsInState(ctx, apiClient, cID, "exited"), poll.WithDelay(100*time.Millisecond), poll.WithTimeout(60*time.Second))
+	poll.WaitOn(t, container.IsInState(ctx, apiClient, cID, "exited"), poll.WithTimeout(60*time.Second))
 
 	expected := []containertypes.FilesystemChange{
 		{Kind: containertypes.ChangeAdd, Path: "/foo"},

@@ -2,16 +2,14 @@ package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"os"
-	"sort"
 	"testing"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/libnetwork"
 	"github.com/docker/docker/registry"
 	"gotest.tools/v3/assert"
-	is "gotest.tools/v3/assert/cmp"
 )
 
 // muteLogs suppresses logs that are generated during the test
@@ -60,60 +58,6 @@ func TestDaemonReloadLabels(t *testing.T) {
 	if label != "foo:baz" {
 		t.Fatalf("Expected daemon label `foo:baz`, got %s", label)
 	}
-}
-
-func TestDaemonReloadAllowNondistributableArtifacts(t *testing.T) {
-	daemon := newDaemonForReloadT(t, &config.Config{})
-	muteLogs(t)
-
-	var err error
-	// Initialize daemon with some registries.
-	daemon.registryService, err = registry.NewService(registry.ServiceOptions{
-		AllowNondistributableArtifacts: []string{
-			"127.0.0.0/8",
-			"10.10.1.11:5000",
-			"10.10.1.22:5000", // This will be removed during reload.
-			"docker1.com",
-			"docker2.com", // This will be removed during reload.
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	registries := []string{
-		"127.0.0.0/8",
-		"10.10.1.11:5000",
-		"10.10.1.33:5000", // This will be added during reload.
-		"docker1.com",
-		"docker3.com", // This will be added during reload.
-	}
-
-	newConfig := &config.Config{
-		CommonConfig: config.CommonConfig{
-			ServiceOptions: registry.ServiceOptions{
-				AllowNondistributableArtifacts: registries,
-			},
-			ValuesSet: map[string]interface{}{
-				"allow-nondistributable-artifacts": registries,
-			},
-		},
-	}
-
-	if err := daemon.Reload(newConfig); err != nil {
-		t.Fatal(err)
-	}
-
-	var actual []string
-	serviceConfig := daemon.registryService.ServiceConfig()
-	for _, value := range serviceConfig.AllowNondistributableArtifactsCIDRs {
-		actual = append(actual, value.String())
-	}
-	actual = append(actual, serviceConfig.AllowNondistributableArtifactsHostnames...)
-
-	sort.Strings(registries)
-	sort.Strings(actual)
-	assert.Check(t, is.DeepEqual(registries, actual))
 }
 
 func TestDaemonReloadMirrors(t *testing.T) {
@@ -225,6 +169,7 @@ func TestDaemonReloadInsecureRegistries(t *testing.T) {
 	// initialize daemon with existing insecure registries: "127.0.0.0/8", "10.10.1.11:5000", "10.10.1.22:5000"
 	daemon.registryService, err = registry.NewService(registry.ServiceOptions{
 		InsecureRegistries: []string{
+			"::1/128",
 			"127.0.0.0/8",
 			"10.10.1.11:5000",
 			"10.10.1.22:5000", // this will be removed when reloading
@@ -237,6 +182,7 @@ func TestDaemonReloadInsecureRegistries(t *testing.T) {
 	}
 
 	insecureRegistries := []string{
+		"::1/128",             // this will be kept
 		"127.0.0.0/8",         // this will be kept
 		"10.10.1.11:5000",     // this will be kept
 		"10.10.1.33:5000",     // this will be newly added
@@ -360,7 +306,7 @@ func TestDaemonReloadNetworkDiagnosticPort(t *testing.T) {
 		},
 	}
 
-	netOptions, err := daemon.networkOptions(&config.Config{}, nil, nil)
+	netOptions, err := daemon.networkOptions(&config.Config{CommonConfig: config.CommonConfig{Root: t.TempDir()}}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

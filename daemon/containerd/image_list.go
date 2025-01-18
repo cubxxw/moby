@@ -3,32 +3,39 @@ package containerd
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/labels"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/labels"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/filters"
 	imagetypes "github.com/docker/docker/api/types/image"
 	timetypes "github.com/docker/docker/api/types/time"
-	"github.com/docker/docker/container"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/image"
+	"github.com/moby/buildkit/util/attestation"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 )
 
 // Subset of ocispec.Image that only contains Labels
 type configLabels struct {
+	// Created is the combined date and time at which the image was created, formatted as defined by RFC 3339, section 5.6.
+	Created *time.Time `json:"created,omitempty"`
+
 	Config struct {
 		Labels map[string]string `json:"Labels,omitempty"`
 	} `json:"config,omitempty"`
@@ -46,7 +53,7 @@ var acceptedImageFilterTags = map[string]bool{
 
 // byCreated is a temporary type used to sort a list of images by creation
 // time.
-type byCreated []*types.ImageSummary
+type byCreated []*imagetypes.Summary
 
 func (r byCreated) Len() int           { return len(r) }
 func (r byCreated) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
@@ -54,10 +61,9 @@ func (r byCreated) Less(i, j int) bool { return r[i].Created < r[j].Created }
 
 // Images returns a filtered list of images.
 //
-// TODO(thaJeztah): implement opts.ContainerCount (used for docker system df); see https://github.com/moby/moby/issues/43853
 // TODO(thaJeztah): verify behavior of `RepoDigests` and `RepoTags` for images without (untagged) or multiple tags; see https://github.com/moby/moby/issues/43861
 // TODO(thaJeztah): verify "Size" vs "VirtualSize" in images; see https://github.com/moby/moby/issues/43862
-func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) ([]*types.ImageSummary, error) {
+func (i *ImageService) Images(ctx context.Context, opts imagetypes.ListOptions) ([]*imagetypes.Summary, error) {
 	if err := opts.Filters.Validate(acceptedImageFilterTags); err != nil {
 		return nil, err
 	}
@@ -67,13 +73,13 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 		return nil, err
 	}
 
-	imgs, err := i.client.ImageService().List(ctx)
+	imgs, err := i.images.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	// TODO(thaJeztah): do we need to take multiple snapshotters into account? See https://github.com/moby/moby/issues/45273
-	snapshotter := i.client.SnapshotService(i.snapshotter)
+	snapshotter := i.snapshotterService(i.snapshotter)
 	sizeCache := make(map[digest.Digest]int64)
 	snapshotSizeFn := func(d digest.Digest) (int64, error) {
 		if s, ok := sizeCache[d]; ok {
@@ -87,19 +93,7 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 		return usage.Size, nil
 	}
 
-	var (
-		allContainers []*container.Container
-		summaries     = make([]*types.ImageSummary, 0, len(imgs))
-		root          []*[]digest.Digest
-		layers        map[digest.Digest]int
-	)
-	if opts.SharedSize {
-		root = make([]*[]digest.Digest, 0, len(imgs))
-		layers = make(map[digest.Digest]int)
-	}
-
-	contentStore := i.client.ContentStore()
-	uniqueImages := map[digest.Digest]images.Image{}
+	uniqueImages := map[digest.Digest]c8dimages.Image{}
 	tagsByDigest := map[digest.Digest][]string{}
 	intermediateImages := map[digest.Digest]struct{}{}
 
@@ -119,6 +113,9 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 			}
 		}
 	}
+
+	// TODO: Allow platform override?
+	platformMatcher := matchAllWithPreference(platforms.Default())
 
 	for _, img := range imgs {
 		isDangling := isDanglingImage(img)
@@ -147,50 +144,47 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 		tagsByDigest[dgst] = append(tagsByDigest[dgst], reference.FamiliarString(ref))
 	}
 
-	if opts.ContainerCount {
-		allContainers = i.containers.List()
+	resultsMut := sync.Mutex{}
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(runtime.NumCPU() * 2)
+
+	var (
+		summaries = make([]*imagetypes.Summary, 0, len(imgs))
+		root      []*[]digest.Digest
+		layers    map[digest.Digest]int
+	)
+	if opts.SharedSize {
+		root = make([]*[]digest.Digest, 0, len(imgs))
+		layers = make(map[digest.Digest]int)
 	}
 
 	for _, img := range uniqueImages {
-		err := i.walkImageManifests(ctx, img, func(img *ImageManifest) error {
-			if isPseudo, err := img.IsPseudoImage(ctx); isPseudo || err != nil {
-				return err
-			}
-
-			available, err := img.CheckContentAvailable(ctx)
-			if err != nil {
-				log.G(ctx).WithFields(log.Fields{
-					"error":    err,
-					"manifest": img.Target(),
-					"image":    img.Name(),
-				}).Warn("checking availability of platform specific manifest failed")
-				return nil
-			}
-
-			if !available {
-				return nil
-			}
-
-			image, chainIDs, err := i.singlePlatformImage(ctx, contentStore, tagsByDigest[img.RealTarget.Digest], img, opts, allContainers)
+		eg.Go(func() error {
+			image, allChainsIDs, err := i.imageSummary(egCtx, img, platformMatcher, opts, tagsByDigest)
 			if err != nil {
 				return err
 			}
+			// No error, but image should be skipped.
+			if image == nil {
+				return nil
+			}
 
+			resultsMut.Lock()
 			summaries = append(summaries, image)
 
 			if opts.SharedSize {
-				root = append(root, &chainIDs)
-				for _, id := range chainIDs {
+				root = append(root, &allChainsIDs)
+				for _, id := range allChainsIDs {
 					layers[id] = layers[id] + 1
 				}
 			}
-
+			resultsMut.Unlock()
 			return nil
 		})
-		if err != nil {
-			return nil, err
-		}
+	}
 
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
 
 	if opts.SharedSize {
@@ -208,36 +202,245 @@ func (i *ImageService) Images(ctx context.Context, opts types.ImageListOptions) 
 	return summaries, nil
 }
 
-func (i *ImageService) singlePlatformImage(ctx context.Context, contentStore content.Store, repoTags []string, imageManifest *ImageManifest, opts types.ImageListOptions, allContainers []*container.Container) (*types.ImageSummary, []digest.Digest, error) {
-	diffIDs, err := imageManifest.RootFS(ctx)
+// imageSummary returns a summary of the image, including the total size of the image and all its platforms.
+// It also returns the chainIDs of all the layers of the image (including all its platforms).
+// All return values will be nil if the image should be skipped.
+func (i *ImageService) imageSummary(ctx context.Context, img c8dimages.Image, platformMatcher platforms.MatchComparer,
+	opts imagetypes.ListOptions, tagsByDigest map[digest.Digest][]string,
+) (_ *imagetypes.Summary, allChainIDs []digest.Digest, _ error) {
+	var manifestSummaries []imagetypes.ManifestSummary
+
+	// Total size of the image including all its platform
+	var totalSize int64
+
+	// ChainIDs of all the layers of the image (including all its platform)
+	var allChainsIDs []digest.Digest
+
+	// Count of containers using the image
+	var containersCount int64
+
+	// Single platform image manifest preferred by the platform matcher
+	var best *ImageManifest
+	var bestPlatform ocispec.Platform
+
+	err := i.walkReachableImageManifests(ctx, img, func(img *ImageManifest) error {
+		target := img.Target()
+
+		logger := log.G(ctx).WithFields(log.Fields{
+			"image":    img.Name(),
+			"digest":   target.Digest,
+			"manifest": target,
+		})
+
+		available, err := img.CheckContentAvailable(ctx)
+		if err != nil && !errdefs.IsNotFound(err) {
+			logger.WithError(err).Warn("checking availability of platform specific manifest failed")
+			return nil
+		}
+
+		mfstSummary := imagetypes.ManifestSummary{
+			ID:         target.Digest.String(),
+			Available:  available,
+			Descriptor: target,
+			Kind:       imagetypes.ManifestKindUnknown,
+		}
+
+		if opts.Manifests {
+			defer func() {
+				manifestSummaries = append(manifestSummaries, mfstSummary)
+			}()
+		}
+
+		contentSize, err := img.Size(ctx)
+		if err != nil {
+			if !cerrdefs.IsNotFound(err) {
+				logger.WithError(err).Warn("failed to determine size")
+			}
+		} else {
+			mfstSummary.Size.Content = contentSize
+			totalSize += contentSize
+			mfstSummary.Size.Total += contentSize
+		}
+
+		isPseudo, err := img.IsPseudoImage(ctx)
+
+		// Ignore not found error as it's expected in case where the image is
+		// not fully available. Otherwise, just continue to the next manifest,
+		// so we don't error out the whole list in case the error is related to
+		// the content itself (e.g. corrupted data) or just manifest kind that
+		// we don't know about (yet).
+		if err != nil && !errdefs.IsNotFound(err) {
+			logger.WithError(err).Debug("pseudo image check failed")
+			return nil
+		}
+
+		logger = logger.WithField("isPseudo", isPseudo)
+		if isPseudo {
+			if img.IsAttestation() {
+				if s := target.Annotations[attestation.DockerAnnotationReferenceDigest]; s != "" {
+					dgst, err := digest.Parse(s)
+					if err != nil {
+						logger.WithError(err).Warn("failed to parse attestation digest")
+						return nil
+					}
+
+					mfstSummary.Kind = imagetypes.ManifestKindAttestation
+					mfstSummary.AttestationData = &imagetypes.AttestationProperties{For: dgst}
+				}
+			}
+
+			return nil
+		}
+
+		mfstSummary.Kind = imagetypes.ManifestKindImage
+		mfstSummary.ImageData = &imagetypes.ImageProperties{}
+		if target.Platform != nil {
+			mfstSummary.ImageData.Platform = *target.Platform
+		}
+
+		if !available {
+			return nil
+		}
+
+		var dockerImage dockerspec.DockerOCIImage
+		if err := img.ReadConfig(ctx, &dockerImage); err != nil {
+			logger.WithError(err).Warn("failed to read image config")
+			return nil
+		}
+
+		if target.Platform == nil {
+			mfstSummary.ImageData.Platform = dockerImage.Platform
+		}
+
+		chainIDs := identity.ChainIDs(dockerImage.RootFS.DiffIDs)
+
+		unpackedSize, imgContentSize, err := i.singlePlatformSize(ctx, img)
+		if err != nil {
+			logger.WithError(err).Warn("failed to determine platform specific size")
+			return nil
+		}
+
+		// If the image-specific content size calculation produces different result
+		// than the "generic" one, adjust the total size with the difference.
+		// Note: This shouldn't happen unless the implementation changes or the
+		// content is added/removed during the list operation.
+		if contentSize != imgContentSize {
+			logger.WithFields(log.Fields{
+				"contentSize":    contentSize,
+				"imgContentSize": imgContentSize,
+			}).Warn("content size calculation mismatch")
+
+			mfstSummary.Size.Content = contentSize
+
+			// contentSize was already added to total, adjust it by the difference
+			// between the newly calculated size and the old size.
+			d := imgContentSize - contentSize
+			totalSize += d
+			mfstSummary.Size.Total += d
+		}
+
+		mfstSummary.ImageData.Size.Unpacked = unpackedSize
+		mfstSummary.Size.Total += unpackedSize
+		totalSize += unpackedSize
+
+		allChainsIDs = append(allChainsIDs, chainIDs...)
+
+		for _, c := range i.containers.List() {
+			if c.ImageManifest != nil && c.ImageManifest.Digest == target.Digest {
+				mfstSummary.ImageData.Containers = append(mfstSummary.ImageData.Containers, c.ID)
+				containersCount++
+			}
+		}
+
+		platform := mfstSummary.ImageData.Platform
+		// Filter out platforms that don't match the requested platform.  Do it
+		// after the size, container count and chainIDs are summed up to have
+		// the single combined entry still represent the whole multi-platform
+		// image.
+		if !platformMatcher.Match(platform) {
+			return nil
+		}
+
+		if best == nil || platformMatcher.Less(platform, bestPlatform) {
+			best = img
+			bestPlatform = platform
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, nil, errors.Wrapf(err, "failed to get rootfs of image %s", imageManifest.Name())
+		if errors.Is(err, errNotManifestOrIndex) {
+			log.G(ctx).WithFields(log.Fields{
+				"error": err,
+				"image": img.Name,
+			}).Warn("unexpected image target (neither a manifest nor index)")
+		} else {
+			return nil, nil, err
+		}
 	}
 
+	if best == nil {
+		target := img.Target
+		return &imagetypes.Summary{
+			ID:          target.Digest.String(),
+			RepoDigests: []string{target.Digest.String()},
+			RepoTags:    tagsByDigest[target.Digest],
+			Size:        totalSize,
+			// -1 indicates that the value has not been set (avoids ambiguity
+			// between 0 (default) and "not set". We cannot use a pointer (nil)
+			// for this, as the JSON representation uses "omitempty", which would
+			// consider both "0" and "nil" to be "empty".
+			SharedSize: -1,
+			Containers: -1,
+			Descriptor: &target,
+		}, nil, nil
+	}
+
+	image, err := i.singlePlatformImage(ctx, i.content, tagsByDigest[best.RealTarget.Digest], best)
+	if err != nil {
+		return nil, nil, err
+	}
+	image.Size = totalSize
+	image.Manifests = manifestSummaries
+	target := img.Target
+	image.Descriptor = &target
+
+	if opts.ContainerCount {
+		image.Containers = containersCount
+	}
+	return image, allChainsIDs, nil
+}
+
+func (i *ImageService) singlePlatformSize(ctx context.Context, imgMfst *ImageManifest) (unpackedSize int64, contentSize int64, _ error) {
 	// TODO(thaJeztah): do we need to take multiple snapshotters into account? See https://github.com/moby/moby/issues/45273
-	snapshotter := i.client.SnapshotService(i.snapshotter)
+	snapshotter := i.snapshotterService(i.snapshotter)
+
+	diffIDs, err := imgMfst.RootFS(ctx)
+	if err != nil {
+		return -1, -1, errors.Wrapf(err, "failed to get rootfs of image %s", imgMfst.Name())
+	}
 
 	imageSnapshotID := identity.ChainID(diffIDs).String()
 	unpackedUsage, err := calculateSnapshotTotalUsage(ctx, snapshotter, imageSnapshotID)
 	if err != nil {
 		if !cerrdefs.IsNotFound(err) {
 			log.G(ctx).WithError(err).WithFields(log.Fields{
-				"image":      imageManifest.Name(),
+				"image":      imgMfst.Name(),
 				"snapshotID": imageSnapshotID,
 			}).Warn("failed to calculate unpacked size of image")
 		}
 		unpackedUsage = snapshots.Usage{Size: 0}
 	}
 
-	contentSize, err := imageManifest.Size(ctx)
+	contentSize, err = imgMfst.Size(ctx)
 	if err != nil {
-		return nil, nil, err
+		return -1, -1, err
 	}
 
-	// totalSize is the size of the image's packed layers and snapshots
-	// (unpacked layers) combined.
-	totalSize := contentSize + unpackedUsage.Size
+	return unpackedUsage.Size, contentSize, nil
+}
 
+func (i *ImageService) singlePlatformImage(ctx context.Context, contentStore content.Store, repoTags []string, imageManifest *ImageManifest) (*imagetypes.Summary, error) {
 	var repoDigests []string
 	rawImg := imageManifest.Metadata()
 	target := rawImg.Target.Digest
@@ -263,23 +466,31 @@ func (i *ImageService) singlePlatformImage(ctx context.Context, contentStore con
 		if err != nil {
 			logger.WithError(err).Error("failed to create digested reference")
 		} else {
-			repoDigests = append(repoDigests, digested.String())
+			repoDigests = append(repoDigests, reference.FamiliarString(digested))
 		}
 	}
 
 	cfgDesc, err := imageManifest.Image.Config(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var cfg configLabels
-	if err := readConfig(ctx, contentStore, cfgDesc, &cfg); err != nil {
-		return nil, nil, err
+	if err := readJSON(ctx, contentStore, cfgDesc, &cfg); err != nil {
+		return nil, err
 	}
 
-	summary := &types.ImageSummary{
-		ParentID:    "",
+	unpackedSize, contentSize, err := i.singlePlatformSize(ctx, imageManifest)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to calculate size of image %s", imageManifest.Name())
+	}
+
+	// totalSize is the size of the image's packed layers and snapshots
+	// (unpacked layers) combined.
+	totalSize := contentSize + unpackedSize
+
+	summary := &imagetypes.Summary{
+		ParentID:    rawImg.Labels[imageLabelClassicBuilderParent],
 		ID:          target.String(),
-		Created:     rawImg.CreatedAt.Unix(),
 		RepoDigests: repoDigests,
 		RepoTags:    repoTags,
 		Size:        totalSize,
@@ -291,22 +502,14 @@ func (i *ImageService) singlePlatformImage(ctx context.Context, contentStore con
 		SharedSize: -1,
 		Containers: -1,
 	}
-
-	if opts.ContainerCount {
-		// Get container count
-		var containers int64
-		for _, c := range allContainers {
-			if c.ImageID == image.ID(target.String()) {
-				containers++
-			}
-		}
-		summary.Containers = containers
+	if cfg.Created != nil {
+		summary.Created = cfg.Created.Unix()
 	}
 
-	return summary, identity.ChainIDs(diffIDs), nil
+	return summary, nil
 }
 
-type imageFilterFunc func(image images.Image) bool
+type imageFilterFunc func(image c8dimages.Image) bool
 
 // setupFilters constructs an imageFilterFunc from the given imageFilters.
 //
@@ -315,13 +518,13 @@ type imageFilterFunc func(image images.Image) bool
 func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Args) (filterFunc imageFilterFunc, outErr error) {
 	var fltrs []imageFilterFunc
 	err := imageFilters.WalkValues("before", func(value string) error {
-		img, err := i.GetImage(ctx, value, imagetypes.GetImageOpts{})
+		img, err := i.GetImage(ctx, value, backend.GetImageOpts{})
 		if err != nil {
 			return err
 		}
 		if img != nil && img.Created != nil {
-			fltrs = append(fltrs, func(candidate images.Image) bool {
-				cand, err := i.GetImage(ctx, candidate.Name, imagetypes.GetImageOpts{})
+			fltrs = append(fltrs, func(candidate c8dimages.Image) bool {
+				cand, err := i.GetImage(ctx, candidate.Name, backend.GetImageOpts{})
 				if err != nil {
 					return false
 				}
@@ -335,13 +538,13 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 	}
 
 	err = imageFilters.WalkValues("since", func(value string) error {
-		img, err := i.GetImage(ctx, value, imagetypes.GetImageOpts{})
+		img, err := i.GetImage(ctx, value, backend.GetImageOpts{})
 		if err != nil {
 			return err
 		}
 		if img != nil && img.Created != nil {
-			fltrs = append(fltrs, func(candidate images.Image) bool {
-				cand, err := i.GetImage(ctx, candidate.Name, imagetypes.GetImageOpts{})
+			fltrs = append(fltrs, func(candidate c8dimages.Image) bool {
+				cand, err := i.GetImage(ctx, candidate.Name, backend.GetImageOpts{})
 				if err != nil {
 					return false
 				}
@@ -365,7 +568,7 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 		}
 		until := time.Unix(seconds, nanoseconds)
 
-		fltrs = append(fltrs, func(image images.Image) bool {
+		fltrs = append(fltrs, func(image c8dimages.Image) bool {
 			created := image.CreatedAt
 			return created.Before(until)
 		})
@@ -375,7 +578,7 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 		return nil, err
 	}
 
-	labelFn, err := setupLabelFilter(i.client.ContentStore(), imageFilters)
+	labelFn, err := setupLabelFilter(ctx, i.content, imageFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -388,13 +591,13 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 		if err != nil {
 			return nil, err
 		}
-		fltrs = append(fltrs, func(image images.Image) bool {
+		fltrs = append(fltrs, func(image c8dimages.Image) bool {
 			return danglingValue == isDanglingImage(image)
 		})
 	}
 
 	if refs := imageFilters.Get("reference"); len(refs) != 0 {
-		fltrs = append(fltrs, func(image images.Image) bool {
+		fltrs = append(fltrs, func(image c8dimages.Image) bool {
 			ref, err := reference.ParseNormalizedNamed(image.Name)
 			if err != nil {
 				return false
@@ -412,7 +615,7 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 		})
 	}
 
-	return func(image images.Image) bool {
+	return func(image c8dimages.Image) bool {
 		for _, filter := range fltrs {
 			if !filter(image) {
 				return false
@@ -425,7 +628,7 @@ func (i *ImageService) setupFilters(ctx context.Context, imageFilters filters.Ar
 // setupLabelFilter parses filter args for "label" and "label!" and returns a
 // filter func which will check if any image config from the given image has
 // labels that match given predicates.
-func setupLabelFilter(store content.Store, fltrs filters.Args) (func(image images.Image) bool, error) {
+func setupLabelFilter(ctx context.Context, store content.Store, fltrs filters.Args) (func(image c8dimages.Image) bool, error) {
 	type labelCheck struct {
 		key        string
 		value      string
@@ -459,19 +662,25 @@ func setupLabelFilter(store content.Store, fltrs filters.Args) (func(image image
 		}
 	}
 
-	return func(image images.Image) bool {
-		ctx := context.TODO()
+	if len(checks) == 0 {
+		return nil, nil
+	}
 
+	return func(image c8dimages.Image) bool {
 		// This is not an error, but a signal to Dispatch that it should stop
 		// processing more content (otherwise it will run for all children).
 		// It will be returned once a matching config is found.
 		errFoundConfig := errors.New("success, found matching config")
-		err := images.Dispatch(ctx, presentChildrenHandler(store, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
-			if !images.IsConfigType(desc.MediaType) {
+
+		err := c8dimages.Dispatch(ctx, presentChildrenHandler(store, c8dimages.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
+			if !c8dimages.IsConfigType(desc.MediaType) {
 				return nil, nil
 			}
 			var cfg configLabels
-			if err := readConfig(ctx, store, desc, &cfg); err != nil {
+			if err := readJSON(ctx, store, desc, &cfg); err != nil {
+				if errdefs.IsNotFound(err) {
+					return nil, nil
+				}
 				return nil, err
 			}
 
@@ -531,6 +740,11 @@ func computeSharedSize(chainIDs []digest.Digest, layers map[digest.Digest]int, s
 		}
 		size, err := sizeFn(chainID)
 		if err != nil {
+			// Several images might share the same layer and neither of them
+			// might be unpacked (for example if it's a non-host platform).
+			if cerrdefs.IsNotFound(err) {
+				continue
+			}
 			return 0, err
 		}
 		sharedSize += size
@@ -538,8 +752,8 @@ func computeSharedSize(chainIDs []digest.Digest, layers map[digest.Digest]int, s
 	return sharedSize, nil
 }
 
-// readConfig reads content pointed by the descriptor and unmarshals it into a specified output.
-func readConfig(ctx context.Context, store content.Provider, desc ocispec.Descriptor, out interface{}) error {
+// readJSON reads content pointed by the descriptor and unmarshals it into a specified output.
+func readJSON(ctx context.Context, store content.Provider, desc ocispec.Descriptor, out interface{}) error {
 	data, err := content.ReadBlob(ctx, store, desc)
 	if err != nil {
 		err = errors.Wrapf(err, "failed to read config content")

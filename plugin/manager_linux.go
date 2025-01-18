@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/daemon/initlayer"
 	"github.com/docker/docker/errdefs"
@@ -85,7 +85,7 @@ func (pm *Manager) pluginPostStart(p *v2.Plugin, c *controller) error {
 			return errors.WithStack(err)
 		}
 
-		p.SetPClient(client)
+		p.SetPClient(client) //nolint:staticcheck // FIXME(thaJeztah): p.SetPClient is deprecated: Hardcoded plugin client is deprecated
 	}
 
 	// Initial sleep before net Dial to allow plugin to listen on socket.

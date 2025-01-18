@@ -1,15 +1,19 @@
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
+	"archive/tar"
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 
-	"github.com/containerd/containerd/pkg/userns"
-	"github.com/docker/docker/pkg/system"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/moby/sys/userns"
 	"golang.org/x/sys/unix"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
 )
 
@@ -30,7 +34,7 @@ func setupOverlayTestDir(t *testing.T, src string) {
 	err := os.Mkdir(filepath.Join(src, "d1"), 0o700)
 	assert.NilError(t, err)
 
-	err = system.Lsetxattr(filepath.Join(src, "d1"), "trusted.overlay.opaque", []byte("y"), 0)
+	err = unix.Lsetxattr(filepath.Join(src, "d1"), "trusted.overlay.opaque", []byte("y"), 0)
 	assert.NilError(t, err)
 
 	err = os.WriteFile(filepath.Join(src, "d1", "f1"), []byte{}, 0o600)
@@ -40,7 +44,7 @@ func setupOverlayTestDir(t *testing.T, src string) {
 	err = os.Mkdir(filepath.Join(src, "d2"), 0o750)
 	assert.NilError(t, err)
 
-	err = system.Lsetxattr(filepath.Join(src, "d2"), "trusted.overlay.opaque", []byte("y"), 0)
+	err = unix.Lsetxattr(filepath.Join(src, "d2"), "trusted.overlay.opaque", []byte("y"), 0)
 	assert.NilError(t, err)
 
 	err = os.WriteFile(filepath.Join(src, "d2", "f1"), []byte{}, 0o660)
@@ -50,12 +54,12 @@ func setupOverlayTestDir(t *testing.T, src string) {
 	err = os.Mkdir(filepath.Join(src, "d3"), 0o700)
 	assert.NilError(t, err)
 
-	err = system.Mknod(filepath.Join(src, "d3", "f1"), unix.S_IFCHR, 0)
+	err = unix.Mknod(filepath.Join(src, "d3", "f1"), unix.S_IFCHR, 0)
 	assert.NilError(t, err)
 }
 
 func checkOpaqueness(t *testing.T, path string, opaque string) {
-	xattrOpaque, err := system.Lgetxattr(path, "trusted.overlay.opaque")
+	xattrOpaque, err := lgetxattr(path, "trusted.overlay.opaque")
 	assert.NilError(t, err)
 
 	if string(xattrOpaque) != opaque {
@@ -103,11 +107,39 @@ func TestOverlayTarUntar(t *testing.T) {
 		Compression:    Uncompressed,
 		WhiteoutFormat: OverlayWhiteoutFormat,
 	}
-	archive, err := TarWithOptions(src, options)
+	reader, err := TarWithOptions(src, options)
 	assert.NilError(t, err)
-	defer archive.Close()
+	archive, err := io.ReadAll(reader)
+	reader.Close()
+	assert.NilError(t, err)
 
-	err = Untar(archive, dst, options)
+	// The archive should encode opaque directories and file whiteouts
+	// in AUFS format.
+	entries := make(map[string]struct{})
+	rdr := tar.NewReader(bytes.NewReader(archive))
+	for {
+		h, err := rdr.Next()
+		if err == io.EOF {
+			break
+		}
+		assert.NilError(t, err)
+		assert.Check(t, is.Equal(h.Devmajor, int64(0)), "unexpected device file in archive")
+		assert.Check(t, is.DeepEqual(h.PAXRecords, map[string]string(nil), cmpopts.EquateEmpty()))
+		entries[h.Name] = struct{}{}
+	}
+
+	assert.DeepEqual(t, entries, map[string]struct{}{
+		"d1/":                         {},
+		"d1/" + WhiteoutOpaqueDir:     {},
+		"d1/f1":                       {},
+		"d2/":                         {},
+		"d2/" + WhiteoutOpaqueDir:     {},
+		"d2/f1":                       {},
+		"d3/":                         {},
+		"d3/" + WhiteoutPrefix + "f1": {},
+	})
+
+	err = Untar(bytes.NewReader(archive), dst, options)
 	assert.NilError(t, err)
 
 	checkFileMode(t, filepath.Join(dst, "d1"), 0o700|os.ModeDir)

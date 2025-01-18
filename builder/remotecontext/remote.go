@@ -7,9 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/lazyregexp"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/pkg/errors"
 )
@@ -20,7 +20,7 @@ const maxPreambleLength = 100
 
 const acceptableRemoteMIME = `(?:application/(?:(?:x\-)?tar|octet\-stream|((?:x\-)?(?:gzip|bzip2?|xz)))|(?:text/plain))`
 
-var mimeRe = regexp.MustCompile(acceptableRemoteMIME)
+var mimeRe = lazyregexp.New(acceptableRemoteMIME)
 
 // downloadRemote context from a url and returns it, along with the parsed content type
 func downloadRemote(remoteURL string) (string, io.ReadCloser, error) {
@@ -44,8 +44,8 @@ func downloadRemote(remoteURL string) (string, io.ReadCloser, error) {
 // GetWithStatusError does an http.Get() and returns an error if the
 // status code is 4xx or 5xx.
 func GetWithStatusError(address string) (resp *http.Response, err error) {
-	// #nosec G107
-	if resp, err = http.Get(address); err != nil {
+	resp, err = http.Get(address) // #nosec G107 -- ignore G107: Potential HTTP request made with variable url
+	if err != nil {
 		if uerr, ok := err.(*url.Error); ok {
 			if derr, ok := uerr.Err.(*net.DNSError); ok && !derr.IsTimeout {
 				return nil, errdefs.NotFound(err)

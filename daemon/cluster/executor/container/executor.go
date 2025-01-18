@@ -7,8 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
@@ -52,13 +51,16 @@ func NewExecutor(b executorpkg.Backend, p plugin.Backend, i executorpkg.ImageBac
 		pluginBackend: p,
 		imageBackend:  i,
 		volumeBackend: v,
-		dependencies:  agent.NewDependencyManager(b.PluginGetter()),
+		dependencies:  agent.NewDependencyManager(convert.SwarmPluginGetter(b.PluginGetter())),
 	}
 }
 
 // Describe returns the underlying node description from the docker client.
 func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
-	info := e.backend.SystemInfo()
+	info, err := e.backend.SystemInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	plugins := map[api.PluginDescription]struct{}{}
 	addPlugins := func(typ string, names []string) {
@@ -214,7 +216,7 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 		return e.backend.GetAttachmentStore().ResetAttachments(attachments)
 	}
 
-	options := types.NetworkCreate{
+	options := network.CreateOptions{
 		Driver: ingressNA.Network.DriverState.Name,
 		IPAM: &network.IPAM{
 			Driver: ingressNA.Network.IPAM.Driver.Name,
@@ -234,9 +236,9 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 
 	_, err := e.backend.SetupIngress(clustertypes.NetworkCreateRequest{
 		ID: ingressNA.Network.ID,
-		NetworkCreateRequest: types.NetworkCreateRequest{
+		CreateRequest: network.CreateRequest{
 			Name:          ingressNA.Network.Spec.Annotations.Name,
-			NetworkCreate: options,
+			CreateOptions: options,
 		},
 	}, ingressNA.Addresses[0])
 	if err != nil {

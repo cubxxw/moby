@@ -34,16 +34,19 @@ func TestFirewalldInit(t *testing.T) {
 
 func TestReloaded(t *testing.T) {
 	iptable := GetIptable(IPv4)
-	fwdChain, err := iptable.NewChain("FWD", Filter, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = iptable.ProgramChain(fwdChain, bridgeName, false, true)
+	fwdChain, err := iptable.NewChain("FWD", Filter)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fwdChain.Remove()
+
+	// This jump from the FORWARD chain prevents FWD from being deleted by
+	// "iptables -X", called from fwdChain.Remove().
+	err = iptable.EnsureJumpRule("FORWARD", "FWD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iptable.Raw("-D", "FORWARD", "-j", "FWD")
 
 	// copy-pasted from iptables_test:TestLink
 	ip1 := net.ParseIP("192.168.1.1")
@@ -93,7 +96,7 @@ func TestPassthrough(t *testing.T) {
 		"-j", "ACCEPT",
 	}
 
-	_, err := Passthrough(Iptables, append([]string{"-A"}, rule1...)...)
+	_, err := passthrough(IPv4, append([]string{"-A"}, rule1...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

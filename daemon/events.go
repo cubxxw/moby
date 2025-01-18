@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/container"
@@ -68,7 +68,7 @@ func (daemon *Daemon) LogNetworkEventWithAttributes(nw *libnetwork.Network, acti
 // LogDaemonEventWithAttributes generates an event related to the daemon itself with specific given attributes.
 func (daemon *Daemon) LogDaemonEventWithAttributes(action events.Action, attributes map[string]string) {
 	if daemon.EventsService != nil {
-		if name := hostName(); name != "" {
+		if name := hostName(context.TODO()); name != "" {
 			attributes["name"] = name
 		}
 		daemon.EventsService.Log(action, events.DaemonEventType, events.Actor{

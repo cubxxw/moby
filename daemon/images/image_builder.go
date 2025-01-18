@@ -6,11 +6,10 @@ import (
 	"io"
 	"runtime"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/backend"
-	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/errdefs"
@@ -172,7 +171,7 @@ func (i *ImageService) pullForBuilder(ctx context.Context, name string, authConf
 		return nil, err
 	}
 
-	img, err := i.GetImage(ctx, name, imagetypes.GetImageOpts{Platform: platform})
+	img, err := i.GetImage(ctx, name, backend.GetImageOpts{Platform: platform})
 	if errdefs.IsNotFound(err) && img != nil && platform != nil {
 		imgPlat := ocispec.Platform{
 			OS:           img.OS,
@@ -214,7 +213,7 @@ func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID s
 	}
 
 	if opts.PullOption != backend.PullOptionForcePull {
-		img, err := i.GetImage(ctx, refOrID, imagetypes.GetImageOpts{Platform: opts.Platform})
+		img, err := i.GetImage(ctx, refOrID, backend.GetImageOpts{Platform: opts.Platform})
 		if err != nil && opts.PullOption == backend.PullOptionNoPull {
 			return nil, nil, err
 		}
@@ -254,6 +253,9 @@ func (i *ImageService) CreateImage(ctx context.Context, config []byte, parent st
 		if err := i.imageStore.SetParent(id, image.ID(parent)); err != nil {
 			return nil, errors.Wrapf(err, "failed to set parent %s", parent)
 		}
+	}
+	if err := i.imageStore.SetBuiltLocally(id); err != nil {
+		return nil, errors.Wrapf(err, "failed to mark image %s as built locally", id)
 	}
 
 	return i.imageStore.Get(id)

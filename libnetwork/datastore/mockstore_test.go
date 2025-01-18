@@ -1,7 +1,7 @@
 package datastore
 
 import (
-	"errors"
+	"strings"
 
 	store "github.com/docker/docker/libnetwork/internal/kvstore"
 	"github.com/docker/docker/libnetwork/types"
@@ -23,16 +23,6 @@ func NewMockStore() *MockStore {
 	return &MockStore{db: make(map[string]*MockData)}
 }
 
-// Get the value at "key", returns the last modified index
-// to use in conjunction to CAS calls
-func (s *MockStore) Get(key string) (*store.KVPair, error) {
-	mData := s.db[key]
-	if mData == nil {
-		return nil, nil
-	}
-	return &store.KVPair{Value: mData.Data, LastIndex: mData.Index}, nil
-}
-
 // Put a value at "key"
 func (s *MockStore) Put(key string, value []byte) error {
 	mData := s.db[key]
@@ -52,7 +42,16 @@ func (s *MockStore) Exists(key string) (bool, error) {
 
 // List gets a range of values at "directory"
 func (s *MockStore) List(prefix string) ([]*store.KVPair, error) {
-	return nil, errors.New("not implemented")
+	var res []*store.KVPair
+	for k, v := range s.db {
+		if strings.HasPrefix(k, prefix) {
+			res = append(res, &store.KVPair{Key: k, Value: v.Data, LastIndex: v.Index})
+		}
+	}
+	if len(res) == 0 {
+		return nil, store.ErrKeyNotFound
+	}
+	return res, nil
 }
 
 // AtomicPut put a value at "key" if the key has not been
@@ -63,14 +62,16 @@ func (s *MockStore) AtomicPut(key string, newValue []byte, previous *store.KVPai
 	if previous == nil {
 		if mData != nil {
 			return nil, types.InvalidParameterErrorf("atomic put failed because key exists")
-		} // Else OK.
+		}
+		// Else OK.
 	} else {
 		if mData == nil {
 			return nil, types.InvalidParameterErrorf("atomic put failed because key exists")
 		}
-		if mData != nil && mData.Index != previous.LastIndex {
+		if mData.Index != previous.LastIndex {
 			return nil, types.InvalidParameterErrorf("atomic put failed due to mismatched Index")
-		} // Else OK.
+		}
+		// Else OK.
 	}
 	if err := s.Put(key, newValue); err != nil {
 		return nil, err
@@ -84,6 +85,16 @@ func (s *MockStore) AtomicDelete(key string, previous *store.KVPair) error {
 	mData := s.db[key]
 	if mData != nil && mData.Index != previous.LastIndex {
 		return types.InvalidParameterErrorf("atomic delete failed due to mismatched Index")
+	}
+	delete(s.db, key)
+	return nil
+}
+
+// Delete deletes a value at "key". Unlike AtomicDelete it doesn't check
+// whether the deleted key is at a specific version before deleting.
+func (s *MockStore) Delete(key string) error {
+	if _, ok := s.db[key]; !ok {
+		return store.ErrKeyNotFound
 	}
 	delete(s.db, key)
 	return nil

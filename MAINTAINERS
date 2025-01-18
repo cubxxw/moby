@@ -27,6 +27,7 @@
 			"akerouanton",
 			"akihirosuda",
 			"anusha",
+			"austinvazquez",
 			"coolljt0725",
 			"corhere",
 			"cpuguy83",
@@ -38,6 +39,7 @@
 			"laurazard",
 			"mhbauer",
 			"neersighted",
+			"robmry",
 			"rumpl",
 			"runcom",
 			"samuelkarp",
@@ -77,7 +79,8 @@
 			"ripcurld",
 			"sam-thibault",
 			"samwhited",
-			"thajeztah"
+			"thajeztah",
+			"thompson-shaun",
 		]
 
 	[Org.Alumni]
@@ -313,6 +316,11 @@
 	Email = "andrewhsu@docker.com"
 	GitHub = "andrewhsu"
 
+	[people.austinvazquez]
+	Name = "Austin Vazquez"
+	Email = "macedonv@amazon.com"
+	GitHub = "austinvazquez"
+
 	[people.anusha]
 	Name = "Anusha Ragunathan"
 	Email = "anusha@docker.com"
@@ -425,7 +433,7 @@
 
 	[people.laurazard]
 	Name = "Laura Brehm"
-	Email = "laura.brehm@docker.com"
+	Email = "laurabrehm@hey.com"
 	GitHub = "laurazard"
 
 	[people.lk4d4]
@@ -478,6 +486,11 @@
 	Email = "jeff@docker.com"
 	GitHub = "programmerq"
 
+	[people.robmry]
+	Name = "Rob Murray"
+	Email = "rob.murray@docker.com"
+	GitHub = "robmry"
+
 	[people.ripcurld]
 	Name = "Boaz Shuster"
 	Email = "ripcurld.github@gmail.com"
@@ -527,6 +540,11 @@
 	Name = "Sebastiaan van Stijn"
 	Email = "github@gone.nl"
 	GitHub = "thaJeztah"
+
+	[people.thompson-shaun]
+	Name = "Shaun Thompson"
+	Email = "shaun.thompson@docker.com"
+	GitHub = "thompson-shaun"
 
 	[people.tianon]
 	Name = "Tianon Gravi"

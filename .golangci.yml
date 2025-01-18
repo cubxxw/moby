@@ -1,0 +1,193 @@
+linters:
+  enable:
+    - copyloopvar   # Detects places where loop variables are copied.
+    - depguard
+    - dupword       # Detects duplicate words.
+    - goimports
+    - gosec         # Detects security problems.
+    - gosimple
+    - govet
+    - forbidigo
+    - importas
+    - ineffassign
+    - misspell      # Detects commonly misspelled English words in comments.
+    - revive        # Metalinter; drop-in replacement for golint.
+    - staticcheck
+    - typecheck
+    - unconvert     # Detects unnecessary type conversions.
+    - unused
+
+  disable:
+    - errcheck
+
+run:
+  # prevent golangci-lint from deducting the go version to lint for through go.mod,
+  # which causes it to fallback to go1.17 semantics.
+  go: "1.23.4"
+  concurrency: 2
+  # Only supported with go modules enabled (build flag -mod=vendor only valid when using modules)
+  # modules-download-mode: vendor
+
+linters-settings:
+  depguard:
+    rules:
+      main:
+        deny:
+          - pkg: io/ioutil
+            desc: The io/ioutil package has been deprecated, see https://go.dev/doc/go1.16#ioutil
+          - pkg: "github.com/stretchr/testify/assert"
+            desc: Use "gotest.tools/v3/assert" instead
+          - pkg: "github.com/stretchr/testify/require"
+            desc: Use "gotest.tools/v3/assert" instead
+          - pkg: "github.com/stretchr/testify/suite"
+            desc: Do not use
+          - pkg: "github.com/containerd/containerd/errdefs"
+            desc: The errdefs package has moved to a separate module, https://github.com/containerd/errdefs
+          - pkg: "github.com/containerd/containerd/log"
+            desc: The logs package has moved to a separate module, https://github.com/containerd/log
+          - pkg: "github.com/containerd/containerd/pkg/userns"
+            desc: Use github.com/moby/sys/userns instead.
+          - pkg: "github.com/tonistiigi/fsutil"
+            desc: The fsutil module does not have a stable API, so we should not have a direct dependency unless necessary.
+
+  dupword:
+    ignore:
+      - "true"    # some tests use this as expected output
+      - "false"   # some tests use this as expected output
+      - "root"    # for tests using "ls" output with files owned by "root:root"
+
+  forbidigo:
+    forbid:
+      - pkg: ^sync/atomic$
+        p: ^atomic\.(Add|CompareAndSwap|Load|Store|Swap).
+        msg: Go 1.19 atomic types should be used instead.
+      - pkg: ^regexp$
+        p: ^regexp\.MustCompile
+        msg: Use internal/lazyregexp.New instead.
+      - pkg: github.com/vishvananda/netlink$
+        p: ^netlink\.(Handle\.)?(AddrList|BridgeVlanList|ChainList|ClassList|ConntrackTableList|ConntrackDeleteFilter$|ConntrackDeleteFilters|DevLinkGetDeviceList|DevLinkGetAllPortList|DevlinkGetDeviceParams|FilterList|FouList|GenlFamilyList|GTPPDPList|LinkByName|LinkByAlias|LinkList|LinkSubscribeWithOptions|NeighList$|NeighProxyList|NeighListExecute|NeighSubscribeWithOptions|LinkGetProtinfo|QdiscList|RdmaLinkList|RdmaLinkByName|RdmaLinkDel|RouteList|RouteListFilteredIter|RuleListFiltered$|RouteSubscribeWithOptions|RuleList$|RuleListFiltered|SocketGet|SocketDiagTCPInfo|SocketDiagTCP|SocketDiagUDPInfo|SocketDiagUDP|UnixSocketDiagInfo|UnixSocketDiag|VDPAGetDevConfigList|VDPAGetDevList|VDPAGetMGMTDevList|XfrmPolicyList|XfrmStateList)
+        msg: Use internal nlwrap package for EINTR handling.
+      - pkg: github.com/docker/docker/internal/nlwrap$
+        p: ^nlwrap.Handle.(BridgeVlanList|ChainList|ClassList|ConntrackDeleteFilter$|DevLinkGetDeviceList|DevLinkGetAllPortList|DevlinkGetDeviceParams|FilterList|FouList|GenlFamilyList|GTPPDPList|LinkByAlias|LinkSubscribeWithOptions|NeighList$|NeighProxyList|NeighListExecute|NeighSubscribeWithOptions|LinkGetProtinfo|QdiscList|RdmaLinkList|RdmaLinkByName|RdmaLinkDel|RouteListFilteredIter|RuleListFiltered$|RouteSubscribeWithOptions|RuleList$|RuleListFiltered|SocketGet|SocketDiagTCPInfo|SocketDiagTCP|SocketDiagUDPInfo|SocketDiagUDP|UnixSocketDiagInfo|UnixSocketDiag|VDPAGetDevConfigList|VDPAGetDevList|VDPAGetMGMTDevList)
+        msg: Add a wrapper to nlwrap.Handle for EINTR handling and update the list in .golangci.yml.
+    analyze-types: true
+
+  gosec:
+    excludes:
+      - G104 # G104: Errors unhandled; (TODO: reduce unhandled errors, or explicitly ignore)
+      - G113 # G113: Potential uncontrolled memory consumption in Rat.SetString (CVE-2022-23772); (only affects go < 1.16.14. and go < 1.17.7)
+      - G115 # G115: integer overflow conversion; (TODO: verify these: https://github.com/moby/moby/issues/48358)
+      - G204 # G204: Subprocess launched with variable; too many false positives.
+      - G301 # G301: Expect directory permissions to be 0750 or less (also EXC0009); too restrictive
+      - G302 # G302: Expect file permissions to be 0600 or less (also EXC0009); too restrictive
+      - G304 # G304: Potential file inclusion via variable.
+      - G306 # G306: Expect WriteFile permissions to be 0600 or less (too restrictive; also flags "0o644" permissions)
+      - G307 # G307: Deferring unsafe method "*os.File" on type "Close" (also EXC0008); (TODO: evaluate these and fix where needed: G307: Deferring unsafe method "*os.File" on type "Close")
+      - G504 # G504: Blocklisted import net/http/cgi: Go versions < 1.6.3 are vulnerable to Httpoxy attack: (CVE-2016-5386); (only affects go < 1.6.3)
+
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment # TODO: evaluate which ones should be updated.
+
+  importas:
+    # Do not allow unaliased imports of aliased packages.
+    no-unaliased: true
+
+    alias:
+      # Enforce alias to prevent it accidentally being used instead of our
+      # own errdefs package (or vice-versa).
+      - pkg: github.com/containerd/errdefs
+        alias: cerrdefs
+      - pkg: github.com/containerd/containerd/images
+        alias: c8dimages
+      - pkg: github.com/opencontainers/image-spec/specs-go/v1
+        alias: ocispec
+
+  revive:
+    rules:
+      # FIXME make sure all packages have a description. Currently, there's many packages without.
+      - name: package-comments
+        disabled: true
+
+issues:
+  # The default exclusion rules are a bit too permissive, so copying the relevant ones below
+  exclude-use-default: false
+
+  exclude-dirs:
+    - docs
+
+  exclude-rules:
+    # We prefer to use an "exclude-list" so that new "default" exclusions are not
+    # automatically inherited. We can decide whether or not to follow upstream
+    # defaults when updating golang-ci-lint versions.
+    # Unfortunately, this means we have to copy the whole exclusion pattern, as
+    # (unlike the "include" option), the "exclude" option does not take exclusion
+    # ID's.
+    #
+    # These exclusion patterns are copied from the default excludes at:
+    # https://github.com/golangci/golangci-lint/blob/v1.61.0/pkg/config/issues.go#L11-L104
+    #
+    # The default list of exclusions can be found at:
+    # https://golangci-lint.run/usage/false-positives/#default-exclusions
+
+    # EXC0001
+    - text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*print(f|ln)?|os\\.(Un)?Setenv). is not checked"
+      linters:
+        - errcheck
+
+    # Exclude some linters from running on tests files.
+    - path: _test\.go
+      linters:
+        - errcheck
+
+    - text: "G404: Use of weak random number generator"
+      path: _test\.go
+      linters:
+        - gosec
+
+    # Suppress golint complaining about generated types in api/types/
+    - text: "type name will be used as (container|volume)\\.(Container|Volume).* by other packages, and that stutters; consider calling this"
+      path: "api/types/(volume|container)/"
+      linters:
+        - revive
+    # FIXME temporarily suppress these (see https://github.com/gotestyourself/gotest.tools/issues/272)
+    - text: "SA1019: (assert|cmp|is)\\.ErrorType is deprecated"
+      linters:
+        - staticcheck
+
+    - text: "ineffectual assignment to ctx"
+      source: "ctx[, ].*=.*\\(ctx[,)]"
+      linters:
+        - ineffassign
+
+    - text: "SA4006: this value of `ctx` is never used"
+      source: "ctx[, ].*=.*\\(ctx[,)]"
+      linters:
+        - staticcheck
+
+    - text: '^shadow: declaration of "(ctx|err|ok)" shadows declaration'
+      linters:
+        - govet
+    - text: '^shadow: declaration of "(out)" shadows declaration'
+      path: _test\.go
+      linters:
+        - govet
+    - text: 'use of `regexp.MustCompile` forbidden'
+      path: _test\.go
+      linters:
+        - forbidigo
+    - text: 'use of `regexp.MustCompile` forbidden'
+      path: "internal/lazyregexp"
+      linters:
+        - forbidigo
+    - text: 'use of `regexp.MustCompile` forbidden'
+      path: "libnetwork/cmd/networkdb-test/dbclient"
+      linters:
+        - forbidigo
+
+  # Maximum issues count per one linter. Set to 0 to disable. Default is 50.
+  max-issues-per-linter: 0
+
+  # Maximum count of issues with the same text. Set to 0 to disable. Default is 3.
+  max-same-issues: 0

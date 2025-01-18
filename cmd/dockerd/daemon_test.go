@@ -1,12 +1,14 @@
 package main
 
 import (
+	"runtime"
 	"testing"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/config"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/otel"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/fs"
@@ -18,11 +20,8 @@ func defaultOptions(t *testing.T, configFile string) *daemonOptions {
 	opts := newDaemonOptions(cfg)
 	opts.flags = &pflag.FlagSet{}
 	opts.installFlags(opts.flags)
-	err = installConfigFlags(opts.daemonConfig, opts.flags)
-	assert.NilError(t, err)
-	defaultDaemonConfigFile, err := getDefaultDaemonConfigFile()
-	assert.NilError(t, err)
-	opts.flags.StringVar(&opts.configFile, "config-file", defaultDaemonConfigFile, "")
+	installConfigFlags(opts.daemonConfig, opts.flags)
+	opts.flags.StringVar(&opts.configFile, "config-file", opts.configFile, "")
 	opts.configFile = configFile
 	err = opts.flags.Parse([]string{})
 	assert.NilError(t, err)
@@ -142,7 +141,7 @@ func TestLoadDaemonCliConfigWithoutTLSVerify(t *testing.T) {
 	loadedConfig, err := loadDaemonCliConfig(opts)
 	assert.NilError(t, err)
 	assert.Assert(t, loadedConfig != nil)
-	assert.Check(t, loadedConfig.TLS == nil)
+	assert.Check(t, is.Nil(loadedConfig.TLS))
 }
 
 func TestLoadDaemonCliConfigWithLogLevel(t *testing.T) {
@@ -191,7 +190,6 @@ func TestLoadDaemonConfigWithEmbeddedOptions(t *testing.T) {
 
 func TestLoadDaemonConfigWithRegistryOptions(t *testing.T) {
 	content := `{
-		"allow-nondistributable-artifacts": ["allow-nondistributable-artifacts.example.com"],
 		"registry-mirrors": ["https://mirrors.example.com"],
 		"insecure-registries": ["https://insecure-registry.example.com"]
 	}`
@@ -203,7 +201,6 @@ func TestLoadDaemonConfigWithRegistryOptions(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Assert(t, loadedConfig != nil)
 
-	assert.Check(t, is.Len(loadedConfig.AllowNondistributableArtifacts, 1))
 	assert.Check(t, is.Len(loadedConfig.Mirrors, 1))
 	assert.Check(t, is.Len(loadedConfig.InsecureRegistries, 1))
 }
@@ -227,44 +224,40 @@ func TestCDISpecDirs(t *testing.T) {
 	testCases := []struct {
 		description         string
 		configContent       string
-		experimental        bool
 		specDirs            []string
 		expectedCDISpecDirs []string
 	}{
 		{
-			description:         "experimental and no spec dirs specified returns default",
+			description:         "CDI enabled and no spec dirs specified returns default",
 			specDirs:            nil,
-			experimental:        true,
+			configContent:       `{"features": {"cdi": true}}`,
 			expectedCDISpecDirs: []string{"/etc/cdi", "/var/run/cdi"},
 		},
 		{
-			description:         "experimental and specified spec dirs are returned",
+			description:         "CDI enabled and specified spec dirs are returned",
 			specDirs:            []string{"/foo/bar", "/baz/qux"},
-			experimental:        true,
+			configContent:       `{"features": {"cdi": true}}`,
 			expectedCDISpecDirs: []string{"/foo/bar", "/baz/qux"},
 		},
 		{
-			description:         "experimental and empty string as spec dir returns empty slice",
+			description:         "CDI enabled and empty string as spec dir returns empty slice",
 			specDirs:            []string{""},
-			experimental:        true,
+			configContent:       `{"features": {"cdi": true}}`,
 			expectedCDISpecDirs: []string{},
 		},
 		{
-			description:         "experimental and empty config option returns empty slice",
-			configContent:       `{"cdi-spec-dirs": []}`,
-			experimental:        true,
+			description:         "CDI enabled and empty config option returns empty slice",
+			configContent:       `{"cdi-spec-dirs": [], "features": {"cdi": true}}`,
 			expectedCDISpecDirs: []string{},
 		},
 		{
-			description:         "non-experimental and no spec dirs specified returns no cdi spec dirs",
+			description:         "CDI disabled and no spec dirs specified returns no cdi spec dirs",
 			specDirs:            nil,
-			experimental:        false,
 			expectedCDISpecDirs: nil,
 		},
 		{
-			description:         "non-experimental and specified spec dirs returns no cdi spec dirs",
+			description:         "CDI disabled and specified spec dirs returns no cdi spec dirs",
 			specDirs:            []string{"/foo/bar", "/baz/qux"},
-			experimental:        false,
 			expectedCDISpecDirs: nil,
 		},
 	}
@@ -280,14 +273,42 @@ func TestCDISpecDirs(t *testing.T) {
 			for _, specDir := range tc.specDirs {
 				assert.Check(t, flags.Set("cdi-spec-dir", specDir))
 			}
-			if tc.experimental {
-				assert.Check(t, flags.Set("experimental", "true"))
-			}
 
 			loadedConfig, err := loadDaemonCliConfig(opts)
 			assert.NilError(t, err)
 
 			assert.Check(t, is.DeepEqual(tc.expectedCDISpecDirs, loadedConfig.CDISpecDirs, cmpopts.EquateEmpty()))
 		})
+	}
+}
+
+// TestOtelMeterLeak is a regression test for a memory leak in the OTEL meter
+// implementation that was fixed in OTEL v1.30.0.
+//
+// See:
+// - https://github.com/open-telemetry/opentelemetry-go-contrib/issues/5190
+// - https://github.com/moby/moby/pull/48690
+// - https://github.com/moby/moby/issues/48144
+func TestOtelMeterLeak(t *testing.T) {
+	meter := otel.Meter("foo")
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const counters = 10 * 1000 * 1000
+	for i := 0; i < counters; i++ {
+		_, _ = meter.Int64Counter("bar")
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	allocs := after.Mallocs - before.Mallocs
+	t.Log("Allocations:", allocs)
+
+	// currently, with OTel v1.31.0, allocations is 3; add some margin to
+	// check for unexpectedly more than that.
+	if allocs > 10 {
+		t.Fatalf("Possible OTel leak; got more than 10 allocations (allocs: %d).", allocs)
 	}
 }

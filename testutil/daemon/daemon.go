@@ -4,18 +4,22 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/container"
@@ -83,8 +87,11 @@ type Daemon struct {
 	args                       []string
 	extraEnv                   []string
 	containerdSocket           string
+	usernsRemap                string
 	rootlessUser               *user.User
 	rootlessXDGRuntimeDir      string
+	resolvConfContent          string
+	ResolvConfPathOverride     string // Path to a replacement for "/etc/resolv.conf", or empty.
 
 	// swarm related field
 	swarmListenAddr string
@@ -143,6 +150,15 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		op(d)
 	}
 
+	if len(d.resolvConfContent) > 0 {
+		path := filepath.Join(d.Folder, "resolv.conf")
+		if err := os.WriteFile(path, []byte(d.resolvConfContent), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write docker resolv.conf to %q: %v", path, err)
+		}
+		d.extraEnv = append(d.extraEnv, "DOCKER_TEST_RESOLV_CONF_PATH="+path)
+		d.ResolvConfPathOverride = path
+	}
+
 	if d.rootlessUser != nil {
 		if err := os.Chmod(SockRoot, 0o777); err != nil {
 			return nil, err
@@ -173,7 +189,9 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		if err := os.Chown(d.execRoot, uid, gid); err != nil {
 			return nil, err
 		}
-		d.rootlessXDGRuntimeDir = filepath.Join(d.Folder, "xdgrun")
+		// $XDG_RUNTIME_DIR mustn't be too long, as ${XDG_RUNTIME_DIR/dockerd-rootless
+		// contains Unix sockets
+		d.rootlessXDGRuntimeDir = filepath.Join(os.TempDir(), "xdgrun-"+id)
 		if err := os.MkdirAll(d.rootlessXDGRuntimeDir, 0o700); err != nil {
 			return nil, err
 		}
@@ -335,6 +353,17 @@ func ScanLogsMatchString(contains string) func(string) bool {
 	}
 }
 
+// ScanLogsMatchCount returns a function that can be used to scan the daemon logs until the passed in matcher function matches `count` times
+func ScanLogsMatchCount(f func(string) bool, count int) func(string) bool {
+	matched := 0
+	return func(line string) bool {
+		if f(line) {
+			matched++
+		}
+		return matched == count
+	}
+}
+
 // ScanLogsMatchAll returns a function that can be used to scan the daemon logs until *all* the passed in strings are matched
 func ScanLogsMatchAll(contains ...string) func(string) bool {
 	matched := make(map[string]bool)
@@ -455,6 +484,10 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 	)
 	if d.containerdSocket != "" {
 		d.args = append(d.args, "--containerd", d.containerdSocket)
+	}
+
+	if d.usernsRemap != "" {
+		d.args = append(d.args, "--userns-remap", d.usernsRemap)
 	}
 
 	if d.defaultCgroupNamespaceMode != "" {
@@ -600,6 +633,11 @@ func (d *Daemon) Kill() error {
 	}()
 
 	if err := d.cmd.Process.Kill(); err != nil {
+		return err
+	}
+
+	_, err := d.cmd.Process.Wait()
+	if err != nil && !errors.Is(err, syscall.ECHILD) {
 		return err
 	}
 
@@ -805,6 +843,17 @@ func (d *Daemon) ReloadConfig() error {
 	return nil
 }
 
+// SetEnvVar updates the set of extra env variables for the daemon, to take
+// effect on the next start/restart.
+func (d *Daemon) SetEnvVar(name, val string) {
+	prefix := name + "="
+	if idx := slices.IndexFunc(d.extraEnv, func(ev string) bool { return strings.HasPrefix(ev, prefix) }); idx > 0 {
+		d.extraEnv[idx] = prefix + val
+		return
+	}
+	d.extraEnv = append(d.extraEnv, prefix+val)
+}
+
 // LoadBusybox image into the daemon
 func (d *Daemon) LoadBusybox(ctx context.Context, t testing.TB) {
 	t.Helper()
@@ -812,14 +861,14 @@ func (d *Daemon) LoadBusybox(ctx context.Context, t testing.TB) {
 	assert.NilError(t, err, "[%s] failed to create client", d.id)
 	defer clientHost.Close()
 
-	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"})
+	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"}, image.SaveOptions{})
 	assert.NilError(t, err, "[%s] failed to download busybox", d.id)
 	defer reader.Close()
 
 	c := d.NewClientT(t)
 	defer c.Close()
 
-	resp, err := c.ImageLoad(ctx, reader, true)
+	resp, err := c.ImageLoad(ctx, reader, image.LoadOptions{Quiet: true})
 	assert.NilError(t, err, "[%s] failed to load busybox", d.id)
 	defer resp.Body.Close()
 }

@@ -1,15 +1,11 @@
 package stats // import "github.com/docker/docker/daemon/stats"
 
 import (
-	"bufio"
-	"context"
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/errdefs"
 	"github.com/moby/pubsub"
 )
 
@@ -20,7 +16,6 @@ type Collector struct {
 	supervisor supervisor
 	interval   time.Duration
 	publishers map[*container.Container]*pubsub.Publisher
-	bufReader  *bufio.Reader
 }
 
 // NewCollector creates a stats collector that will poll the supervisor with the specified interval
@@ -29,7 +24,6 @@ func NewCollector(supervisor supervisor, interval time.Duration) *Collector {
 		interval:   interval,
 		supervisor: supervisor,
 		publishers: make(map[*container.Container]*pubsub.Publisher),
-		bufReader:  bufio.NewReaderSize(nil, 128),
 	}
 	s.cond = sync.NewCond(&s.m)
 	return s
@@ -37,7 +31,7 @@ func NewCollector(supervisor supervisor, interval time.Duration) *Collector {
 
 type supervisor interface {
 	// GetContainerStats collects all the stats related to a container
-	GetContainerStats(container *container.Container) (*types.StatsJSON, error)
+	GetContainerStats(container *container.Container) (*containertypes.StatsResponse, error)
 }
 
 // Collect registers the container with the collector and adds it to
@@ -108,45 +102,15 @@ func (s *Collector) Run() {
 
 		s.cond.L.Unlock()
 
-		onlineCPUs, err := s.getNumberOnlineCPUs()
-		if err != nil {
-			log.G(context.TODO()).Errorf("collecting system online cpu count: %v", err)
-			continue
-		}
-
 		for _, pair := range pairs {
 			stats, err := s.supervisor.GetContainerStats(pair.container)
-
-			switch err.(type) {
-			case nil:
-				// Sample system CPU usage close to container usage to avoid
-				// noise in metric calculations.
-				systemUsage, err := s.getSystemCPUUsage()
-				if err != nil {
-					log.G(context.TODO()).WithError(err).WithField("container_id", pair.container.ID).Errorf("collecting system cpu usage")
-					continue
+			if err != nil {
+				stats = &containertypes.StatsResponse{
+					Name: pair.container.Name,
+					ID:   pair.container.ID,
 				}
-
-				// FIXME: move to containerd on Linux (not Windows)
-				stats.CPUStats.SystemUsage = systemUsage
-				stats.CPUStats.OnlineCPUs = onlineCPUs
-
-				pair.publisher.Publish(*stats)
-
-			case errdefs.ErrConflict, errdefs.ErrNotFound:
-				// publish empty stats containing only name and ID if not running or not found
-				pair.publisher.Publish(types.StatsJSON{
-					Name: pair.container.Name,
-					ID:   pair.container.ID,
-				})
-
-			default:
-				log.G(context.TODO()).Errorf("collecting stats for %s: %v", pair.container.ID, err)
-				pair.publisher.Publish(types.StatsJSON{
-					Name: pair.container.Name,
-					ID:   pair.container.ID,
-				})
 			}
+			pair.publisher.Publish(*stats)
 		}
 
 		time.Sleep(s.interval)

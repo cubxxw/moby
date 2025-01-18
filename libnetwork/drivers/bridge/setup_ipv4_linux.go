@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/vishvananda/netlink"
 )
@@ -28,8 +28,12 @@ func selectIPv4Address(addresses []netlink.Addr, selector *net.IPNet) (netlink.A
 }
 
 func setupBridgeIPv4(config *networkConfiguration, i *bridgeInterface) error {
+	// TODO(aker): the bridge driver panics if its bridgeIPv4 field isn't set. Once bridge subnet and bridge IP address
+	//             are decoupled, we should assign it only when it's really needed.
+	i.bridgeIPv4 = config.AddressIPv4
+
 	if !config.InhibitIPv4 {
-		addrv4List, _, err := i.addresses()
+		addrv4List, err := i.addresses(netlink.FAMILY_V4)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve bridge interface addresses: %v", err)
 		}
@@ -49,9 +53,10 @@ func setupBridgeIPv4(config *networkConfiguration, i *bridgeInterface) error {
 		}
 	}
 
-	// Store bridge network and default gateway
-	i.bridgeIPv4 = config.AddressIPv4
-	i.gatewayIPv4 = config.AddressIPv4.IP
+	if !config.Internal {
+		// Store the default gateway
+		i.gatewayIPv4 = config.AddressIPv4.IP
+	}
 
 	return nil
 }
@@ -59,6 +64,9 @@ func setupBridgeIPv4(config *networkConfiguration, i *bridgeInterface) error {
 func setupGatewayIPv4(config *networkConfiguration, i *bridgeInterface) error {
 	if !i.bridgeIPv4.Contains(config.DefaultGatewayIPv4) {
 		return &ErrInvalidGateway{}
+	}
+	if config.Internal {
+		return types.InvalidParameterErrorf("no gateway can be set on an internal bridge network")
 	}
 
 	// Store requested default gateway

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/docker/docker/libnetwork/options"
-	"github.com/docker/docker/libnetwork/scope"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -14,23 +13,14 @@ const dummyKey = "dummy"
 
 // NewTestDataStore can be used by other Tests in order to use custom datastore
 func NewTestDataStore() *Store {
-	return &Store{scope: scope.Local, store: NewMockStore()}
+	s := NewMockStore()
+	return &Store{store: s, cache: newCache(s)}
 }
 
 func TestKey(t *testing.T) {
 	sKey := Key("hello", "world")
 	const expected = "docker/network/v1.0/hello/world/"
 	assert.Check(t, is.Equal(sKey, expected))
-}
-
-func TestInvalidDataStore(t *testing.T) {
-	_, err := New(ScopeCfg{
-		Client: ScopeClientCfg{
-			Provider: "invalid",
-			Address:  "localhost:8500",
-		},
-	})
-	assert.Check(t, is.Error(err, "unsupported KV store"))
 }
 
 func TestKVObjectFlatKey(t *testing.T) {
@@ -40,7 +30,7 @@ func TestKVObjectFlatKey(t *testing.T) {
 	assert.Check(t, err)
 
 	n := dummyObject{ID: "1000"} // GetObject uses KVObject.Key() for cache lookup.
-	err = store.GetObject(Key(dummyKey, "1000"), &n)
+	err = store.GetObject(&n)
 	assert.Check(t, err)
 	assert.Check(t, is.Equal(n.Name, expected.Name))
 }
@@ -61,7 +51,7 @@ func TestAtomicKVObjectFlatKey(t *testing.T) {
 	// Get the latest index and try PutObjectAtomic again for the same Key
 	// This must succeed as well
 	n := dummyObject{ID: "1111"} // GetObject uses KVObject.Key() for cache lookup.
-	err = store.GetObject(Key(expected.Key()...), &n)
+	err = store.GetObject(&n)
 	assert.Check(t, err)
 	n.ReturnValue = true
 	err = store.PutObjectAtomic(&n)
@@ -69,7 +59,7 @@ func TestAtomicKVObjectFlatKey(t *testing.T) {
 
 	// Get the Object using GetObject, then set again.
 	newObj := dummyObject{ID: "1111"} // GetObject uses KVObject.Key() for cache lookup.
-	err = store.GetObject(Key(expected.Key()...), &newObj)
+	err = store.GetObject(&newObj)
 	assert.Check(t, err)
 	assert.Check(t, newObj.Exists())
 	err = store.PutObjectAtomic(&n)
@@ -132,10 +122,6 @@ func (n *dummyObject) Skip() bool {
 	return n.SkipSave
 }
 
-func (n *dummyObject) DataScope() string {
-	return scope.Local
-}
-
 func (n *dummyObject) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]interface{}{
 		"name":        n.Name,
@@ -154,6 +140,18 @@ func (n *dummyObject) UnmarshalJSON(b []byte) error {
 	n.NetworkType = netMap["networkType"].(string)
 	n.EnableIPv6 = netMap["enableIPv6"].(bool)
 	n.Generic = netMap["generic"].(map[string]interface{})
+	return nil
+}
+
+func (n *dummyObject) New() KVObject {
+	return &dummyObject{}
+}
+
+func (n *dummyObject) CopyTo(o KVObject) error {
+	if err := o.SetValue(n.Value()); err != nil {
+		return err
+	}
+	o.SetIndex(n.Index())
 	return nil
 }
 

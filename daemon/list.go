@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
+	"github.com/docker/docker/api/types/backend"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
-	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
@@ -54,7 +54,7 @@ func (daemon *Daemon) List() []*container.Container {
 }
 
 // listContext is the daemon generated filtering to iterate over containers.
-// This is created based on the user specification from types.ContainerListOptions.
+// This is created based on the user specification from [containertypes.ListOptions].
 type listContext struct {
 	// idx is the container iteration index for this context
 	idx int
@@ -84,8 +84,8 @@ type listContext struct {
 	// expose is a list of exposed ports to filter with
 	expose map[nat.Port]bool
 
-	// ContainerListOptions is the filters set by the user
-	*types.ContainerListOptions
+	// ListOptions is the filters set by the user
+	*containertypes.ListOptions
 }
 
 // byCreatedDescending is a temporary type used to sort a list of containers by creation time.
@@ -98,14 +98,14 @@ func (r byCreatedDescending) Less(i, j int) bool {
 }
 
 // Containers returns the list of containers to show given the user's filtering.
-func (daemon *Daemon) Containers(ctx context.Context, config *types.ContainerListOptions) ([]*types.Container, error) {
+func (daemon *Daemon) Containers(ctx context.Context, config *containertypes.ListOptions) ([]*containertypes.Summary, error) {
 	if err := config.Filters.Validate(acceptedPsFilterTags); err != nil {
 		return nil, err
 	}
 
 	var (
 		view       = daemon.containersReplica.Snapshot()
-		containers = []*types.Container{}
+		containers = []*containertypes.Summary{}
 	)
 
 	filter, err := daemon.foldFilter(ctx, view, config)
@@ -224,7 +224,7 @@ func (daemon *Daemon) filterByNameIDMatches(view *container.View, filter *listCo
 }
 
 // foldFilter generates the container filter based on the user's filtering options.
-func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, config *types.ContainerListOptions) (*listContext, error) {
+func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, config *containertypes.ListOptions) (*listContext, error) {
 	psFilters := config.Filters
 
 	var filtExited []int
@@ -293,7 +293,7 @@ func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, conf
 	if psFilters.Contains("ancestor") {
 		ancestorFilter = true
 		err := psFilters.WalkValues("ancestor", func(ancestor string) error {
-			img, err := daemon.imageService.GetImage(ctx, ancestor, imagetypes.GetImageOpts{})
+			img, err := daemon.imageService.GetImage(ctx, ancestor, backend.GetImageOpts{})
 			if err != nil {
 				log.G(ctx).Warnf("Error while looking up for image %v", ancestor)
 				return nil
@@ -323,18 +323,18 @@ func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, conf
 	}
 
 	return &listContext{
-		filters:              psFilters,
-		ancestorFilter:       ancestorFilter,
-		images:               imagesFilter,
-		exitAllowed:          filtExited,
-		beforeFilter:         beforeContFilter,
-		sinceFilter:          sinceContFilter,
-		taskFilter:           taskFilter,
-		isTask:               isTask,
-		publish:              publishFilter,
-		expose:               exposeFilter,
-		ContainerListOptions: config,
-		names:                view.GetAllNames(),
+		filters:        psFilters,
+		ancestorFilter: ancestorFilter,
+		images:         imagesFilter,
+		exitAllowed:    filtExited,
+		beforeFilter:   beforeContFilter,
+		sinceFilter:    sinceContFilter,
+		taskFilter:     taskFilter,
+		isTask:         isTask,
+		publish:        publishFilter,
+		expose:         exposeFilter,
+		ListOptions:    config,
+		names:          view.GetAllNames(),
 	}, nil
 }
 
@@ -462,7 +462,7 @@ func includeContainerInList(container *container.Snapshot, filter *listContext) 
 	}
 
 	if filter.filters.Contains("volume") {
-		volumesByName := make(map[string]types.MountPoint)
+		volumesByName := make(map[string]containertypes.MountPoint)
 		for _, m := range container.Mounts {
 			if m.Name != "" {
 				volumesByName[m.Name] = m
@@ -470,7 +470,7 @@ func includeContainerInList(container *container.Snapshot, filter *listContext) 
 				volumesByName[m.Source] = m
 			}
 		}
-		volumesByDestination := make(map[string]types.MountPoint)
+		volumesByDestination := make(map[string]containertypes.MountPoint)
 		for _, m := range container.Mounts {
 			if m.Destination != "" {
 				volumesByDestination[m.Destination] = m
@@ -575,8 +575,8 @@ func includeContainerInList(container *container.Snapshot, filter *listContext) 
 // $ docker ps -a
 // CONTAINER ID   IMAGE          COMMAND   CREATED       STATUS                  PORTS     NAMES
 // b0318bca5aef   3fbc63216742   "sh"      3 years ago   Exited (0) 3 years ago            ecstatic_beaver
-func (daemon *Daemon) refreshImage(ctx context.Context, s *container.Snapshot) (*types.Container, error) {
-	c := s.Container
+func (daemon *Daemon) refreshImage(ctx context.Context, s *container.Snapshot) (*containertypes.Summary, error) {
+	c := s.Summary
 
 	// s.Image is the image reference passed by the user to create an image
 	//         can be a:
@@ -593,7 +593,7 @@ func (daemon *Daemon) refreshImage(ctx context.Context, s *container.Snapshot) (
 	}
 
 	// Check if the image reference still resolves to the same digest.
-	img, err := daemon.imageService.GetImage(ctx, s.Image, imagetypes.GetImageOpts{})
+	img, err := daemon.imageService.GetImage(ctx, s.Image, backend.GetImageOpts{})
 	// If the image is no longer found or can't be resolved for some other
 	// reason. Update the Image to the specific ID of the original image it
 	// resolved to when the container was created.

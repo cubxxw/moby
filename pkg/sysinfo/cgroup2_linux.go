@@ -8,8 +8,8 @@ import (
 
 	"github.com/containerd/cgroups/v3"
 	cgroupsV2 "github.com/containerd/cgroups/v3/cgroup2"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/containerd/log"
+	"github.com/moby/sys/userns"
 )
 
 func newV2(options ...Opt) *SysInfo {
@@ -125,11 +125,25 @@ func applyCPUSetCgroupInfoV2(info *SysInfo) {
 	}
 	info.Cpus = strings.TrimSpace(string(cpus))
 
+	cpuSets, err := parseUintList(info.Cpus, 0)
+	if err != nil {
+		info.Warnings = append(info.Warnings, "Unable to parse cpuset cpus: "+err.Error())
+		return
+	}
+	info.CPUSets = cpuSets
+
 	mems, err := os.ReadFile(path.Join("/sys/fs/cgroup", info.cg2GroupPath, "cpuset.mems.effective"))
 	if err != nil {
 		return
 	}
 	info.Mems = strings.TrimSpace(string(mems))
+
+	memSets, err := parseUintList(info.Cpus, 0)
+	if err != nil {
+		info.Warnings = append(info.Warnings, "Unable to parse cpuset mems: "+err.Error())
+		return
+	}
+	info.MemSets = memSets
 }
 
 func applyPIDSCgroupInfoV2(info *SysInfo) {

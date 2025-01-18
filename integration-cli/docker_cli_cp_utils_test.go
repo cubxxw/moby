@@ -11,8 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/pkg/archive"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 type fileType uint32
@@ -150,15 +152,15 @@ func makeTestContainer(c *testing.T, options testContainerOptions) (containerID 
 
 	args = append(args, "busybox", "/bin/sh", "-c", options.command)
 
-	out, _ := dockerCmd(c, args...)
+	out := cli.DockerCmd(c, args...).Combined()
 
 	containerID = strings.TrimSpace(out)
 
-	out, _ = dockerCmd(c, "wait", containerID)
+	out = cli.DockerCmd(c, "wait", containerID).Combined()
 
 	exitCode := strings.TrimSpace(out)
 	if exitCode != "0" {
-		out, _ = dockerCmd(c, "logs", containerID)
+		out = cli.DockerCmd(c, "logs", containerID).Combined()
 	}
 	assert.Equal(c, exitCode, "0", "failed to make test container: %s", out)
 
@@ -224,12 +226,12 @@ func getTestDir(c *testing.T, label string) (tmpDir string) {
 	return
 }
 
-func isCpDirNotExist(err error) bool {
-	return strings.Contains(err.Error(), archive.ErrDirNotExists.Error())
+func isCpDirNotExist(err error) is.Comparison {
+	return is.ErrorContains(err, archive.ErrDirNotExists.Error())
 }
 
-func isCpCannotCopyDir(err error) bool {
-	return strings.Contains(err.Error(), archive.ErrCannotCopyDir.Error())
+func isCpCannotCopyDir(err error) is.Comparison {
+	return is.ErrorContains(err, archive.ErrCannotCopyDir.Error())
 }
 
 func fileContentEquals(c *testing.T, filename, contents string) error {

@@ -7,15 +7,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 )
 
 // State holds the current container state, and has methods to get and
-// set the state. Container has an embed, which allows all of the
-// functions defined against State to run against Container.
+// set the state. State is embedded in the [Container] struct.
+//
+// State contains an exported [sync.Mutex] which is used as a global lock
+// for both the State and the Container it's embedded in.
 type State struct {
+	// This Mutex is exported by design and is used as a global lock
+	// for both the State and the Container it's embedded in.
 	sync.Mutex
 	// Note that `Running` and `Paused` are not mutually exclusive:
 	// When pausing a container (on Linux), the freezer cgroup is used to suspend
@@ -110,10 +114,10 @@ func (s *State) String() string {
 
 // IsValidHealthString checks if the provided string is a valid container health status or not.
 func IsValidHealthString(s string) bool {
-	return s == types.Starting ||
-		s == types.Healthy ||
-		s == types.Unhealthy ||
-		s == types.NoHealthcheck
+	return s == container.Starting ||
+		s == container.Healthy ||
+		s == container.Unhealthy ||
+		s == container.NoHealthcheck
 }
 
 // StateString returns a single string to describe state
@@ -268,13 +272,23 @@ func (s *State) SetExitCode(ec int) {
 	s.ExitCodeValue = ec
 }
 
-// SetRunning sets the state of the container to "running".
-func (s *State) SetRunning(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task, initial bool) {
+// SetRunning sets the running state along with StartedAt time.
+func (s *State) SetRunning(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task, start time.Time) {
+	s.setRunning(ctr, tsk, &start)
+}
+
+// SetRunningExternal sets the running state without setting the `StartedAt` time (used for containers not started by Docker instead of SetRunning).
+func (s *State) SetRunningExternal(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task) {
+	s.setRunning(ctr, tsk, nil)
+}
+
+// setRunning sets the state of the container to "running".
+func (s *State) setRunning(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task, start *time.Time) {
 	s.ErrorMsg = ""
 	s.Paused = false
 	s.Running = true
 	s.Restarting = false
-	if initial {
+	if start != nil {
 		s.Paused = false
 	}
 	s.ExitCodeValue = 0
@@ -286,8 +300,8 @@ func (s *State) SetRunning(ctr libcontainerdtypes.Container, tsk libcontainerdty
 		s.Pid = 0
 	}
 	s.OOMKilled = false
-	if initial {
-		s.StartedAt = time.Now().UTC()
+	if start != nil {
+		s.StartedAt = start.UTC()
 	}
 }
 

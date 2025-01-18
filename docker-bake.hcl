@@ -1,6 +1,3 @@
-variable "APT_MIRROR" {
-  default = ""
-}
 variable "DOCKER_DEBUG" {
   default = ""
 }
@@ -64,7 +61,6 @@ function "bindir" {
 target "_common" {
   args = {
     BUILDKIT_CONTEXT_KEEP_GIT_DIR = 1
-    APT_MIRROR = APT_MIRROR
     DOCKER_DEBUG = DOCKER_DEBUG
     DOCKER_STATIC = DOCKER_STATIC
     DOCKER_LDFLAGS = DOCKER_LDFLAGS
@@ -176,12 +172,36 @@ variable "SYSTEMD" {
   default = "false"
 }
 
+variable "FIREWALLD" {
+  default = "false"
+}
+
 target "dev" {
   inherits = ["_common"]
   target = "dev"
   args = {
     SYSTEMD = SYSTEMD
+    FIREWALLD = FIREWALLD
   }
   tags = ["docker-dev"]
   output = ["type=docker"]
+}
+
+#
+# govulncheck
+#
+
+variable "GOVULNCHECK_FORMAT" {
+  default = null
+}
+
+target "govulncheck" {
+  inherits = ["_common"]
+  dockerfile = "./hack/dockerfiles/govulncheck.Dockerfile"
+  target = "output"
+  args = {
+    FORMAT = GOVULNCHECK_FORMAT
+  }
+  no-cache-filter = ["run"]
+  output = ["${DESTDIR}"]
 }

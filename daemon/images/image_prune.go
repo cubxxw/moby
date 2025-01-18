@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"sync/atomic"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	imagetypes "github.com/docker/docker/api/types/image"
 	timetypes "github.com/docker/docker/api/types/time"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
@@ -32,11 +31,11 @@ var imagesAcceptedFilters = map[string]bool{
 var errPruneRunning = errdefs.Conflict(errors.New("a prune operation is already running"))
 
 // ImagesPrune removes unused images
-func (i *ImageService) ImagesPrune(ctx context.Context, pruneFilters filters.Args) (*types.ImagesPruneReport, error) {
-	if !atomic.CompareAndSwapInt32(&i.pruneRunning, 0, 1) {
+func (i *ImageService) ImagesPrune(ctx context.Context, pruneFilters filters.Args) (*imagetypes.PruneReport, error) {
+	if !i.pruneRunning.CompareAndSwap(false, true) {
 		return nil, errPruneRunning
 	}
-	defer atomic.StoreInt32(&i.pruneRunning, 0)
+	defer i.pruneRunning.Store(false)
 
 	// make sure that only accepted filters have been received
 	err := pruneFilters.Validate(imagesAcceptedFilters)
@@ -44,7 +43,7 @@ func (i *ImageService) ImagesPrune(ctx context.Context, pruneFilters filters.Arg
 		return nil, err
 	}
 
-	rep := &types.ImagesPruneReport{}
+	rep := &imagetypes.PruneReport{}
 
 	danglingOnly, err := pruneFilters.GetBoolOrDefault("dangling", true)
 	if err != nil {
@@ -96,7 +95,7 @@ deleteImagesLoop:
 		default:
 		}
 
-		deletedImages := []types.ImageDeleteResponseItem{}
+		deletedImages := []imagetypes.DeleteResponse{}
 		refs := i.referenceStore.References(id.Digest())
 		if len(refs) > 0 {
 			shouldDelete := !danglingOnly

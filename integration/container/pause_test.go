@@ -3,14 +3,11 @@ package container // import "github.com/docker/docker/integration/container"
 import (
 	"io"
 	"testing"
-	"time"
 
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/docker/docker/api/types"
+	cerrdefs "github.com/containerd/errdefs"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/testutil/request"
 	"gotest.tools/v3/assert"
@@ -42,7 +39,7 @@ func TestPause(t *testing.T) {
 
 	until := request.DaemonUnixTime(ctx, t, apiClient, testEnv)
 
-	messages, errs := apiClient.Events(ctx, types.EventsOptions{
+	messages, errs := apiClient.Events(ctx, events.ListOptions{
 		Since:   since,
 		Until:   until,
 		Filters: filters.NewArgs(filters.Arg(string(events.ContainerEventType), cID)),
@@ -63,7 +60,6 @@ func TestPauseFailsOnWindowsServerContainers(t *testing.T) {
 
 func TestPauseStopPausedContainer(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
-	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.31"), "broken in earlier versions")
 	skip.If(t, testEnv.DaemonInfo.CgroupDriver == "none")
 	ctx := setupTest(t)
 	apiClient := testEnv.APIClient()
@@ -75,7 +71,7 @@ func TestPauseStopPausedContainer(t *testing.T) {
 	err = apiClient.ContainerStop(ctx, cID, containertypes.StopOptions{})
 	assert.NilError(t, err)
 
-	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
 }
 
 func getEventActions(t *testing.T, messages <-chan events.Message, errs <-chan error) []events.Action {

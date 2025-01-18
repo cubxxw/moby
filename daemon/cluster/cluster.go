@@ -49,7 +49,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/network"
 	types "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/daemon/cluster/controllers/plugin"
@@ -233,7 +233,7 @@ func (c *Cluster) newNodeRunner(conf nodeStartConfig) (*nodeRunner, error) {
 			}
 			localHostPort := conn.LocalAddr().String()
 			actualLocalAddr, _, _ = net.SplitHostPort(localHostPort)
-			conn.Close()
+			_ = conn.Close()
 		}
 	}
 
@@ -247,10 +247,6 @@ func (c *Cluster) newNodeRunner(conf nodeStartConfig) (*nodeRunner, error) {
 	c.config.Backend.DaemonJoinsCluster(c)
 
 	return nr, nil
-}
-
-func (c *Cluster) getRequestContext() (context.Context, func()) { // TODO: not needed when requests don't block on qourum lost
-	return context.WithTimeout(context.Background(), swarmRequestTimeout)
 }
 
 // IsManager returns true if Cluster is participating as a manager.
@@ -443,7 +439,8 @@ func (c *Cluster) lockedManagerAction(fn func(ctx context.Context, state nodeSta
 		return c.errNoManager(state)
 	}
 
-	ctx, cancel := c.getRequestContext()
+	ctx := context.TODO()
+	ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 	defer cancel()
 
 	return fn(ctx, state)

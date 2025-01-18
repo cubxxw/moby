@@ -8,71 +8,60 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/internal/caller"
 	"github.com/docker/docker/pkg/stack"
 )
 
-// HTTPHandlerFunc TODO
-type HTTPHandlerFunc func(interface{}, http.ResponseWriter, *http.Request)
-
-type httpHandlerCustom struct {
-	ctx interface{}
-	F   func(interface{}, http.ResponseWriter, *http.Request)
-}
-
-// ServeHTTP TODO
-func (h httpHandlerCustom) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.F(h.ctx, w, r)
-}
-
-var diagPaths2Func = map[string]HTTPHandlerFunc{
-	"/":          notImplemented,
-	"/help":      help,
-	"/ready":     ready,
-	"/stackdump": stackTrace,
-}
-
 // Server when the debug is enabled exposes a
 // This data structure is protected by the Agent mutex so does not require and additional mutex here
 type Server struct {
-	enable            int32
-	srv               *http.Server
-	port              int
-	mux               *http.ServeMux
-	registeredHanders map[string]bool
-	sync.Mutex
+	mu       sync.Mutex
+	enable   bool
+	srv      *http.Server
+	port     int
+	mux      *http.ServeMux
+	handlers map[string]http.Handler
 }
 
 // New creates a new diagnostic server
 func New() *Server {
-	return &Server{
-		registeredHanders: make(map[string]bool),
+	s := &Server{
+		mux:      http.NewServeMux(),
+		handlers: make(map[string]http.Handler),
 	}
+	s.HandleFunc("/", notImplemented)
+	s.HandleFunc("/help", s.help)
+	s.HandleFunc("/ready", ready)
+	s.HandleFunc("/stackdump", stackTrace)
+	return s
 }
 
-// Init initialize the mux for the http handling and register the base hooks
-func (s *Server) Init() {
-	s.mux = http.NewServeMux()
-
-	// Register local handlers
-	s.RegisterHandler(s, diagPaths2Func)
+// Handle registers the handler for the given pattern,
+// replacing any existing handler.
+func (s *Server) Handle(pattern string, handler http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.handlers[pattern]; !ok {
+		// Register a handler on the mux which allows the underlying handler to
+		// be dynamically switched out. The http.ServeMux will panic if one
+		// attempts to register a handler for the same pattern twice.
+		s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			s.mu.Lock()
+			h := s.handlers[pattern]
+			s.mu.Unlock()
+			h.ServeHTTP(w, r)
+		})
+	}
+	s.handlers[pattern] = handler
 }
 
-// RegisterHandler allows to register new handlers to the mux and to a specific path
-func (s *Server) RegisterHandler(ctx interface{}, hdlrs map[string]HTTPHandlerFunc) {
-	s.Lock()
-	defer s.Unlock()
-	for path, fun := range hdlrs {
-		if _, ok := s.registeredHanders[path]; ok {
-			continue
-		}
-		s.mux.Handle(path, httpHandlerCustom{ctx, fun})
-		s.registeredHanders[path] = true
-	}
+// Handle registers the handler function for the given pattern,
+// replacing any existing handler.
+func (s *Server) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	s.Handle(pattern, http.HandlerFunc(handler))
 }
 
 // ServeHTTP this is the method called bu the ListenAndServe, and is needed to allow us to
@@ -83,12 +72,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // EnableDiagnostic opens a TCP socket to debug the passed network DB
 func (s *Server) EnableDiagnostic(ip string, port int) {
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.port = port
 
-	if s.enable == 1 {
+	if s.enable {
 		log.G(context.TODO()).Info("The server is already up and running")
 		return
 	}
@@ -100,35 +89,37 @@ func (s *Server) EnableDiagnostic(ip string, port int) {
 		ReadHeaderTimeout: 5 * time.Minute, // "G112: Potential Slowloris Attack (gosec)"; not a real concern for our use, so setting a long timeout.
 	}
 	s.srv = srv
-	s.enable = 1
+	s.enable = true
 	go func(n *Server) {
 		// Ignore ErrServerClosed that is returned on the Shutdown call
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.G(context.TODO()).Errorf("ListenAndServe error: %s", err)
-			atomic.SwapInt32(&n.enable, 0)
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			n.enable = false
 		}
 	}(s)
 }
 
-// DisableDiagnostic stop the dubug and closes the tcp socket
+// DisableDiagnostic stop the debug and closes the tcp socket
 func (s *Server) DisableDiagnostic() {
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.srv.Shutdown(context.Background()) //nolint:errcheck
 	s.srv = nil
-	s.enable = 0
+	s.enable = false
 	log.G(context.TODO()).Info("Disabling the diagnostic server")
 }
 
 // IsDiagnosticEnabled returns true when the debug is enabled
 func (s *Server) IsDiagnosticEnabled() bool {
-	s.Lock()
-	defer s.Unlock()
-	return s.enable == 1
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enable
 }
 
-func notImplemented(ctx interface{}, w http.ResponseWriter, r *http.Request) {
+func notImplemented(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	_, jsonOutput := ParseHTTPFormOptions(r)
 	rsp := WrongCommand("not implemented", fmt.Sprintf("URL path: %s no method implemented check /help\n", r.URL.Path))
@@ -144,7 +135,7 @@ func notImplemented(ctx interface{}, w http.ResponseWriter, r *http.Request) {
 	_, _ = HTTPReply(w, rsp, jsonOutput)
 }
 
-func help(ctx interface{}, w http.ResponseWriter, r *http.Request) {
+func (s *Server) help(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	_, jsonOutput := ParseHTTPFormOptions(r)
 
@@ -156,17 +147,16 @@ func help(ctx interface{}, w http.ResponseWriter, r *http.Request) {
 		"url":       r.URL.String(),
 	}).Info("help done")
 
-	n, ok := ctx.(*Server)
 	var result string
-	if ok {
-		for path := range n.registeredHanders {
-			result += fmt.Sprintf("%s\n", path)
-		}
-		_, _ = HTTPReply(w, CommandSucceed(&StringCmd{Info: result}), jsonOutput)
+	s.mu.Lock()
+	for path := range s.handlers {
+		result += fmt.Sprintf("%s\n", path)
 	}
+	s.mu.Unlock()
+	_, _ = HTTPReply(w, CommandSucceed(&StringCmd{Info: result}), jsonOutput)
 }
 
-func ready(ctx interface{}, w http.ResponseWriter, r *http.Request) {
+func ready(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	_, jsonOutput := ParseHTTPFormOptions(r)
 
@@ -180,7 +170,7 @@ func ready(ctx interface{}, w http.ResponseWriter, r *http.Request) {
 	_, _ = HTTPReply(w, CommandSucceed(&StringCmd{Info: "OK"}), jsonOutput)
 }
 
-func stackTrace(ctx interface{}, w http.ResponseWriter, r *http.Request) {
+func stackTrace(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	_, jsonOutput := ParseHTTPFormOptions(r)
 

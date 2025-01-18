@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
 )
 
@@ -14,10 +14,10 @@ func TestIsValidHealthString(t *testing.T) {
 		Health   string
 		Expected bool
 	}{
-		{types.Healthy, true},
-		{types.Unhealthy, true},
-		{types.Starting, true},
-		{types.NoHealthcheck, true},
+		{container.Healthy, true},
+		{container.Unhealthy, true},
+		{container.Starting, true},
+		{container.NoHealthcheck, true},
 		{"fail", false},
 	}
 
@@ -68,7 +68,7 @@ func TestStateRunStop(t *testing.T) {
 
 		// Set the state to "Running".
 		s.Lock()
-		s.SetRunning(nil, &mockTask{pid: uint32(i)}, true)
+		s.SetRunning(nil, &mockTask{pid: uint32(i)}, time.Now())
 		s.Unlock()
 
 		// Assert desired state.
@@ -133,7 +133,7 @@ func TestStateTimeoutWait(t *testing.T) {
 	s := NewState()
 
 	s.Lock()
-	s.SetRunning(nil, nil, true)
+	s.SetRunning(nil, nil, time.Now())
 	s.Unlock()
 
 	// Start a wait with a timeout.
@@ -182,7 +182,7 @@ func TestCorrectStateWaitResultAfterRestart(t *testing.T) {
 	s := NewState()
 
 	s.Lock()
-	s.SetRunning(nil, nil, true)
+	s.SetRunning(nil, nil, time.Now())
 	s.Unlock()
 
 	waitC := s.Wait(context.Background(), WaitConditionNotRunning)
@@ -193,7 +193,7 @@ func TestCorrectStateWaitResultAfterRestart(t *testing.T) {
 	s.Unlock()
 
 	s.Lock()
-	s.SetRunning(nil, nil, true)
+	s.SetRunning(nil, nil, time.Now())
 	s.Unlock()
 
 	got := <-waitC

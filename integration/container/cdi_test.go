@@ -2,14 +2,12 @@ package container // import "github.com/docker/docker/integration/container"
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -17,6 +15,7 @@ import (
 	"github.com/docker/docker/testutil/daemon"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
+	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
 )
 
@@ -28,8 +27,12 @@ func TestCreateWithCDIDevices(t *testing.T) {
 
 	cwd, err := os.Getwd()
 	assert.NilError(t, err)
-	d := daemon.New(t, daemon.WithExperimental())
-	d.StartWithBusybox(ctx, t, "--cdi-spec-dir="+filepath.Join(cwd, "testdata", "cdi"))
+	configPath := filepath.Join(cwd, "daemon.json")
+	err = os.WriteFile(configPath, []byte(`{"features": {"cdi": true}}`), 0o644)
+	defer os.Remove(configPath)
+	assert.NilError(t, err)
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t, "--config-file", configPath, "--cdi-spec-dir="+filepath.Join(cwd, "testdata", "cdi"))
 	defer d.Stop(t)
 
 	apiClient := d.NewClientT(t)
@@ -38,7 +41,7 @@ func TestCreateWithCDIDevices(t *testing.T) {
 		container.WithCmd("/bin/sh", "-c", "env"),
 		container.WithCDIDevices("vendor1.com/device=foo"),
 	)
-	defer apiClient.ContainerRemove(ctx, id, types.ContainerRemoveOptions{Force: true})
+	defer apiClient.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
 
 	inspect, err := apiClient.ContainerInspect(ctx, id)
 	assert.NilError(t, err)
@@ -51,7 +54,8 @@ func TestCreateWithCDIDevices(t *testing.T) {
 	}
 	assert.Check(t, is.DeepEqual(inspect.HostConfig.DeviceRequests, expectedRequests))
 
-	reader, err := apiClient.ContainerLogs(ctx, id, types.ContainerLogsOptions{
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, id))
+	reader, err := apiClient.ContainerLogs(ctx, id, containertypes.LogsOptions{
 		ShowStdout: true,
 	})
 	assert.NilError(t, err)
@@ -72,57 +76,51 @@ func TestCDISpecDirsAreInSystemInfo(t *testing.T) {
 
 	testCases := []struct {
 		description             string
-		config                  map[string]interface{}
-		experimental            bool
+		config                  string
 		specDirs                []string
 		expectedInfoCDISpecDirs []string
 	}{
 		{
-			description:             "experimental no spec dirs specified returns default",
-			experimental:            true,
+			description:             "CDI enabled with no spec dirs specified returns default",
+			config:                  `{"features": {"cdi": true}}`,
 			specDirs:                nil,
 			expectedInfoCDISpecDirs: []string{"/etc/cdi", "/var/run/cdi"},
 		},
 		{
-			description:             "experimental specified spec dirs are returned",
-			experimental:            true,
+			description:             "CDI enabled with specified spec dirs are returned",
+			config:                  `{"features": {"cdi": true}}`,
 			specDirs:                []string{"/foo/bar", "/baz/qux"},
 			expectedInfoCDISpecDirs: []string{"/foo/bar", "/baz/qux"},
 		},
 		{
-			description:             "experimental empty string as spec dir returns empty slice",
-			experimental:            true,
+			description:             "CDI enabled with empty string as spec dir returns empty slice",
+			config:                  `{"features": {"cdi": true}}`,
 			specDirs:                []string{""},
 			expectedInfoCDISpecDirs: []string{},
 		},
 		{
-			description:             "experimental empty config option returns empty slice",
-			experimental:            true,
-			config:                  map[string]interface{}{"cdi-spec-dirs": []string{}},
+			description:             "CDI enabled with empty config option returns empty slice",
+			config:                  `{"features": {"cdi": true}, "cdi-spec-dirs": []}`,
 			expectedInfoCDISpecDirs: []string{},
 		},
 		{
-			description:             "non-experimental no spec dirs specified returns empty slice",
-			experimental:            false,
+			description:             "CDI disabled with no spec dirs specified returns empty slice",
 			specDirs:                nil,
 			expectedInfoCDISpecDirs: []string{},
 		},
 		{
-			description:             "non-experimental specified spec dirs returns empty slice",
-			experimental:            false,
+			description:             "CDI disabled with specified spec dirs returns empty slice",
 			specDirs:                []string{"/foo/bar", "/baz/qux"},
 			expectedInfoCDISpecDirs: []string{},
 		},
 		{
-			description:             "non-experimental empty string as spec dir returns empty slice",
-			experimental:            false,
+			description:             "CDI disabled with empty string as spec dir returns empty slice",
 			specDirs:                []string{""},
 			expectedInfoCDISpecDirs: []string{},
 		},
 		{
-			description:             "non-experimental empty config option returns empty slice",
-			experimental:            false,
-			config:                  map[string]interface{}{"cdi-spec-dirs": []string{}},
+			description:             "CDI disabled with empty config option returns empty slice",
+			config:                  `{"cdi-spec-dirs": []}`,
 			expectedInfoCDISpecDirs: []string{},
 		},
 	}
@@ -130,23 +128,16 @@ func TestCDISpecDirsAreInSystemInfo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			var opts []daemon.Option
-			if tc.experimental {
-				opts = append(opts, daemon.WithExperimental())
-			}
 			d := daemon.New(t, opts...)
 
 			var args []string
 			for _, specDir := range tc.specDirs {
 				args = append(args, "--cdi-spec-dir="+specDir)
 			}
-			if tc.config != nil {
+			if tc.config != "" {
 				configPath := filepath.Join(t.TempDir(), "daemon.json")
 
-				configFile, err := os.Create(configPath)
-				assert.NilError(t, err)
-				defer configFile.Close()
-
-				err = json.NewEncoder(configFile).Encode(tc.config)
+				err := os.WriteFile(configPath, []byte(tc.config), 0o644)
 				assert.NilError(t, err)
 
 				args = append(args, "--config-file="+configPath)

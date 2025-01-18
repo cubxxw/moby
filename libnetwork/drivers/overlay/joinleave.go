@@ -8,16 +8,25 @@ import (
 	"net"
 	"syscall"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/gogo/protobuf/proto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
-func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.overlay.Join", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid),
+		attribute.String("sboxKey", sboxKey)))
+	defer span.End()
+
 	if err := validateID(nid, eid); err != nil {
 		return err
 	}
@@ -67,14 +76,14 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 
 	veth, err := nlh.LinkByName(overlayIfName)
 	if err != nil {
-		return fmt.Errorf("cound not find link by name %s: %v", overlayIfName, err)
+		return fmt.Errorf("could not find link by name %s: %v", overlayIfName, err)
 	}
 	err = nlh.LinkSetMTU(veth, mtu)
 	if err != nil {
 		return err
 	}
 
-	if err = sbox.AddInterface(overlayIfName, "veth", osl.WithMaster(s.brName)); err != nil {
+	if err = sbox.AddInterface(ctx, overlayIfName, "veth", osl.WithMaster(s.brName)); err != nil {
 		return fmt.Errorf("could not add veth pair inside the network sandbox: %v", err)
 	}
 
@@ -96,7 +105,7 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 			continue
 		}
 		if err = jinfo.AddStaticRoute(sub.subnetIP, types.NEXTHOP, s.gwIP.IP); err != nil {
-			log.G(context.TODO()).Errorf("Adding subnet %s static route in network %q failed\n", s.subnetIP, n.id)
+			log.G(ctx).Errorf("Adding subnet %s static route in network %q failed\n", s.subnetIP, n.id)
 		}
 	}
 
@@ -107,23 +116,23 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 		}
 	}
 
-	d.peerAdd(nid, eid, ep.addr.IP, ep.addr.Mask, ep.mac, net.ParseIP(d.advertiseAddress), false, false, true)
+	d.peerAdd(nid, eid, ep.addr.IP, ep.addr.Mask, ep.mac, d.advertiseAddress, true)
 
 	if err = d.checkEncryption(nid, nil, true, true); err != nil {
-		log.G(context.TODO()).Warn(err)
+		log.G(ctx).Warn(err)
 	}
 
 	buf, err := proto.Marshal(&PeerRecord{
 		EndpointIP:       ep.addr.String(),
 		EndpointMAC:      ep.mac.String(),
-		TunnelEndpointIP: d.advertiseAddress,
+		TunnelEndpointIP: d.advertiseAddress.String(),
 	})
 	if err != nil {
 		return err
 	}
 
 	if err := jinfo.AddTableEntry(ovPeerTable, eid, buf); err != nil {
-		log.G(context.TODO()).Errorf("overlay: Failed adding table entry to joininfo: %v", err)
+		log.G(ctx).Errorf("overlay: Failed adding table entry to joininfo: %v", err)
 	}
 
 	return nil
@@ -162,7 +171,7 @@ func (d *driver) EventNotify(etype driverapi.EventType, nid, tableName, key stri
 
 	// Ignore local peers. We already know about them and they
 	// should not be added to vxlan fdb.
-	if peer.TunnelEndpointIP == d.advertiseAddress {
+	if net.ParseIP(peer.TunnelEndpointIP).Equal(d.advertiseAddress) {
 		return
 	}
 
@@ -189,7 +198,7 @@ func (d *driver) EventNotify(etype driverapi.EventType, nid, tableName, key stri
 		return
 	}
 
-	d.peerAdd(nid, eid, addr.IP, addr.Mask, mac, vtep, false, false, false)
+	d.peerAdd(nid, eid, addr.IP, addr.Mask, mac, vtep, false)
 }
 
 // Leave method is invoked when a Sandbox detaches from an endpoint.
@@ -209,7 +218,7 @@ func (d *driver) Leave(nid, eid string) error {
 		return types.InternalMaskableErrorf("could not find endpoint with id %s", eid)
 	}
 
-	d.peerDelete(nid, eid, ep.addr.IP, ep.addr.Mask, ep.mac, net.ParseIP(d.advertiseAddress), true)
+	d.peerDelete(nid, eid, ep.addr.IP, ep.addr.Mask, ep.mac, d.advertiseAddress, true)
 
 	n.leaveSandbox()
 

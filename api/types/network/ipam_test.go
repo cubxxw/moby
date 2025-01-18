@@ -8,7 +8,7 @@ import (
 )
 
 func TestNetworkWithInvalidIPAM(t *testing.T) {
-	testcases := []struct {
+	tests := []struct {
 		name           string
 		ipam           IPAM
 		ipv6           bool
@@ -29,6 +29,12 @@ func TestNetworkWithInvalidIPAM(t *testing.T) {
 				"invalid gateway 2001:db8::1: parent subnet is an IPv4 block",
 				"invalid auxiliary address DefaultGatewayIPv4: parent subnet is an IPv4 block",
 			},
+		},
+		{
+			// Regression test for https://github.com/moby/moby/issues/47202
+			name: "IPv6 subnet is discarded with no error when IPv6 is disabled",
+			ipam: IPAM{Config: []IPAMConfig{{Subnet: "2001:db8::/32"}}},
+			ipv6: false,
 		},
 		{
 			name: "Invalid data - Subnet",
@@ -117,12 +123,11 @@ func TestNetworkWithInvalidIPAM(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testcases {
-		tc := tc
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			errs := ValidateIPAM(&tc.ipam)
+			errs := ValidateIPAM(&tc.ipam, tc.ipv6)
 			if tc.expectedErrors == nil {
 				assert.NilError(t, errs)
 				return

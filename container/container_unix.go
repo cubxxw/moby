@@ -8,15 +8,12 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/continuity/fs"
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	mounttypes "github.com/docker/docker/api/types/mount"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/pkg/stringid"
-	"github.com/docker/docker/volume"
 	volumemounts "github.com/docker/docker/volume/mounts"
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -129,34 +126,11 @@ func (container *Container) NetworkMounts() []Mount {
 }
 
 // CopyImagePathContent copies files in destination to the volume.
-func (container *Container) CopyImagePathContent(v volume.Volume, destination string) error {
-	rootfs, err := container.GetResourcePath(destination)
-	if err != nil {
+func (container *Container) CopyImagePathContent(volumePath, destination string) error {
+	if err := label.Relabel(volumePath, container.MountLabel, true); err != nil && !errors.Is(err, syscall.ENOTSUP) {
 		return err
 	}
-
-	if _, err := os.Stat(rootfs); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	id := stringid.GenerateRandomID()
-	path, err := v.Mount(id)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err := v.Unmount(id); err != nil {
-			log.G(context.TODO()).Warnf("error while unmounting volume %s: %v", v.Name(), err)
-		}
-	}()
-	if err := label.Relabel(path, container.MountLabel, true); err != nil && !errors.Is(err, syscall.ENOTSUP) {
-		return err
-	}
-	return copyExistingContents(rootfs, path)
+	return copyExistingContents(destination, volumePath)
 }
 
 // ShmResourcePath returns path to shm
@@ -396,7 +370,7 @@ func (container *Container) DetachAndUnmount(volumeEventLog func(name string, ac
 				Warn("Unable to unmount")
 		}
 	}
-	return container.UnmountVolumes(volumeEventLog)
+	return container.UnmountVolumes(ctx, volumeEventLog)
 }
 
 // ignoreUnsupportedXAttrs ignores errors when extended attributes
@@ -419,9 +393,13 @@ func copyExistingContents(source, destination string) error {
 		return err
 	}
 	if len(dstList) != 0 {
-		// destination is not empty, do not copy
+		log.G(context.TODO()).WithFields(log.Fields{
+			"source":      source,
+			"destination": destination,
+		}).Debug("destination is not empty, do not copy")
 		return nil
 	}
+
 	return fs.CopyDir(destination, source, ignoreUnsupportedXAttrs())
 }
 
@@ -453,10 +431,10 @@ func (container *Container) TmpfsMounts() ([]Mount, error) {
 }
 
 // GetMountPoints gives a platform specific transformation to types.MountPoint. Callers must hold a Container lock.
-func (container *Container) GetMountPoints() []types.MountPoint {
-	mountPoints := make([]types.MountPoint, 0, len(container.MountPoints))
+func (container *Container) GetMountPoints() []containertypes.MountPoint {
+	mountPoints := make([]containertypes.MountPoint, 0, len(container.MountPoints))
 	for _, m := range container.MountPoints {
-		mountPoints = append(mountPoints, types.MountPoint{
+		mountPoints = append(mountPoints, containertypes.MountPoint{
 			Type:        m.Type,
 			Name:        m.Name,
 			Source:      m.Path(),

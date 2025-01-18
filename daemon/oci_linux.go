@@ -5,33 +5,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	cdcgroups "github.com/containerd/cgroups/v3"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/log"
-	coci "github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/apparmor"
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/apparmor"
+	coci "github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/log"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	dconfig "github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/rootless/mountopts"
+	"github.com/docker/docker/internal/rootless/specconv"
 	"github.com/docker/docker/oci"
 	"github.com/docker/docker/oci/caps"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/rootless/specconv"
-	"github.com/docker/docker/pkg/stringid"
 	volumemounts "github.com/docker/docker/volume/mounts"
 	"github.com/moby/sys/mount"
 	"github.com/moby/sys/mountinfo"
+	"github.com/moby/sys/user"
+	"github.com/moby/sys/userns"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/user"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
-	"golang.org/x/sys/unix"
 )
 
 const inContainerInitPath = "/sbin/" + dconfig.DefaultInitBinary
@@ -61,28 +59,6 @@ func withRlimits(daemon *Daemon, daemonCfg *dconfig.Config, c *container.Contain
 	}
 }
 
-// withLibnetwork sets the libnetwork hook
-func withLibnetwork(daemon *Daemon, daemonCfg *dconfig.Config, c *container.Container) coci.SpecOpts {
-	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
-		if c.Config.NetworkDisabled {
-			return nil
-		}
-		for _, ns := range s.Linux.Namespaces {
-			if ns.Type == specs.NetworkNamespace && ns.Path == "" {
-				if s.Hooks == nil {
-					s.Hooks = &specs.Hooks{}
-				}
-				shortNetCtlrID := stringid.TruncateID(daemon.netController.ID())
-				s.Hooks.Prestart = append(s.Hooks.Prestart, specs.Hook{
-					Path: filepath.Join("/proc", strconv.Itoa(os.Getpid()), "exe"),
-					Args: []string{"libnetwork-setkey", "-exec-root=" + daemonCfg.GetExecRoot(), c.ID, shortNetCtlrID},
-				})
-			}
-		}
-		return nil
-	}
-}
-
 // withRootless sets the spec to the rootless configuration
 func withRootless(daemon *Daemon, daemonCfg *dconfig.Config) coci.SpecOpts {
 	return func(_ context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
@@ -107,6 +83,15 @@ func withRootless(daemon *Daemon, daemonCfg *dconfig.Config) coci.SpecOpts {
 			v2Controllers = strings.Fields(string(controllersFile))
 		}
 		return specconv.ToRootless(s, v2Controllers)
+	}
+}
+
+// withRootfulInRootless is used for "rootful-in-rootless" dind;
+// the daemon is running in UserNS but has no access to RootlessKit API socket, host filesystem, etc.
+func withRootfulInRootless(daemon *Daemon, daemonCfg *dconfig.Config) coci.SpecOpts {
+	return func(_ context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
+		specconv.ToRootfulInRootless(s)
+		return nil
 	}
 }
 
@@ -169,7 +154,7 @@ func WithApparmor(c *container.Container) coci.SpecOpts {
 	}
 }
 
-// WithCapabilities sets the container's capabilties
+// WithCapabilities sets the container's capabilities
 func WithCapabilities(c *container.Container) coci.SpecOpts {
 	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
 		capabilities, err := caps.TweakCapabilities(
@@ -276,10 +261,7 @@ func WithNamespaces(daemon *Daemon, c *container.Container) coci.SpecOpts {
 					})
 				}
 			case networkMode.IsHost():
-				setNamespace(s, specs.LinuxNamespace{
-					Type: specs.NetworkNamespace,
-					Path: c.NetworkSettings.SandboxKey,
-				})
+				oci.RemoveNamespace(s, specs.NetworkNamespace)
 			default:
 				setNamespace(s, specs.LinuxNamespace{
 					Type: specs.NetworkNamespace,
@@ -462,38 +444,6 @@ func ensureSharedOrSlave(path string) error {
 	return nil
 }
 
-// Get the set of mount flags that are set on the mount that contains the given
-// path and are locked by CL_UNPRIVILEGED. This is necessary to ensure that
-// bind-mounting "with options" will not fail with user namespaces, due to
-// kernel restrictions that require user namespace mounts to preserve
-// CL_UNPRIVILEGED locked flags.
-func getUnprivilegedMountFlags(path string) ([]string, error) {
-	var statfs unix.Statfs_t
-	if err := unix.Statfs(path, &statfs); err != nil {
-		return nil, err
-	}
-
-	// The set of keys come from https://github.com/torvalds/linux/blob/v4.13/fs/namespace.c#L1034-L1048.
-	unprivilegedFlags := map[uint64]string{
-		unix.MS_RDONLY:     "ro",
-		unix.MS_NODEV:      "nodev",
-		unix.MS_NOEXEC:     "noexec",
-		unix.MS_NOSUID:     "nosuid",
-		unix.MS_NOATIME:    "noatime",
-		unix.MS_RELATIME:   "relatime",
-		unix.MS_NODIRATIME: "nodiratime",
-	}
-
-	var flags []string
-	for mask, flag := range unprivilegedFlags {
-		if uint64(statfs.Flags)&mask == mask {
-			flags = append(flags, flag)
-		}
-	}
-
-	return flags, nil
-}
-
 var (
 	mountPropagationMap = map[string]int{
 		"private":  mount.PRIVATE,
@@ -526,50 +476,9 @@ func inSlice(slice []string, s string) bool {
 }
 
 // withMounts sets the container's mounts
-func withMounts(daemon *Daemon, daemonCfg *configStore, c *container.Container) coci.SpecOpts {
+func withMounts(daemon *Daemon, daemonCfg *configStore, c *container.Container, mounts []container.Mount) coci.SpecOpts {
 	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) (err error) {
-		if err := daemon.setupContainerMountsRoot(c); err != nil {
-			return err
-		}
-
-		if err := daemon.setupIPCDirs(c); err != nil {
-			return err
-		}
-
-		defer func() {
-			if err != nil {
-				daemon.cleanupSecretDir(c)
-			}
-		}()
-
-		if err := daemon.setupSecretDir(c); err != nil {
-			return err
-		}
-
-		ms, err := daemon.setupMounts(c)
-		if err != nil {
-			return err
-		}
-
-		if !c.HostConfig.IpcMode.IsPrivate() && !c.HostConfig.IpcMode.IsEmpty() {
-			ms = append(ms, c.IpcMounts()...)
-		}
-
-		tmpfsMounts, err := c.TmpfsMounts()
-		if err != nil {
-			return err
-		}
-		ms = append(ms, tmpfsMounts...)
-
-		secretMounts, err := c.SecretMounts()
-		if err != nil {
-			return err
-		}
-		ms = append(ms, secretMounts...)
-
-		sort.Sort(mounts(ms))
-
-		mounts := ms
+		sortMounts(mounts)
 
 		userMounts := make(map[string]struct{})
 		for _, m := range mounts {
@@ -717,7 +626,7 @@ func withMounts(daemon *Daemon, daemonCfg *configStore, c *container.Container) 
 			// when runc sets up the root filesystem, it is already inside a user
 			// namespace, and thus cannot change any flags that are locked.
 			if daemonCfg.RemappedRoot != "" || userns.RunningInUserNS() {
-				unprivOpts, err := getUnprivilegedMountFlags(m.Source)
+				unprivOpts, err := mountopts.UnprivilegedMountFlags(m.Source)
 				if err != nil {
 					return err
 				}
@@ -890,15 +799,11 @@ func withCgroups(daemon *Daemon, daemonCfg *dconfig.Config, c *container.Contain
 
 		p := cgroupsPath
 		if useSystemd {
-			initPath, err := cgroups.GetInitCgroup("cpu")
+			path, err := cgroups.GetOwnCgroup("cpu")
 			if err != nil {
 				return errors.Wrap(err, "unable to init CPU RT controller")
 			}
-			_, err = cgroups.GetOwnCgroup("cpu")
-			if err != nil {
-				return errors.Wrap(err, "unable to init CPU RT controller")
-			}
-			p = filepath.Join(initPath, s.Linux.CgroupsPath)
+			p = filepath.Join(path, s.Linux.CgroupsPath)
 		}
 
 		// Clean path to guard against things like ../../../BAD
@@ -1087,7 +992,7 @@ func WithUser(c *container.Container) coci.SpecOpts {
 	}
 }
 
-func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container) (retSpec *specs.Spec, err error) {
+func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container, mounts []container.Mount) (retSpec *specs.Spec, err error) {
 	var (
 		opts []coci.SpecOpts
 		s    = oci.DefaultSpec()
@@ -1102,8 +1007,7 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 		WithNamespaces(daemon, c),
 		WithCapabilities(c),
 		WithSeccomp(daemon, c),
-		withMounts(daemon, daemonCfg, c),
-		withLibnetwork(daemon, &daemonCfg.Config, c),
+		withMounts(daemon, daemonCfg, c, mounts),
 		WithApparmor(c),
 		WithSelinux(c),
 		WithOOMScore(&c.HostConfig.OomScoreAdj),
@@ -1126,6 +1030,8 @@ func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c 
 	}
 	if daemonCfg.Rootless {
 		opts = append(opts, withRootless(daemon, &daemonCfg.Config))
+	} else if userns.RunningInUserNS() {
+		opts = append(opts, withRootfulInRootless(daemon, &daemonCfg.Config))
 	}
 
 	var snapshotter, snapshotKey string

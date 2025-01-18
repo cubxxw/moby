@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,13 +16,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	eventtypes "github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/authorization"
 	"github.com/docker/docker/testutil/environment"
+	"github.com/docker/go-connections/sockets"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/skip"
 )
@@ -78,6 +79,17 @@ func isAllowed(reqURI string) bool {
 		}
 	}
 	return false
+}
+
+func socketHTTPClient(u *url.URL) (*http.Client, error) {
+	transport := &http.Transport{}
+	err := sockets.ConfigureTransport(transport, u.Scheme, u.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Transport: transport,
+	}, nil
 }
 
 func TestAuthZPluginAllowRequest(t *testing.T) {
@@ -175,15 +187,17 @@ func TestAuthZPluginAPIDenyResponse(t *testing.T) {
 	daemonURL, err := url.Parse(d.Sock())
 	assert.NilError(t, err)
 
-	conn, err := net.DialTimeout(daemonURL.Scheme, daemonURL.Path, time.Second*10)
+	socketClient, err := socketHTTPClient(daemonURL)
 	assert.NilError(t, err)
-	c := httputil.NewClientConn(conn, nil)
-	req, err := http.NewRequest(http.MethodGet, "/version", nil)
-	assert.NilError(t, err)
-	req = req.WithContext(ctx)
-	resp, err := c.Do(req)
 
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", nil)
 	assert.NilError(t, err)
+	req.URL.Scheme = "http"
+	req.URL.Host = client.DummyHost
+
+	resp, err := socketClient.Do(req)
+	assert.NilError(t, err)
+
 	assert.DeepEqual(t, http.StatusForbidden, resp.StatusCode)
 }
 
@@ -272,7 +286,7 @@ func systemTime(ctx context.Context, t *testing.T, client client.APIClient, test
 }
 
 func systemEventsSince(ctx context.Context, client client.APIClient, since string) (<-chan eventtypes.Message, <-chan error, func()) {
-	eventOptions := types.EventsOptions{
+	eventOptions := eventtypes.ListOptions{
 		Since: since,
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -387,7 +401,7 @@ func TestAuthzPluginEnsureContainerCopyToFrom(t *testing.T) {
 	c := d.NewClientT(t)
 
 	cID := container.Run(ctx, t, c)
-	defer c.ContainerRemove(ctx, cID, types.ContainerRemoveOptions{Force: true})
+	defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
 
 	_, err = f.Seek(0, io.SeekStart)
 	assert.NilError(t, err)
@@ -401,7 +415,7 @@ func TestAuthzPluginEnsureContainerCopyToFrom(t *testing.T) {
 	dstDir, preparedArchive, err := archive.PrepareArchiveCopy(srcArchive, srcInfo, archive.CopyInfo{Path: "/test"})
 	assert.NilError(t, err)
 
-	err = c.CopyToContainer(ctx, cID, dstDir, preparedArchive, types.CopyToContainerOptions{})
+	err = c.CopyToContainer(ctx, cID, dstDir, preparedArchive, containertypes.CopyToContainerOptions{})
 	assert.NilError(t, err)
 
 	rdr, _, err := c.CopyFromContainer(ctx, cID, "/test")
@@ -410,8 +424,8 @@ func TestAuthzPluginEnsureContainerCopyToFrom(t *testing.T) {
 	assert.NilError(t, err)
 }
 
-func imageSave(ctx context.Context, client client.APIClient, path, image string) error {
-	responseReader, err := client.ImageSave(ctx, []string{image})
+func imageSave(ctx context.Context, client client.APIClient, path, imgRef string) error {
+	responseReader, err := client.ImageSave(ctx, []string{imgRef}, image.SaveOptions{})
 	if err != nil {
 		return err
 	}
@@ -431,8 +445,7 @@ func imageLoad(ctx context.Context, client client.APIClient, path string) error 
 		return err
 	}
 	defer file.Close()
-	quiet := true
-	response, err := client.ImageLoad(ctx, file, quiet)
+	response, err := client.ImageLoad(ctx, file, image.LoadOptions{Quiet: true})
 	if err != nil {
 		return err
 	}
@@ -446,9 +459,9 @@ func imageImport(ctx context.Context, client client.APIClient, path string) erro
 		return err
 	}
 	defer file.Close()
-	options := types.ImageImportOptions{}
+	options := image.ImportOptions{}
 	ref := ""
-	source := types.ImageImportSource{
+	source := image.ImportSource{
 		Source:     file,
 		SourceName: "-",
 	}
@@ -470,13 +483,15 @@ func TestAuthZPluginHeader(t *testing.T) {
 	daemonURL, err := url.Parse(d.Sock())
 	assert.NilError(t, err)
 
-	conn, err := net.DialTimeout(daemonURL.Scheme, daemonURL.Path, time.Second*10)
+	socketClient, err := socketHTTPClient(daemonURL)
 	assert.NilError(t, err)
-	client := httputil.NewClientConn(conn, nil)
-	req, err := http.NewRequest(http.MethodGet, "/version", nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", nil)
 	assert.NilError(t, err)
-	req = req.WithContext(ctx)
-	resp, err := client.Do(req)
+	req.URL.Scheme = "http"
+	req.URL.Host = client.DummyHost
+
+	resp, err := socketClient.Do(req)
 	assert.NilError(t, err)
 	assert.Equal(t, "application/json", resp.Header["Content-Type"][0])
 }

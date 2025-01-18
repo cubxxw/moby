@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -14,7 +14,7 @@ import (
 )
 
 type File struct {
-	Stat types.Stat
+	Stat *types.Stat
 	Data []byte
 }
 
@@ -30,8 +30,9 @@ func NewFS() *FS {
 	}
 }
 
-func (fs *FS) Add(p string, stat types.Stat, data []byte) {
-	stat.Size_ = int64(len(data))
+func (fs *FS) Add(p string, stat *types.Stat, data []byte) {
+	p = strings.TrimPrefix(p, "/")
+	stat.Size = int64(len(data))
 	if stat.Mode == 0 {
 		stat.Mode = 0644
 	}
@@ -42,16 +43,20 @@ func (fs *FS) Add(p string, stat types.Stat, data []byte) {
 	}
 }
 
-func (fs *FS) Walk(ctx context.Context, fn filepath.WalkFunc) error {
+func (fs *FS) Walk(ctx context.Context, target string, fn fs.WalkDirFunc) error {
+	target = strings.TrimPrefix(target, "/")
 	keys := make([]string, 0, len(fs.files))
 	for k := range fs.files {
+		if !strings.HasPrefix(k, target) {
+			continue
+		}
 		keys = append(keys, convertPathToKey(k))
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
 		p := convertKeyToPath(k)
 		st := fs.files[p].Stat
-		if err := fn(p, &fsutil.StatInfo{Stat: &st}, nil); err != nil {
+		if err := fn(p, &fsutil.DirEntryInfo{Stat: st}, nil); err != nil {
 			return err
 		}
 	}
@@ -66,9 +71,9 @@ func (fs *FS) Open(p string) (io.ReadCloser, error) {
 }
 
 func convertPathToKey(p string) string {
-	return strings.Replace(p, "/", "\x00", -1)
+	return strings.ReplaceAll(p, "/", "\x00")
 }
 
 func convertKeyToPath(p string) string {
-	return strings.Replace(p, "\x00", "/", -1)
+	return strings.ReplaceAll(p, "\x00", "/")
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,8 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
+	"github.com/docker/docker/internal/testutils/specialimage"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/icmd"
 	"gotest.tools/v3/skip"
 )
@@ -31,19 +36,19 @@ func (s *DockerCLISaveLoadSuite) OnTimeout(c *testing.T) {
 func (s *DockerCLISaveLoadSuite) TestSaveXzAndLoadRepoStdout(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	name := "test-save-xz-and-load-repo-stdout"
-	dockerCmd(c, "run", "--name", name, "busybox", "true")
+	cli.DockerCmd(c, "run", "--name", name, "busybox", "true")
 
-	repoName := "foobar-save-load-test-xz-gz"
-	out, _ := dockerCmd(c, "commit", name, repoName)
+	imgRepoName := "foobar-save-load-test-xz-gz"
+	out := cli.DockerCmd(c, "commit", name, imgRepoName).Combined()
 
-	dockerCmd(c, "inspect", repoName)
+	cli.DockerCmd(c, "inspect", imgRepoName)
 
 	repoTarball, err := RunCommandPipelineWithOutput(
-		exec.Command(dockerBinary, "save", repoName),
+		exec.Command(dockerBinary, "save", imgRepoName),
 		exec.Command("xz", "-c"),
 		exec.Command("gzip", "-c"))
 	assert.NilError(c, err, "failed to save repo: %v %v", out, err)
-	deleteImages(repoName)
+	deleteImages(imgRepoName)
 
 	icmd.RunCmd(icmd.Cmd{
 		Command: []string{dockerBinary, "load"},
@@ -52,7 +57,7 @@ func (s *DockerCLISaveLoadSuite) TestSaveXzAndLoadRepoStdout(c *testing.T) {
 		ExitCode: 1,
 	})
 
-	after, _, err := dockerCmdWithError("inspect", repoName)
+	after, _, err := dockerCmdWithError("inspect", imgRepoName)
 	assert.ErrorContains(c, err, "", "the repo should not exist: %v", after)
 }
 
@@ -60,12 +65,12 @@ func (s *DockerCLISaveLoadSuite) TestSaveXzAndLoadRepoStdout(c *testing.T) {
 func (s *DockerCLISaveLoadSuite) TestSaveXzGzAndLoadRepoStdout(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	name := "test-save-xz-gz-and-load-repo-stdout"
-	dockerCmd(c, "run", "--name", name, "busybox", "true")
+	cli.DockerCmd(c, "run", "--name", name, "busybox", "true")
 
 	repoName := "foobar-save-load-test-xz-gz"
-	dockerCmd(c, "commit", name, repoName)
+	cli.DockerCmd(c, "commit", name, repoName)
 
-	dockerCmd(c, "inspect", repoName)
+	cli.DockerCmd(c, "inspect", repoName)
 
 	out, err := RunCommandPipelineWithOutput(
 		exec.Command(dockerBinary, "save", repoName),
@@ -88,28 +93,35 @@ func (s *DockerCLISaveLoadSuite) TestSaveXzGzAndLoadRepoStdout(c *testing.T) {
 
 func (s *DockerCLISaveLoadSuite) TestSaveSingleTag(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
-	repoName := "foobar-save-single-tag-test"
-	dockerCmd(c, "tag", "busybox:latest", fmt.Sprintf("%v:latest", repoName))
+	imgRepoName := "foobar-save-single-tag-test"
+	cli.DockerCmd(c, "tag", "busybox:latest", fmt.Sprintf("%v:latest", imgRepoName))
 
-	out, _ := dockerCmd(c, "images", "-q", "--no-trunc", repoName)
+	out := cli.DockerCmd(c, "images", "-q", "--no-trunc", imgRepoName).Stdout()
 	cleanedImageID := strings.TrimSpace(out)
 
+	filesFilter := fmt.Sprintf("(^manifest.json$|%v)", cleanedImageID)
+	if testEnv.UsingSnapshotter() {
+		filesFilter = fmt.Sprintf("(^index.json$|^manifest.json$|%v)", cleanedImageID)
+	}
 	out, err := RunCommandPipelineWithOutput(
-		exec.Command(dockerBinary, "save", fmt.Sprintf("%v:latest", repoName)),
+		exec.Command(dockerBinary, "save", fmt.Sprintf("%v:latest", imgRepoName)),
 		exec.Command("tar", "t"),
-		exec.Command("grep", "-E", fmt.Sprintf("(^repositories$|%v)", cleanedImageID)))
-	assert.NilError(c, err, "failed to save repo with image ID and 'repositories' file: %s, %v", out, err)
+		exec.Command("grep", "-E", filesFilter))
+	assert.NilError(c, err, "failed to save repo with image ID and index files: %s, %v", out, err)
 }
 
 func (s *DockerCLISaveLoadSuite) TestSaveImageId(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
-	repoName := "foobar-save-image-id-test"
-	dockerCmd(c, "tag", "emptyfs:latest", fmt.Sprintf("%v:latest", repoName))
 
-	out, _ := dockerCmd(c, "images", "-q", "--no-trunc", repoName)
+	emptyFSImage := loadSpecialImage(c, specialimage.EmptyFS)
+
+	imgRepoName := "foobar-save-image-id-test"
+	cli.DockerCmd(c, "tag", emptyFSImage, fmt.Sprintf("%v:latest", imgRepoName))
+
+	out := cli.DockerCmd(c, "images", "-q", "--no-trunc", imgRepoName).Stdout()
 	cleanedLongImageID := strings.TrimPrefix(strings.TrimSpace(out), "sha256:")
 
-	out, _ = dockerCmd(c, "images", "-q", repoName)
+	out = cli.DockerCmd(c, "images", "-q", imgRepoName).Stdout()
 	cleanedShortImageID := strings.TrimSpace(out)
 
 	// Make sure IDs are not empty
@@ -131,7 +143,7 @@ func (s *DockerCLISaveLoadSuite) TestSaveImageId(c *testing.T) {
 	defer func() {
 		saveCmd.Wait()
 		tarCmd.Wait()
-		dockerCmd(c, "rmi", repoName)
+		cli.DockerCmd(c, "rmi", imgRepoName)
 	}()
 
 	out, _, err = runCommandWithOutput(grepCmd)
@@ -142,23 +154,45 @@ func (s *DockerCLISaveLoadSuite) TestSaveImageId(c *testing.T) {
 // save a repo and try to load it using flags
 func (s *DockerCLISaveLoadSuite) TestSaveAndLoadRepoFlags(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
-	name := "test-save-and-load-repo-flags"
-	dockerCmd(c, "run", "--name", name, "busybox", "true")
+	const name = "test-save-and-load-repo-flags"
+	cli.DockerCmd(c, "run", "--name", name, "busybox", "true")
 
-	repoName := "foobar-save-load-test"
+	const imgRepoName = "foobar-save-load-test"
 
-	deleteImages(repoName)
-	dockerCmd(c, "commit", name, repoName)
+	deleteImages(imgRepoName)
+	cli.DockerCmd(c, "commit", name, imgRepoName)
 
-	before, _ := dockerCmd(c, "inspect", repoName)
+	beforeStr := cli.DockerCmd(c, "inspect", imgRepoName).Stdout()
 
 	out, err := RunCommandPipelineWithOutput(
-		exec.Command(dockerBinary, "save", repoName),
+		exec.Command(dockerBinary, "save", imgRepoName),
 		exec.Command(dockerBinary, "load"))
 	assert.NilError(c, err, "failed to save and load repo: %s, %v", out, err)
 
-	after, _ := dockerCmd(c, "inspect", repoName)
-	assert.Equal(c, before, after, "inspect is not the same after a save / load")
+	afterStr := cli.DockerCmd(c, "inspect", imgRepoName).Stdout()
+
+	var before, after []image.InspectResponse
+	err = json.Unmarshal([]byte(beforeStr), &before)
+	assert.NilError(c, err, "failed to parse inspect 'before' output")
+	err = json.Unmarshal([]byte(afterStr), &after)
+	assert.NilError(c, err, "failed to parse inspect 'after' output")
+
+	assert.Assert(c, is.Len(before, 1))
+	assert.Assert(c, is.Len(after, 1))
+
+	if testEnv.UsingSnapshotter() {
+		// Ignore LastTagTime difference with c8d.
+		// It is not stored in the image archive, but in the imageStore
+		// which is a graphdrivers implementation detail.
+		//
+		// It works because we load the image into the same daemon which saved
+		// the image. It would still fail with the graphdrivers if the image
+		// was loaded into a different daemon (which should be the case in a
+		// real-world scenario).
+		before[0].Metadata.LastTagTime = after[0].Metadata.LastTagTime
+	}
+
+	assert.Check(c, is.DeepEqual(before, after), "inspect is not the same after a save / load")
 }
 
 func (s *DockerCLISaveLoadSuite) TestSaveWithNoExistImage(c *testing.T) {
@@ -168,25 +202,30 @@ func (s *DockerCLISaveLoadSuite) TestSaveWithNoExistImage(c *testing.T) {
 
 	out, _, err := dockerCmdWithError("save", "-o", "test-img.tar", imgName)
 	assert.ErrorContains(c, err, "", "save image should fail for non-existing image")
-	assert.Assert(c, strings.Contains(out, fmt.Sprintf("No such image: %s", imgName)))
+	assert.Assert(c, is.Contains(out, fmt.Sprintf("No such image: %s", imgName)))
 }
 
 func (s *DockerCLISaveLoadSuite) TestSaveMultipleNames(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
-	repoName := "foobar-save-multi-name-test"
 
-	// Make one image
-	dockerCmd(c, "tag", "emptyfs:latest", fmt.Sprintf("%v-one:latest", repoName))
+	emptyFSImage := loadSpecialImage(c, specialimage.EmptyFS)
 
-	// Make two images
-	dockerCmd(c, "tag", "emptyfs:latest", fmt.Sprintf("%v-two:latest", repoName))
+	const imgRepoName = "foobar-save-multi-name-test"
+
+	oneTag := fmt.Sprintf("%v-one:latest", imgRepoName)
+	twoTag := fmt.Sprintf("%v-two:latest", imgRepoName)
+
+	cli.DockerCmd(c, "tag", emptyFSImage, oneTag)
+	cli.DockerCmd(c, "tag", emptyFSImage, twoTag)
 
 	out, err := RunCommandPipelineWithOutput(
-		exec.Command(dockerBinary, "save", fmt.Sprintf("%v-one", repoName), fmt.Sprintf("%v-two:latest", repoName)),
-		exec.Command("tar", "xO", "repositories"),
-		exec.Command("grep", "-q", "-E", "(-one|-two)"),
+		exec.Command(dockerBinary, "save", strings.TrimSuffix(oneTag, ":latest"), twoTag),
+		exec.Command("tar", "xO", "index.json"),
 	)
 	assert.NilError(c, err, "failed to save multiple repos: %s, %v", out, err)
+
+	assert.Check(c, is.Contains(out, oneTag))
+	assert.Check(c, is.Contains(out, twoTag))
 }
 
 // Test loading a weird image where one of the layers is of zero size.
@@ -200,7 +239,7 @@ func (s *DockerCLISaveLoadSuite) TestLoadZeroSizeLayer(c *testing.T) {
 	// very weird test
 	testRequires(c, DaemonIsLinux, testEnv.IsLocalDaemon)
 
-	dockerCmd(c, "load", "-i", "testdata/emptyLayer.tar")
+	cli.DockerCmd(c, "load", "-i", "testdata/emptyLayer.tar")
 }
 
 func (s *DockerCLISaveLoadSuite) TestSaveLoadParents(c *testing.T) {
@@ -208,14 +247,13 @@ func (s *DockerCLISaveLoadSuite) TestSaveLoadParents(c *testing.T) {
 	skip.If(c, testEnv.UsingSnapshotter(), "Parent image property is not supported with containerd")
 
 	makeImage := func(from string, addfile string) string {
-		var out string
-		out, _ = dockerCmd(c, "run", "-d", from, "touch", addfile)
-		cleanedContainerID := strings.TrimSpace(out)
+		id := cli.DockerCmd(c, "run", "-d", from, "touch", addfile).Stdout()
+		id = strings.TrimSpace(id)
 
-		out, _ = dockerCmd(c, "commit", cleanedContainerID)
-		imageID := strings.TrimSpace(out)
+		imageID := cli.DockerCmd(c, "commit", id).Stdout()
+		imageID = strings.TrimSpace(imageID)
 
-		dockerCmd(c, "rm", "-f", cleanedContainerID)
+		cli.DockerCmd(c, "rm", "-f", id)
 		return imageID
 	}
 
@@ -230,9 +268,9 @@ func (s *DockerCLISaveLoadSuite) TestSaveLoadParents(c *testing.T) {
 
 	outfile := filepath.Join(tmpDir, "out.tar")
 
-	dockerCmd(c, "save", "-o", outfile, idBar, idFoo)
-	dockerCmd(c, "rmi", idBar)
-	dockerCmd(c, "load", "-i", outfile)
+	cli.DockerCmd(c, "save", "-o", outfile, idBar, idFoo)
+	cli.DockerCmd(c, "rmi", idBar)
+	cli.DockerCmd(c, "load", "-i", outfile)
 
 	inspectOut := inspectField(c, idBar, "Parent")
 	assert.Equal(c, inspectOut, idFoo)
@@ -257,14 +295,14 @@ func (s *DockerCLISaveLoadSuite) TestSaveLoadNoTag(c *testing.T) {
 
 	// Should not show 'name' but should show the image ID during the load
 	assert.Assert(c, !strings.Contains(out, "Loaded image: "))
-	assert.Assert(c, strings.Contains(out, "Loaded image ID:"))
-	assert.Assert(c, strings.Contains(out, id))
+	assert.Assert(c, is.Contains(out, "Loaded image ID:"))
+	assert.Assert(c, is.Contains(out, id))
 	// Test to make sure that save by name shows that name during load
 	out, err = RunCommandPipelineWithOutput(
 		exec.Command(dockerBinary, "save", name),
 		exec.Command(dockerBinary, "load"))
 	assert.NilError(c, err, "failed to save and load repo: %s, %v", out, err)
 
-	assert.Assert(c, strings.Contains(out, "Loaded image: "+name+":latest"))
+	assert.Assert(c, is.Contains(out, "Loaded image: "+name+":latest"))
 	assert.Assert(c, !strings.Contains(out, "Loaded image ID:"))
 }

@@ -10,20 +10,25 @@ import (
 	"gotest.tools/v3/poll"
 )
 
-// IsStopped verifies the container is in stopped state.
-func IsStopped(ctx context.Context, apiClient client.APIClient, containerID string) func(log poll.LogT) poll.Result {
+// RunningStateFlagIs polls for the container's Running state flag to be equal to running.
+func RunningStateFlagIs(ctx context.Context, apiClient client.APIClient, containerID string, running bool) func(log poll.LogT) poll.Result {
 	return func(log poll.LogT) poll.Result {
 		inspect, err := apiClient.ContainerInspect(ctx, containerID)
 
 		switch {
 		case err != nil:
 			return poll.Error(err)
-		case !inspect.State.Running:
+		case inspect.State.Running == running:
 			return poll.Success()
 		default:
-			return poll.Continue("waiting for container to be stopped")
+			return poll.Continue("waiting for container to be %s", map[bool]string{true: "running", false: "stopped"}[running])
 		}
 	}
+}
+
+// IsStopped verifies the container is in stopped state.
+func IsStopped(ctx context.Context, apiClient client.APIClient, containerID string) func(log poll.LogT) poll.Result {
+	return RunningStateFlagIs(ctx, apiClient, containerID, false)
 }
 
 // IsInState verifies the container is in one of the specified state, e.g., "running", "exited", etc.
@@ -38,7 +43,11 @@ func IsInState(ctx context.Context, apiClient client.APIClient, containerID stri
 				return poll.Success()
 			}
 		}
-		return poll.Continue("waiting for container to be one of (%s), currently %s", strings.Join(state, ", "), inspect.State.Status)
+		if len(state) == 1 {
+			return poll.Continue("waiting for container State.Status to be '%s', currently '%s'", state[0], inspect.State.Status)
+		} else {
+			return poll.Continue("waiting for container State.Status to be one of (%s), currently '%s'", strings.Join(state, ", "), inspect.State.Status)
+		}
 	}
 }
 

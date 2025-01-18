@@ -47,15 +47,15 @@ type Mount struct {
 	WorkerRef *worker.WorkerRef
 }
 
-func NewContainer(ctx context.Context, w worker.Worker, sm *session.Manager, g session.Group, req NewContainerRequest) (client.Container, error) {
-	ctx, cancel := context.WithCancel(ctx)
+func NewContainer(ctx context.Context, cm cache.Manager, exec executor.Executor, sm *session.Manager, g session.Group, req NewContainerRequest) (client.Container, error) {
+	ctx, cancel := context.WithCancelCause(ctx)
 	eg, ctx := errgroup.WithContext(ctx)
-	platform := opspb.Platform{
+	platform := &opspb.Platform{
 		OS:           runtime.GOOS,
 		Architecture: runtime.GOARCH,
 	}
 	if req.Platform != nil {
-		platform = *req.Platform
+		platform = req.Platform
 	}
 	ctr := &gatewayContainer{
 		id:         req.ContainerID,
@@ -63,7 +63,7 @@ func NewContainer(ctx context.Context, w worker.Worker, sm *session.Manager, g s
 		hostname:   req.Hostname,
 		extraHosts: req.ExtraHosts,
 		platform:   platform,
-		executor:   w.Executor(),
+		executor:   exec,
 		sm:         sm,
 		group:      g,
 		errGroup:   eg,
@@ -79,17 +79,16 @@ func NewContainer(ctx context.Context, w worker.Worker, sm *session.Manager, g s
 		mnts = append(mnts, m.Mount)
 		if m.WorkerRef != nil {
 			refs = append(refs, m.WorkerRef)
-			m.Mount.Input = opspb.InputIndex(len(refs) - 1)
+			m.Mount.Input = int64(len(refs) - 1)
 		} else {
-			m.Mount.Input = opspb.Empty
+			m.Mount.Input = int64(opspb.Empty)
 		}
 	}
 
 	name := fmt.Sprintf("container %s", req.ContainerID)
-	mm := mounts.NewMountManager(name, w.CacheManager(), sm)
-	p, err := PrepareMounts(ctx, mm, w.CacheManager(), g, "", mnts, refs, func(m *opspb.Mount, ref cache.ImmutableRef) (cache.MutableRef, error) {
-		cm := w.CacheManager()
-		if m.Input != opspb.Empty {
+	mm := mounts.NewMountManager(name, cm, sm)
+	p, err := PrepareMounts(ctx, mm, cm, g, "", mnts, refs, func(m *opspb.Mount, ref cache.ImmutableRef) (cache.MutableRef, error) {
+		if m.Input != int64(opspb.Empty) {
 			cm = refs[m.Input].Worker.CacheManager()
 		}
 		return cm.New(ctx, ref, g)
@@ -156,7 +155,7 @@ func PrepareMounts(ctx context.Context, mm *mounts.MountManager, cm cache.Manage
 		}
 
 		// if mount is based on input validate and load it
-		if m.Input != opspb.Empty {
+		if m.Input != int64(opspb.Empty) {
 			if int(m.Input) >= len(refs) {
 				return p, errors.Errorf("missing input %d", m.Input)
 			}
@@ -167,7 +166,7 @@ func PrepareMounts(ctx context.Context, mm *mounts.MountManager, cm cache.Manage
 		switch m.MountType {
 		case opspb.MountType_BIND:
 			// if mount creates an output
-			if m.Output != opspb.SkipOutput {
+			if m.Output != int64(opspb.SkipOutput) {
 				// if it is readonly and not root then output is the input
 				if m.Readonly && ref != nil && m.Dest != opspb.RootMount {
 					p.OutputRefs = append(p.OutputRefs, MountRef{
@@ -210,7 +209,7 @@ func PrepareMounts(ctx context.Context, mm *mounts.MountManager, cm cache.Manage
 				Ref:        active,
 				NoCommit:   true,
 			})
-			if m.Output != opspb.SkipOutput && ref != nil {
+			if m.Output != int64(opspb.SkipOutput) && ref != nil {
 				p.OutputRefs = append(p.OutputRefs, MountRef{
 					MountIndex: i,
 					Ref:        ref.Clone(),
@@ -251,7 +250,7 @@ func PrepareMounts(ctx context.Context, mm *mounts.MountManager, cm cache.Manage
 		if m.Dest == opspb.RootMount {
 			root := mountable
 			p.ReadonlyRootFS = m.Readonly
-			if m.Output == opspb.SkipOutput && p.ReadonlyRootFS {
+			if m.Output == int64(opspb.SkipOutput) && p.ReadonlyRootFS {
 				active, err := makeMutable(m, ref)
 				if err != nil {
 					return p, err
@@ -289,7 +288,7 @@ type gatewayContainer struct {
 	netMode    opspb.NetMode
 	hostname   string
 	extraHosts []executor.HostIP
-	platform   opspb.Platform
+	platform   *opspb.Platform
 	rootFS     executor.Mount
 	mounts     []executor.Mount
 	executor   executor.Executor
@@ -300,7 +299,7 @@ type gatewayContainer struct {
 	mu         sync.Mutex
 	cleanup    []func() error
 	ctx        context.Context
-	cancel     func()
+	cancel     func(error)
 }
 
 func (gwCtr *gatewayContainer) Start(ctx context.Context, req client.StartRequest) (client.ContainerProcess, error) {
@@ -408,7 +407,7 @@ func (gwCtr *gatewayContainer) loadSecretEnv(ctx context.Context, secretEnv []*p
 func (gwCtr *gatewayContainer) Release(ctx context.Context) error {
 	gwCtr.mu.Lock()
 	defer gwCtr.mu.Unlock()
-	gwCtr.cancel()
+	gwCtr.cancel(errors.WithStack(context.Canceled))
 	err1 := gwCtr.errGroup.Wait()
 
 	var err2 error

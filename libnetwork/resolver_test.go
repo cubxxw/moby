@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/internal/testutils/netnsutils"
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
@@ -38,6 +38,10 @@ type tstwriter struct {
 }
 
 func (w *tstwriter) WriteMsg(m *dns.Msg) (err error) {
+	// Assert that the message is serializable.
+	if _, err := m.Pack(); err != nil {
+		return err
+	}
 	w.msg = m
 	return nil
 }
@@ -82,7 +86,7 @@ func checkDNSAnswersCount(t *testing.T, m *dns.Msg, expected int) {
 func checkDNSResponseCode(t *testing.T, m *dns.Msg, expected int) {
 	t.Helper()
 	if m.MsgHdr.Rcode != expected {
-		t.Fatalf("Expected DNS response code: %d. Found: %d", expected, m.MsgHdr.Rcode)
+		t.Fatalf("Expected DNS response code: %d (%s). Found: %d (%s)", expected, dns.RcodeToString[expected], m.MsgHdr.Rcode, dns.RcodeToString[m.MsgHdr.Rcode])
 	}
 }
 
@@ -226,11 +230,11 @@ func TestOversizedDNSReply(t *testing.T) {
 	checkDNSRRType(t, resp.Answer[0].Header().Rrtype, dns.TypeA)
 }
 
-func testLogger(t *testing.T) *logrus.Logger {
+func testLogger(t *testing.T) *logrus.Entry {
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
 	logger.SetOutput(tlogWriter{t})
-	return logger
+	return logrus.NewEntry(logger)
 }
 
 type tlogWriter struct{ t *testing.T }
@@ -242,7 +246,9 @@ func (w tlogWriter) Write(p []byte) (n int, err error) {
 
 type noopDNSBackend struct{ DNSBackend }
 
-func (noopDNSBackend) ResolveName(name string, iplen int) ([]net.IP, bool) { return nil, false }
+func (noopDNSBackend) ResolveName(_ context.Context, name string, ipType int) ([]net.IP, bool) {
+	return nil, false
+}
 
 func (noopDNSBackend) ExecFunc(f func()) error { f(); return nil }
 
@@ -286,7 +292,7 @@ func TestReplySERVFAIL(t *testing.T) {
 
 type badSRVDNSBackend struct{ noopDNSBackend }
 
-func (badSRVDNSBackend) ResolveService(name string) ([]*net.SRV, []net.IP) {
+func (badSRVDNSBackend) ResolveService(_ context.Context, _ string) ([]*net.SRV, []net.IP) {
 	return []*net.SRV{nil, nil, nil}, nil // Mismatched slice lengths
 }
 
@@ -352,4 +358,27 @@ func TestProxyNXDOMAIN(t *testing.T) {
 	assert.Assert(t, is.Len(resp.Answer, 0))
 	assert.Assert(t, is.Len(resp.Ns, 1))
 	assert.Equal(t, resp.Ns[0].String(), mockSOA.String())
+}
+
+type ptrDNSBackend struct {
+	noopDNSBackend
+	zone map[string]string
+}
+
+func (b *ptrDNSBackend) ResolveIP(_ context.Context, name string) string {
+	return b.zone[name]
+}
+
+// Regression test for https://github.com/moby/moby/issues/46928
+func TestInvalidReverseDNS(t *testing.T) {
+	rsv := NewResolver("", false, &ptrDNSBackend{zone: map[string]string{"4.3.2.1": "sixtyfourcharslong9012345678901234567890123456789012345678901234"}})
+	rsv.logger = testLogger(t)
+
+	w := &tstwriter{}
+	q := new(dns.Msg).SetQuestion("4.3.2.1.in-addr.arpa.", dns.TypePTR)
+	rsv.serveDNS(w, q)
+	resp := w.GetResponse()
+	checkNonNullResponse(t, resp)
+	t.Log("Response: ", resp.String())
+	checkDNSResponseCode(t, resp, dns.RcodeServerFailure)
 }

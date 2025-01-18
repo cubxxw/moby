@@ -6,8 +6,8 @@ import (
 	"context"
 	"sort"
 
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -62,11 +62,4 @@ func withDefault(p ocispec.Platform) ocispec.Platform {
 		p.Variant = def.Variant
 	}
 	return p
-}
-
-func formatPlatform(platform ocispec.Platform) string {
-	if platform.OS == "" {
-		platform = platforms.DefaultSpec()
-	}
-	return platforms.Format(platform)
 }

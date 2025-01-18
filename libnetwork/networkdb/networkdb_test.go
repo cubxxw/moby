@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-events"
 	"github.com/hashicorp/memberlist"
@@ -19,7 +19,11 @@ import (
 	"gotest.tools/v3/poll"
 )
 
-var dbPort int32 = 10000
+var dbPort atomic.Int32
+
+func init() {
+	dbPort.Store(10000)
+}
 
 func TestMain(m *testing.M) {
 	os.WriteFile("/proc/sys/net/ipv6/conf/lo/disable_ipv6", []byte{'0', '\n'}, 0o644)
@@ -41,7 +45,7 @@ func createNetworkDBInstances(t *testing.T, num int, namePrefix string, conf *Co
 		localConfig := *conf
 		localConfig.Hostname = fmt.Sprintf("%s%d", namePrefix, i+1)
 		localConfig.NodeID = stringid.TruncateID(stringid.GenerateRandomID())
-		localConfig.BindPort = int(atomic.AddInt32(&dbPort, 1))
+		localConfig.BindPort = int(dbPort.Add(1))
 		db := launchNode(t, localConfig)
 		if i != 0 {
 			assert.Check(t, db.Join([]string{fmt.Sprintf("localhost:%d", db.config.BindPort-1)}))
@@ -240,7 +244,7 @@ func TestNetworkDBJoinLeaveNetworks(t *testing.T) {
 	closeNetworkDBInstances(t, dbs)
 }
 
-func TestNetworkDBCRUDTableEntry(t *testing.T) {
+func TestFlakyNetworkDBCRUDTableEntry(t *testing.T) {
 	dbs := createNetworkDBInstances(t, 3, "node", DefaultConfig())
 
 	err := dbs[0].JoinNetwork("network1")
@@ -270,7 +274,7 @@ func TestNetworkDBCRUDTableEntry(t *testing.T) {
 	closeNetworkDBInstances(t, dbs)
 }
 
-func TestNetworkDBCRUDTableEntries(t *testing.T) {
+func TestFlakyNetworkDBCRUDTableEntries(t *testing.T) {
 	dbs := createNetworkDBInstances(t, 2, "node", DefaultConfig())
 
 	err := dbs[0].JoinNetwork("network1")
@@ -340,7 +344,7 @@ func TestNetworkDBCRUDTableEntries(t *testing.T) {
 	closeNetworkDBInstances(t, dbs)
 }
 
-func TestNetworkDBNodeLeave(t *testing.T) {
+func TestFlakyNetworkDBNodeLeave(t *testing.T) {
 	dbs := createNetworkDBInstances(t, 2, "node", DefaultConfig())
 
 	err := dbs[0].JoinNetwork("network1")
@@ -770,13 +774,13 @@ func TestParallelCreate(t *testing.T) {
 
 	startCh := make(chan int)
 	doneCh := make(chan error)
-	var success int32
+	var success atomic.Uint32
 	for i := 0; i < 20; i++ {
 		go func() {
 			<-startCh
 			err := dbs[0].CreateEntry("testTable", "testNetwork", "key", []byte("value"))
 			if err == nil {
-				atomic.AddInt32(&success, 1)
+				success.Add(1)
 			}
 			doneCh <- err
 		}()
@@ -789,7 +793,7 @@ func TestParallelCreate(t *testing.T) {
 	}
 	close(doneCh)
 	// Only 1 write should have succeeded
-	assert.Check(t, is.Equal(int32(1), success))
+	assert.Check(t, is.Equal(uint32(1), success.Load()))
 
 	closeNetworkDBInstances(t, dbs)
 }
@@ -802,13 +806,13 @@ func TestParallelDelete(t *testing.T) {
 
 	startCh := make(chan int)
 	doneCh := make(chan error)
-	var success int32
+	var success atomic.Uint32
 	for i := 0; i < 20; i++ {
 		go func() {
 			<-startCh
 			err := dbs[0].DeleteEntry("testTable", "testNetwork", "key")
 			if err == nil {
-				atomic.AddInt32(&success, 1)
+				success.Add(1)
 			}
 			doneCh <- err
 		}()
@@ -821,12 +825,12 @@ func TestParallelDelete(t *testing.T) {
 	}
 	close(doneCh)
 	// Only 1 write should have succeeded
-	assert.Check(t, is.Equal(int32(1), success))
+	assert.Check(t, is.Equal(uint32(1), success.Load()))
 
 	closeNetworkDBInstances(t, dbs)
 }
 
-func TestNetworkDBIslands(t *testing.T) {
+func TestFlakyNetworkDBIslands(t *testing.T) {
 	pollTimeout := func() time.Duration {
 		const defaultTimeout = 120 * time.Second
 		dl, ok := t.Deadline()
@@ -875,7 +879,7 @@ func TestNetworkDBIslands(t *testing.T) {
 
 	// Give some time to let the system propagate the messages and free up the ports
 	check := func(t poll.LogT) poll.Result {
-		// Verify that the nodes are actually all gone and marked appropiately
+		// Verify that the nodes are actually all gone and marked appropriately
 		for name, db := range checkDBs {
 			db.RLock()
 			if (len(db.leftNodes) != 3) || (len(db.failedNodes) != 0) {

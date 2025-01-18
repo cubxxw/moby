@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
@@ -42,7 +42,7 @@ func (n *network) deleteEndpoint(eid string) {
 	n.Unlock()
 }
 
-func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
+func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
 	var err error
 	if err = validateID(nid, eid); err != nil {
 		return err

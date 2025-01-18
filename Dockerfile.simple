@@ -5,17 +5,14 @@
 
 # This represents the bare minimum required to build and test Docker.
 
-ARG GO_VERSION=1.20.8
+ARG GO_VERSION=1.23.4
 
-ARG BASE_DEBIAN_DISTRO="bullseye"
+ARG BASE_DEBIAN_DISTRO="bookworm"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
 
 FROM ${GOLANG_IMAGE}
 ENV GO111MODULE=off
-
-# allow replacing debian mirror
-ARG APT_MIRROR
-RUN test -n "$APT_MIRROR" && sed -ri "s#(httpredir|deb|security).debian.org#${APT_MIRROR}#g" /etc/apt/sources.list || true
+ENV GOTOOLCHAIN=local
 
 # Compile and runtime deps
 # https://github.com/docker/docker/blob/master/project/PACKAGERS.md#build-dependencies
@@ -25,7 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 		curl \
 		cmake \
 		git \
-		libapparmor-dev \
 		libseccomp-dev \
 		ca-certificates \
 		e2fsprogs \

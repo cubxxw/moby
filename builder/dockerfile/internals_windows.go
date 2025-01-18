@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/usergroup"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"golang.org/x/sys/windows"
@@ -44,9 +46,9 @@ func getAccountIdentity(ctx context.Context, builder *Builder, accountName strin
 
 	// Check if the account name is one unique to containers.
 	if strings.EqualFold(accountName, "ContainerAdministrator") {
-		return idtools.Identity{SID: idtools.ContainerAdministratorSidString}, nil
+		return idtools.Identity{SID: usergroup.ContainerAdministratorSidString}, nil
 	} else if strings.EqualFold(accountName, "ContainerUser") {
-		return idtools.Identity{SID: idtools.ContainerUserSidString}, nil
+		return idtools.Identity{SID: usergroup.ContainerUserSidString}, nil
 	}
 
 	// All other lookups failed, so therefore determine if the account in
@@ -62,7 +64,7 @@ func lookupNTAccount(ctx context.Context, builder *Builder, accountName string, 
 
 	optionsPlatform, err := platforms.Parse(builder.options.Platform)
 	if err != nil {
-		return idtools.Identity{}, err
+		return idtools.Identity{}, errdefs.InvalidParameter(err)
 	}
 
 	runConfig := copyRunConfig(state.runConfig,

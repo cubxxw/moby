@@ -1,72 +1,109 @@
 package types
 
 import (
-	"github.com/docker/docker/api/types/checkpoint"
-	"github.com/docker/docker/api/types/system"
+	"context"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/storage"
 )
 
-// CheckpointCreateOptions holds parameters to create a checkpoint from a container.
+// ContainerJSONBase contains response of Engine API GET "/containers/{name:.*}/json"
+// for API version 1.18 and older.
 //
-// Deprecated: use [checkpoint.CreateOptions].
-type CheckpointCreateOptions = checkpoint.CreateOptions
+// Deprecated: use [container.InspectResponse] or [container.ContainerJSONBase]. It will be removed in the next release.
+type ContainerJSONBase = container.ContainerJSONBase
 
-// CheckpointListOptions holds parameters to list checkpoints for a container
+// ContainerJSON is the response for the GET "/containers/{name:.*}/json"
+// endpoint.
 //
-// Deprecated: use [checkpoint.ListOptions].
-type CheckpointListOptions = checkpoint.ListOptions
+// Deprecated: use [container.InspectResponse]. It will be removed in the next release.
+type ContainerJSON = container.InspectResponse
 
-// CheckpointDeleteOptions holds parameters to delete a checkpoint from a container
+// Container contains response of Engine API:
+// GET "/containers/json"
 //
-// Deprecated: use [checkpoint.DeleteOptions].
-type CheckpointDeleteOptions = checkpoint.DeleteOptions
+// Deprecated: use [container.Summary].
+type Container = container.Summary
 
-// Checkpoint represents the details of a checkpoint when listing endpoints.
+// ContainerState stores container's running state
 //
-// Deprecated: use [checkpoint.Summary].
-type Checkpoint = checkpoint.Summary
+// Deprecated: use [container.State].
+type ContainerState = container.State
 
-// Info contains response of Engine API:
-// GET "/info"
+// NetworkSettings exposes the network settings in the api.
 //
-// Deprecated: use [system.Info].
-type Info = system.Info
+// Deprecated: use [container.NetworkSettings].
+type NetworkSettings = container.NetworkSettings
 
-// Commit holds the Git-commit (SHA1) that a binary was built from, as reported
-// in the version-string of external tools, such as containerd, or runC.
+// NetworkSettingsBase holds networking state for a container when inspecting it.
 //
-// Deprecated: use [system.Commit].
-type Commit = system.Commit
+// Deprecated: use [container.NetworkSettingsBase].
+type NetworkSettingsBase = container.NetworkSettingsBase
 
-// PluginsInfo is a temp struct holding Plugins name
-// registered with docker daemon. It is used by [system.Info] struct
+// DefaultNetworkSettings holds network information
+// during the 2 release deprecation period.
+// It will be removed in Docker 1.11.
 //
-// Deprecated: use [system.PluginsInfo].
-type PluginsInfo = system.PluginsInfo
+// Deprecated: use [container.DefaultNetworkSettings].
+type DefaultNetworkSettings = container.DefaultNetworkSettings
 
-// NetworkAddressPool is a temp struct used by [system.Info] struct.
+// SummaryNetworkSettings provides a summary of container's networks
+// in /containers/json.
 //
-// Deprecated: use [system.NetworkAddressPool].
-type NetworkAddressPool = system.NetworkAddressPool
+// Deprecated: use [container.NetworkSettingsSummary].
+type SummaryNetworkSettings = container.NetworkSettingsSummary
 
-// Runtime describes an OCI runtime.
-//
-// Deprecated: use [system.Runtime].
-type Runtime = system.Runtime
+// Health states
+const (
+	NoHealthcheck = container.NoHealthcheck // Deprecated: use [container.NoHealthcheck].
+	Starting      = container.Starting      // Deprecated: use [container.Starting].
+	Healthy       = container.Healthy       // Deprecated: use [container.Healthy].
+	Unhealthy     = container.Unhealthy     // Deprecated: use [container.Unhealthy].
+)
 
-// SecurityOpt contains the name and options of a security option.
+// Health stores information about the container's healthcheck results.
 //
-// Deprecated: use [system.SecurityOpt].
-type SecurityOpt = system.SecurityOpt
+// Deprecated: use [container.Health].
+type Health = container.Health
 
-// KeyValue holds a key/value pair.
+// HealthcheckResult stores information about a single run of a healthcheck probe.
 //
-// Deprecated: use [system.KeyValue].
-type KeyValue = system.KeyValue
+// Deprecated: use [container.HealthcheckResult].
+type HealthcheckResult = container.HealthcheckResult
 
-// DecodeSecurityOptions decodes a security options string slice to a type safe
-// [system.SecurityOpt].
+// MountPoint represents a mount point configuration inside the container.
+// This is used for reporting the mountpoints in use by a container.
 //
-// Deprecated: use [system.DecodeSecurityOptions].
-func DecodeSecurityOptions(opts []string) ([]system.SecurityOpt, error) {
-	return system.DecodeSecurityOptions(opts)
-}
+// Deprecated: use [container.MountPoint].
+type MountPoint = container.MountPoint
+
+// Port An open port on a container
+//
+// Deprecated: use [container.Port].
+type Port = container.Port
+
+// GraphDriverData Information about the storage driver used to store the container's and
+// image's filesystem.
+//
+// Deprecated: use [storage.DriverData].
+type GraphDriverData = storage.DriverData
+
+// RootFS returns Image's RootFS description including the layer IDs.
+//
+// Deprecated: use [image.RootFS].
+type RootFS = image.RootFS
+
+// ImageInspect contains response of Engine API:
+// GET "/images/{name:.*}/json"
+//
+// Deprecated: use [image.InspectResponse].
+type ImageInspect = image.InspectResponse
+
+// RequestPrivilegeFunc is a function interface that clients can supply to
+// retry operations after getting an authorization error.
+// This function returns the registry authentication header value in base64
+// format, or an error if the privilege request fails.
+//
+// Deprecated: moved to [github.com/docker/docker/api/types/registry.RequestAuthConfig].
+type RequestPrivilegeFunc func(context.Context) (string, error)

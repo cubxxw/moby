@@ -8,8 +8,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	containertypes "github.com/docker/docker/api/types/container"
+	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
@@ -19,10 +20,10 @@ import (
 	"github.com/docker/docker/oci/caps"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/system"
-	"github.com/docker/docker/runconfig"
 	volumemounts "github.com/docker/docker/volume/mounts"
 	"github.com/docker/go-connections/nat"
 	"github.com/moby/sys/signal"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/pkg/errors"
 )
@@ -68,32 +69,22 @@ func (daemon *Daemon) GetContainer(prefixOrName string) (*container.Container, e
 	return ctr, nil
 }
 
-// Exists returns a true if a container of the specified ID or name exists,
-// false otherwise.
-func (daemon *Daemon) Exists(id string) bool {
-	c, _ := daemon.GetContainer(id)
-	return c != nil
-}
-
-// IsPaused returns a bool indicating if the specified container is paused.
-func (daemon *Daemon) IsPaused(id string) bool {
-	c, _ := daemon.GetContainer(id)
-	return c.State.IsPaused()
-}
-
-func (daemon *Daemon) containerRoot(id string) string {
-	return filepath.Join(daemon.repository, id)
-}
-
 // Load reads the contents of a container from disk
 // This is typically done at startup.
 func (daemon *Daemon) load(id string) (*container.Container, error) {
-	ctr := daemon.newBaseContainer(id)
-
+	ctr := container.NewBaseContainer(id, filepath.Join(daemon.repository, id))
 	if err := ctr.FromDisk(); err != nil {
 		return nil, err
 	}
 	selinux.ReserveLabel(ctr.ProcessLabel)
+
+	if ctr.ImagePlatform.Architecture == "" {
+		migration := daemonPlatformReader{
+			imageService: daemon.imageService,
+			content:      daemon.containerdClient.ContentStore(),
+		}
+		migrateContainerOS(context.TODO(), migration, ctr)
+	}
 
 	if ctr.ID != id {
 		return ctr, fmt.Errorf("Container %s is stored at %s", ctr.ID, id)
@@ -103,7 +94,14 @@ func (daemon *Daemon) load(id string) (*container.Container, error) {
 }
 
 // Register makes a container object usable by the daemon as <container.ID>
+//
+// Deprecated: this function is unused and will be removed in the next release.
 func (daemon *Daemon) Register(c *container.Container) error {
+	return daemon.register(context.TODO(), c)
+}
+
+// register makes a container object usable by the daemon as [container.Container.ID].
+func (daemon *Daemon) register(ctx context.Context, c *container.Container) error {
 	// Attach to stdout and stderr
 	if c.Config.OpenStdin {
 		c.StreamConfig.NewInputPipes()
@@ -116,34 +114,44 @@ func (daemon *Daemon) Register(c *container.Container) error {
 	c.Lock()
 	defer c.Unlock()
 
+	// FIXME(thaJeztah): this logic may not be atomic:
+	//
+	// - daemon.containers.Add does not promise to "add", allows overwriting a container with the given ID.
+	// - c.CheckpointTo may fail, in which case we registered a container, but failed to write to disk
+	//
+	// We should consider:
+	//
+	// - changing the signature of containers.Add to return an error if the
+	//   given ID exists (potentially adding an alternative to "set" / "update")
+	// - adding a defer to rollback the "Add" when failing to CheckPoint.
 	daemon.containers.Add(c.ID, c)
-	return c.CheckpointTo(daemon.containersReplica)
+	return c.CheckpointTo(ctx, daemon.containersReplica)
 }
 
-func (daemon *Daemon) newContainer(name string, operatingSystem string, config *containertypes.Config, hostConfig *containertypes.HostConfig, imgID image.ID, managed bool) (*container.Container, error) {
+func (daemon *Daemon) newContainer(name string, platform ocispec.Platform, config *containertypes.Config, hostConfig *containertypes.HostConfig, imgID image.ID, managed bool) (*container.Container, error) {
 	var (
-		id             string
-		err            error
-		noExplicitName = name == ""
+		id  string
+		err error
 	)
 	id, name, err = daemon.generateIDAndName(name)
 	if err != nil {
 		return nil, err
 	}
 
-	if hostConfig.NetworkMode.IsHost() {
-		if config.Hostname == "" {
+	if config.Hostname == "" {
+		if hostConfig.NetworkMode.IsHost() {
 			config.Hostname, err = os.Hostname()
 			if err != nil {
 				return nil, errdefs.System(err)
 			}
+		} else {
+			// default hostname is the container's short-ID
+			config.Hostname = id[:12]
 		}
-	} else {
-		daemon.generateHostname(id, config)
 	}
 	entrypoint, args := daemon.getEntrypointAndArgs(config.Entrypoint, config.Cmd)
 
-	base := daemon.newBaseContainer(id)
+	base := container.NewBaseContainer(id, filepath.Join(daemon.repository, id))
 	base.Created = time.Now().UTC()
 	base.Managed = managed
 	base.Path = entrypoint
@@ -151,10 +159,11 @@ func (daemon *Daemon) newContainer(name string, operatingSystem string, config *
 	base.Config = config
 	base.HostConfig = &containertypes.HostConfig{}
 	base.ImageID = imgID
-	base.NetworkSettings = &network.Settings{IsAnonymousEndpoint: noExplicitName}
+	base.NetworkSettings = &network.Settings{}
 	base.Name = name
 	base.Driver = daemon.imageService.StorageDriver()
-	base.OS = operatingSystem
+	base.ImagePlatform = platform
+	base.OS = platform.OS //nolint:staticcheck // ignore SA1019: field is deprecated, but still set for compatibility
 	return base, err
 }
 
@@ -178,24 +187,11 @@ func (daemon *Daemon) GetByName(name string) (*container.Container, error) {
 	return e, nil
 }
 
-// newBaseContainer creates a new container with its initial
-// configuration based on the root storage from the daemon.
-func (daemon *Daemon) newBaseContainer(id string) *container.Container {
-	return container.NewBaseContainer(id, daemon.containerRoot(id))
-}
-
 func (daemon *Daemon) getEntrypointAndArgs(configEntrypoint strslice.StrSlice, configCmd strslice.StrSlice) (string, []string) {
 	if len(configEntrypoint) != 0 {
 		return configEntrypoint[0], append(configEntrypoint[1:], configCmd...)
 	}
 	return configCmd[0], configCmd[1:]
-}
-
-func (daemon *Daemon) generateHostname(id string, config *containertypes.Config) {
-	// Generate default hostname
-	if config.Hostname == "" {
-		config.Hostname = id[:12]
-	}
 }
 
 func (daemon *Daemon) setSecurityOptions(cfg *config.Config, container *container.Container, hostConfig *containertypes.HostConfig) error {
@@ -204,10 +200,10 @@ func (daemon *Daemon) setSecurityOptions(cfg *config.Config, container *containe
 	return daemon.parseSecurityOpt(cfg, &container.SecurityOptions, hostConfig)
 }
 
-func (daemon *Daemon) setHostConfig(container *container.Container, hostConfig *containertypes.HostConfig) error {
+func (daemon *Daemon) setHostConfig(container *container.Container, hostConfig *containertypes.HostConfig, defaultReadOnlyNonRecursive bool) error {
 	// Do not lock while creating volumes since this could be calling out to external plugins
 	// Don't want to block other actions, like `docker ps` because we're waiting on an external plugin
-	if err := daemon.registerMountPoints(container, hostConfig); err != nil {
+	if err := daemon.registerMountPoints(container, hostConfig, defaultReadOnlyNonRecursive); err != nil {
 		return err
 	}
 
@@ -219,7 +215,9 @@ func (daemon *Daemon) setHostConfig(container *container.Container, hostConfig *
 		return err
 	}
 
-	runconfig.SetDefaultNetModeIfBlank(hostConfig)
+	if hostConfig != nil && hostConfig.NetworkMode == "" {
+		hostConfig.NetworkMode = networktypes.NetworkDefault
+	}
 	container.HostConfig = hostConfig
 	return nil
 }
@@ -333,6 +331,9 @@ func validateHealthCheck(healthConfig *containertypes.HealthConfig) error {
 	if healthConfig.StartPeriod != 0 && healthConfig.StartPeriod < containertypes.MinimumDuration {
 		return errors.Errorf("StartPeriod in Healthcheck cannot be less than %s", containertypes.MinimumDuration)
 	}
+	if healthConfig.StartInterval != 0 && healthConfig.StartInterval < containertypes.MinimumDuration {
+		return errors.Errorf("StartInterval in Healthcheck cannot be less than %s", containertypes.MinimumDuration)
+	}
 	return nil
 }
 
@@ -362,6 +363,6 @@ func translateWorkingDir(config *containertypes.Config) error {
 	if !system.IsAbs(wd) {
 		return fmt.Errorf("the working directory '%s' is invalid, it needs to be an absolute path", config.WorkingDir)
 	}
-	config.WorkingDir = wd
+	config.WorkingDir = filepath.Clean(wd)
 	return nil
 }

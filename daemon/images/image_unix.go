@@ -5,13 +5,13 @@ package images // import "github.com/docker/docker/daemon/images"
 import (
 	"context"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
+	"github.com/docker/docker/container"
 	"github.com/docker/docker/image"
-	"github.com/docker/docker/layer"
 )
 
 // GetLayerFolders returns the layer folders from an image RootFS
-func (i *ImageService) GetLayerFolders(img *image.Image, rwLayer layer.RWLayer) ([]string, error) {
+func (i *ImageService) GetLayerFolders(img *image.Image, rwLayer container.RWLayer, containerID string) ([]string, error) {
 	// Windows specific
 	panic("not implemented")
 }

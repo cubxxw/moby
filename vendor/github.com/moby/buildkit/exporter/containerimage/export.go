@@ -5,20 +5,23 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/pkg/epoch"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/rootfs"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/pkg/epoch"
+	"github.com/containerd/containerd/v2/pkg/labels"
+	"github.com/containerd/containerd/v2/pkg/rootfs"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/cache"
 	cacheconfig "github.com/moby/buildkit/cache/config"
+	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/session"
@@ -63,9 +66,11 @@ func New(opt Opt) (exporter.Exporter, error) {
 	return im, nil
 }
 
-func (e *imageExporter) Resolve(ctx context.Context, opt map[string]string) (exporter.ExporterInstance, error) {
+func (e *imageExporter) Resolve(ctx context.Context, id int, opt map[string]string) (exporter.ExporterInstance, error) {
 	i := &imageExporterInstance{
 		imageExporter: e,
+		id:            id,
+		attrs:         opt,
 		opts: ImageCommitOpts{
 			RefCfg: cacheconfig.RefConfig{
 				Compression: compression.New(compression.Default),
@@ -166,6 +171,9 @@ func (e *imageExporter) Resolve(ctx context.Context, opt map[string]string) (exp
 
 type imageExporterInstance struct {
 	*imageExporter
+	id    int
+	attrs map[string]string
+
 	opts                 ImageCommitOpts
 	push                 bool
 	pushByDigest         bool
@@ -178,6 +186,10 @@ type imageExporterInstance struct {
 	meta                 map[string][]byte
 }
 
+func (e *imageExporterInstance) ID() int {
+	return e.id
+}
+
 func (e *imageExporterInstance) Name() string {
 	return "exporting to image"
 }
@@ -186,13 +198,20 @@ func (e *imageExporterInstance) Config() *exporter.Config {
 	return exporter.NewConfigWithCompression(e.opts.RefCfg.Compression)
 }
 
-func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source, sessionID string) (_ map[string]string, descref exporter.DescriptorReference, err error) {
+func (e *imageExporterInstance) Type() string {
+	return client.ExporterImage
+}
+
+func (e *imageExporterInstance) Attrs() map[string]string {
+	return e.attrs
+}
+
+func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source, inlineCache exptypes.InlineCache, sessionID string) (_ map[string]string, descref exporter.DescriptorReference, err error) {
+	src = src.Clone()
 	if src.Metadata == nil {
 		src.Metadata = make(map[string][]byte)
 	}
-	for k, v := range e.meta {
-		src.Metadata[k] = v
-	}
+	maps.Copy(src.Metadata, e.meta)
 
 	opts := e.opts
 	as, _, err := ParseAnnotations(src.Metadata)
@@ -207,11 +226,11 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	}
 	defer func() {
 		if descref == nil {
-			done(context.TODO())
+			done(context.WithoutCancel(ctx))
 		}
 	}()
 
-	desc, err := e.opt.ImageWriter.Commit(ctx, src, sessionID, &opts)
+	desc, err := e.opt.ImageWriter.Commit(ctx, src, sessionID, inlineCache, &opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -261,7 +280,7 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 				for _, sfx := range sfx {
 					img.Name = targetName + sfx
 					if _, err := e.opt.Images.Update(imageClientCtx, img); err != nil {
-						if !errors.Is(err, errdefs.ErrNotFound) {
+						if !errors.Is(err, cerrdefs.ErrNotFound) {
 							return nil, nil, tagDone(err)
 						}
 
@@ -273,6 +292,13 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 				tagDone(nil)
 
 				if e.unpack {
+					if opts.RewriteTimestamp {
+						// e.unpackImage cannot be used because src ref does not point to the rewritten image
+						// /
+						// TODO: change e.unpackImage so that it takes Result[Remote] as parameter.
+						// https://github.com/moby/buildkit/pull/4057#discussion_r1324106088
+						return nil, nil, errors.New("exporter option \"rewrite-timestamp\" conflicts with \"unpack\"")
+					}
 					if err := e.unpackImage(ctx, img, src, session.NewGroup(sessionID)); err != nil {
 						return nil, nil, err
 					}
@@ -284,6 +310,9 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 						refs = append(refs, src.Ref)
 					}
 					for _, ref := range src.Refs {
+						if ref == nil {
+							continue
+						}
 						refs = append(refs, ref)
 					}
 					eg, ctx := errgroup.WithContext(ctx)
@@ -309,7 +338,7 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 				}
 			}
 			if e.push {
-				err := e.pushImage(ctx, src, sessionID, targetName, desc.Digest)
+				err = e.pushImage(ctx, src, sessionID, targetName, desc.Digest)
 				if err != nil {
 					return nil, nil, errors.Wrapf(err, "failed to push %v", targetName)
 				}
@@ -339,6 +368,9 @@ func (e *imageExporterInstance) pushImage(ctx context.Context, src *exporter.Sou
 		refs = append(refs, src.Ref)
 	}
 	for _, ref := range src.Refs {
+		if ref == nil {
+			continue
+		}
 		refs = append(refs, ref)
 	}
 
@@ -415,7 +447,7 @@ func (e *imageExporterInstance) unpackImage(ctx context.Context, img images.Imag
 		}
 	}
 
-	layers, err := getLayers(ctx, remote.Descriptors, manifest)
+	layers, err := getLayers(remote.Descriptors, manifest)
 	if err != nil {
 		return err
 	}
@@ -445,7 +477,7 @@ func (e *imageExporterInstance) unpackImage(ctx context.Context, img images.Imag
 	return err
 }
 
-func getLayers(ctx context.Context, descs []ocispecs.Descriptor, manifest ocispecs.Manifest) ([]rootfs.Layer, error) {
+func getLayers(descs []ocispecs.Descriptor, manifest ocispecs.Manifest) ([]rootfs.Layer, error) {
 	if len(descs) != len(manifest.Layers) {
 		return nil, errors.Errorf("mismatched image rootfs and manifest layers")
 	}
@@ -454,7 +486,7 @@ func getLayers(ctx context.Context, descs []ocispecs.Descriptor, manifest ocispe
 	for i, desc := range descs {
 		layers[i].Diff = ocispecs.Descriptor{
 			MediaType: ocispecs.MediaTypeImageLayer,
-			Digest:    digest.Digest(desc.Annotations["containerd.io/uncompressed"]),
+			Digest:    digest.Digest(desc.Annotations[labels.LabelUncompressed]),
 		}
 		layers[i].Blob = manifest.Layers[i]
 	}
@@ -470,9 +502,10 @@ func addAnnotations(m map[digest.Digest]map[string]string, desc ocispecs.Descrip
 		m[desc.Digest] = desc.Annotations
 		return
 	}
-	for k, v := range desc.Annotations {
-		a[k] = v
+	if a == nil {
+		a = make(map[string]string)
 	}
+	maps.Copy(a, desc.Annotations)
 }
 
 func NewDescriptorReference(desc ocispecs.Descriptor, release func(context.Context) error) exporter.DescriptorReference {

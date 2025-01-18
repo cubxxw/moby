@@ -20,6 +20,7 @@ import (
 	is "gotest.tools/v3/assert/cmp"
 )
 
+//nolint:dupword
 const mountsFixture = `142 78 0:38 / / rw,relatime - aufs none rw,si=573b861da0b3a05b,dio
 143 142 0:60 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
 144 142 0:67 / /dev rw,nosuid - tmpfs tmpfs rw,mode=755
@@ -58,6 +59,7 @@ const mountsFixture = `142 78 0:38 / / rw,relatime - aufs none rw,si=573b861da0b
 310 142 0:60 / /run/docker/netns/71a18572176b rw,nosuid,nodev,noexec,relatime - proc proc rw
 `
 
+//nolint:dupword
 const mountsFixtureOverlay2 = `23 28 0:22 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
 24 28 0:4 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc rw
 25 28 0:6 / /dev rw,nosuid,relatime shared:2 - devtmpfs udev rw,size=491380k,nr_inodes=122845,mode=755
@@ -361,12 +363,20 @@ func TestIfaceAddrs(t *testing.T) {
 
 			createBridge(t, "test", tt.nws...)
 
-			ipv4Nw, ipv6Nw, err := ifaceAddrs("test")
+			ipv4Nw, err := ifaceAddrs("test", netlink.FAMILY_V4)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ipv6Nw, err := ifaceAddrs("test", netlink.FAMILY_V6)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			assert.Check(t, is.DeepEqual(tt.nws, ipv4Nw,
+			ipnets := make([]*net.IPNet, len(ipv4Nw))
+			for i := range ipv4Nw {
+				ipnets[i] = ipv4Nw[i].IPNet
+			}
+			assert.Check(t, is.DeepEqual(ipnets, tt.nws,
 				cmpopts.SortSlices(func(a, b *net.IPNet) bool { return a.String() < b.String() })))
 			// IPv6 link-local address
 			assert.Check(t, is.Len(ipv6Nw, 1))

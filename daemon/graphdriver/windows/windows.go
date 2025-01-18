@@ -24,15 +24,15 @@ import (
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/osversion"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
+	"github.com/docker/docker/daemon/internal/mountref"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/longpath"
-	"github.com/docker/docker/pkg/reexec"
-	"github.com/docker/docker/pkg/system"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
+	"github.com/moby/sys/reexec"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
@@ -72,12 +72,6 @@ func init() {
 	}
 }
 
-type checker struct{}
-
-func (c *checker) IsMounted(path string) bool {
-	return false
-}
-
 type storageOptions struct {
 	size uint64
 }
@@ -86,7 +80,7 @@ type storageOptions struct {
 type Driver struct {
 	// info stores the shim driver information
 	info hcsshim.DriverInfo
-	ctr  *graphdriver.RefCounter
+	ctr  *mountref.Counter
 	// it is safe for windows to use a cache here because it does not support
 	// restoring containers when the daemon dies.
 	cacheMu            sync.Mutex
@@ -108,7 +102,7 @@ func InitFilter(home string, options []string, _ idtools.IdentityMapping) (graph
 
 	// Setting file-mode is a no-op on Windows, so passing "0" to make it more
 	// transparent that the filemode passed has no effect.
-	if err = system.MkdirAll(home, 0); err != nil {
+	if err = os.MkdirAll(home, 0); err != nil {
 		return nil, errors.Wrapf(err, "windowsfilter failed to create '%s'", home)
 	}
 
@@ -132,10 +126,16 @@ func InitFilter(home string, options []string, _ idtools.IdentityMapping) (graph
 			Flavour: filterDriver,
 		},
 		cache:              make(map[string]string),
-		ctr:                graphdriver.NewRefCounter(&checker{}),
+		ctr:                mountref.NewCounter(isMounted),
 		defaultStorageOpts: opts,
 	}
 	return d, nil
+}
+
+// isMounted checks whether the given path is mounted. It always returns
+// false for the WindowsFilter graphdriver.
+func isMounted(string) bool {
+	return false
 }
 
 // String returns the string representation of a driver. This should match

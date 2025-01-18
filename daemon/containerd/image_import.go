@@ -9,21 +9,21 @@ import (
 	"io"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/builder/dockerfile"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
-	imagespec "github.com/docker/docker/image/spec/specs-go/v1"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/pools"
 	"github.com/google/uuid"
+	imagespec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -49,7 +49,7 @@ func (i *ImageService) ImportImage(ctx context.Context, ref reference.Named, pla
 		return "", errdefs.System(err)
 	}
 	defer func() {
-		if err := release(ctx); err != nil {
+		if err := release(context.WithoutCancel(ctx)); err != nil {
 			logger.WithError(err).Warn("failed to release lease created for import")
 		}
 	}()
@@ -65,7 +65,7 @@ func (i *ImageService) ImportImage(ctx context.Context, ref reference.Named, pla
 		return "", errdefs.InvalidParameter(err)
 	}
 
-	cs := i.client.ContentStore()
+	cs := i.content
 
 	compressedDigest, uncompressedDigest, mt, err := saveArchive(ctx, cs, layerReader)
 	if err != nil {
@@ -136,7 +136,7 @@ func (i *ImageService) ImportImage(ctx context.Context, ref reference.Named, pla
 	}
 
 	id := image.ID(manifestDesc.Digest.String())
-	img := images.Image{
+	img := c8dimages.Image{
 		Name:      refString,
 		Target:    manifestDesc,
 		CreatedAt: createdAt,
@@ -145,8 +145,7 @@ func (i *ImageService) ImportImage(ctx context.Context, ref reference.Named, pla
 		img.Name = danglingImageName(manifestDesc.Digest)
 	}
 
-	err = i.saveImage(ctx, img)
-	if err != nil {
+	if err = i.createOrReplaceImage(ctx, img); err != nil {
 		logger.WithError(err).Debug("failed to save image")
 		return "", err
 	}
@@ -155,7 +154,7 @@ func (i *ImageService) ImportImage(ctx context.Context, ref reference.Named, pla
 	if err != nil {
 		logger.WithError(err).Debug("failed to unpack image")
 	} else {
-		i.LogImageEvent(id.String(), id.String(), events.ActionImport)
+		i.LogImageEvent(ctx, id.String(), id.String(), events.ActionImport)
 	}
 
 	return id, err
@@ -296,25 +295,8 @@ func writeBlobAndReturnDigest(ctx context.Context, cs content.Store, mt string, 
 	return digester.Digest(), nil
 }
 
-// saveImage creates an image in the ImageService or updates it if it exists.
-func (i *ImageService) saveImage(ctx context.Context, img images.Image) error {
-	is := i.client.ImageService()
-
-	if _, err := is.Update(ctx, img); err != nil {
-		if cerrdefs.IsNotFound(err) {
-			if _, err := is.Create(ctx, img); err != nil {
-				return errdefs.Unknown(err)
-			}
-		} else {
-			return errdefs.Unknown(err)
-		}
-	}
-
-	return nil
-}
-
 // unpackImage unpacks the platform-specific manifest of a image into the snapshotter.
-func (i *ImageService) unpackImage(ctx context.Context, snapshotter string, img images.Image, manifestDesc ocispec.Descriptor) error {
+func (i *ImageService) unpackImage(ctx context.Context, snapshotter string, img c8dimages.Image, manifestDesc ocispec.Descriptor) error {
 	c8dImg, err := i.NewImageManifest(ctx, img, manifestDesc)
 	if err != nil {
 		return err
@@ -329,7 +311,7 @@ func (i *ImageService) unpackImage(ctx context.Context, snapshotter string, img 
 	return nil
 }
 
-// detectCompression dectects the reader compression type.
+// detectCompression detects the reader compression type.
 func detectCompression(bufRd *bufio.Reader) (archive.Compression, error) {
 	bs, err := bufRd.Peek(10)
 	if err != nil && err != io.EOF {
@@ -369,9 +351,6 @@ func storeJson(ctx context.Context, cs content.Ingester, mt string, obj interfac
 		return ocispec.Descriptor{}, errdefs.InvalidParameter(err)
 	}
 	configDigest := digest.FromBytes(configData)
-	if err != nil {
-		return ocispec.Descriptor{}, errdefs.InvalidParameter(err)
-	}
 	desc := ocispec.Descriptor{
 		MediaType: mt,
 		Digest:    configDigest,

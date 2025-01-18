@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/filters"
 	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/directory"
+	"github.com/docker/docker/internal/directory"
 	"github.com/docker/docker/volume"
 )
 

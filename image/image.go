@@ -1,6 +1,7 @@
 package image // import "github.com/docker/docker/image"
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/layer"
@@ -26,13 +26,6 @@ func (id ID) String() string {
 // Digest converts ID into a digest
 func (id ID) Digest() digest.Digest {
 	return digest.Digest(id)
-}
-
-// IDFromDigest creates an ID from a digest
-//
-// Deprecated: cast to an ID using ID(digest).
-func IDFromDigest(digest digest.Digest) ID {
-	return ID(digest)
 }
 
 // V1Image stores the V1 image configuration.
@@ -122,11 +115,12 @@ type Image struct {
 
 // Details provides additional image data
 type Details struct {
-	References  []reference.Named
-	Size        int64
-	Metadata    map[string]string
-	Driver      string
-	LastUpdated time.Time
+	// ManifestDescriptor is the descriptor of the platform-specific manifest
+	// chosen by the [GetImage] call that returned this image.
+	// The exact descriptor depends on the [GetImageOpts.Platform] field
+	// passed to [GetImage] and the content availability.
+	// This is only set by the containerd image service.
+	ManifestDescriptor *ocispec.Descriptor
 }
 
 // RawJSON returns the immutable JSON associated with the image.
@@ -286,9 +280,9 @@ func NewHistory(author, comment, createdBy string, isEmptyLayer bool) History {
 
 // Exporter provides interface for loading and saving images
 type Exporter interface {
-	Load(io.ReadCloser, io.Writer, bool) error
+	Load(context.Context, io.ReadCloser, io.Writer, bool) error
 	// TODO: Load(net.Context, io.ReadCloser, <- chan StatusMessage) error
-	Save([]string, io.Writer) error
+	Save(context.Context, []string, io.Writer) error
 }
 
 // NewFromJSON creates an Image configuration from json.

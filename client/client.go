@@ -2,7 +2,7 @@
 Package client is a Go client for the Docker Engine API.
 
 For more information about the Engine API, see the documentation:
-https://docs.docker.com/engine/api/
+https://docs.docker.com/reference/api/engine/
 
 # Usage
 
@@ -19,7 +19,7 @@ For example, to list running containers (the equivalent of "docker ps"):
 		"context"
 		"fmt"
 
-		"github.com/docker/docker/api/types"
+		"github.com/docker/docker/api/types/container"
 		"github.com/docker/docker/client"
 	)
 
@@ -29,13 +29,13 @@ For example, to list running containers (the equivalent of "docker ps"):
 			panic(err)
 		}
 
-		containers, err := cli.ContainerList(context.Background(), types.ContainerListOptions{})
+		containers, err := cli.ContainerList(context.Background(), container.ListOptions{})
 		if err != nil {
 			panic(err)
 		}
 
-		for _, container := range containers {
-			fmt.Printf("%s %s\n", container.ID[:10], container.Image)
+		for _, ctr := range containers {
+			fmt.Printf("%s %s\n", ctr.ID, ctr.Image)
 		}
 	}
 */
@@ -49,6 +49,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api"
@@ -90,6 +92,13 @@ import (
 // [Go stdlib]: https://github.com/golang/go/blob/6244b1946bc2101b01955468f1be502dbadd6807/src/net/http/transport.go#L558-L569
 const DummyHost = "api.moby.localhost"
 
+// fallbackAPIVersion is the version to fallback to if API-version negotiation
+// fails. This version is the highest version of the API before API-version
+// negotiation was introduced. If negotiation fails (or no API version was
+// included in the API response), we assume the API server uses the most
+// recent version before negotiation was introduced.
+const fallbackAPIVersion = "1.24"
+
 // Client is the API client that performs all operations
 // against a docker server.
 type Client struct {
@@ -124,7 +133,10 @@ type Client struct {
 	negotiateVersion bool
 
 	// negotiated indicates that API version negotiation took place
-	negotiated bool
+	negotiated atomic.Bool
+
+	// negotiateLock is used to single-flight the version negotiation process
+	negotiateLock sync.Mutex
 
 	tp trace.TracerProvider
 
@@ -235,6 +247,14 @@ func (cli *Client) tlsConfig() *tls.Config {
 
 func defaultHTTPClient(hostURL *url.URL) (*http.Client, error) {
 	transport := &http.Transport{}
+	// Necessary to prevent long-lived processes using the
+	// client from leaking connections due to idle connections
+	// not being released.
+	// TODO: see if we can also address this from the server side,
+	// or in go-connections.
+	// see: https://github.com/moby/moby/issues/45539
+	transport.MaxIdleConns = 6
+	transport.IdleConnTimeout = 30 * time.Second
 	err := sockets.ConfigureTransport(transport, hostURL.Scheme, hostURL.Host)
 	if err != nil {
 		return nil, err
@@ -258,17 +278,31 @@ func (cli *Client) Close() error {
 // This allows for version-dependent code to use the same version as will
 // be negotiated when making the actual requests, and for which cases
 // we cannot do the negotiation lazily.
-func (cli *Client) checkVersion(ctx context.Context) {
-	if cli.negotiateVersion && !cli.negotiated {
-		cli.NegotiateAPIVersion(ctx)
+func (cli *Client) checkVersion(ctx context.Context) error {
+	if !cli.manualOverride && cli.negotiateVersion && !cli.negotiated.Load() {
+		// Ensure exclusive write access to version and negotiated fields
+		cli.negotiateLock.Lock()
+		defer cli.negotiateLock.Unlock()
+
+		// May have been set during last execution of critical zone
+		if cli.negotiated.Load() {
+			return nil
+		}
+
+		ping, err := cli.Ping(ctx)
+		if err != nil {
+			return err
+		}
+		cli.negotiateAPIVersionPing(ping)
 	}
+	return nil
 }
 
 // getAPIPath returns the versioned request path to call the API.
 // It appends the query parameters to the path if they are not empty.
 func (cli *Client) getAPIPath(ctx context.Context, p string, query url.Values) string {
 	var apiPath string
-	cli.checkVersion(ctx)
+	_ = cli.checkVersion(ctx)
 	if cli.version != "" {
 		v := strings.TrimPrefix(cli.version, "v")
 		apiPath = path.Join(cli.basePath, "/v"+v, p)
@@ -300,7 +334,15 @@ func (cli *Client) ClientVersion() string {
 // added (1.24).
 func (cli *Client) NegotiateAPIVersion(ctx context.Context) {
 	if !cli.manualOverride {
-		ping, _ := cli.Ping(ctx)
+		// Avoid concurrent modification of version-related fields
+		cli.negotiateLock.Lock()
+		defer cli.negotiateLock.Unlock()
+
+		ping, err := cli.Ping(ctx)
+		if err != nil {
+			// FIXME(thaJeztah): Ping returns an error when failing to connect to the API; we should not swallow the error here, and instead returning it.
+			return
+		}
 		cli.negotiateAPIVersionPing(ping)
 	}
 }
@@ -320,6 +362,10 @@ func (cli *Client) NegotiateAPIVersion(ctx context.Context) {
 // added (1.24).
 func (cli *Client) NegotiateAPIVersionPing(pingResponse types.Ping) {
 	if !cli.manualOverride {
+		// Avoid concurrent modification of version-related fields
+		cli.negotiateLock.Lock()
+		defer cli.negotiateLock.Unlock()
+
 		cli.negotiateAPIVersionPing(pingResponse)
 	}
 }
@@ -329,7 +375,7 @@ func (cli *Client) NegotiateAPIVersionPing(pingResponse types.Ping) {
 func (cli *Client) negotiateAPIVersionPing(pingResponse types.Ping) {
 	// default to the latest version before versioning headers existed
 	if pingResponse.APIVersion == "" {
-		pingResponse.APIVersion = "1.24"
+		pingResponse.APIVersion = fallbackAPIVersion
 	}
 
 	// if the client is not initialized with a version, start with the latest supported version
@@ -345,7 +391,7 @@ func (cli *Client) negotiateAPIVersionPing(pingResponse types.Ping) {
 	// Store the results, so that automatic API version negotiation (if enabled)
 	// won't be performed on the next request.
 	if cli.negotiateVersion {
-		cli.negotiated = true
+		cli.negotiated.Store(true)
 	}
 }
 

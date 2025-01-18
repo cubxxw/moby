@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
-	"github.com/containerd/containerd/content"
-	cerrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
@@ -227,12 +228,11 @@ func (m *manifestStore) Get(ctx context.Context, desc ocispec.Descriptor, ref re
 }
 
 func (m *manifestStore) Put(ctx context.Context, manifest distribution.Manifest, desc ocispec.Descriptor, w content.Writer, ref reference.Named) error {
-	mt, payload, err := manifest.Payload()
+	_, payload, err := manifest.Payload()
 	if err != nil {
 		return err
 	}
 	desc.Size = int64(len(payload))
-	desc.MediaType = mt
 
 	if _, err = w.Write(payload); err != nil {
 		return errors.Wrap(err, "error writing manifest to content store")
@@ -292,6 +292,11 @@ func detectManifestBlobMediaType(dt []byte) (string, error) {
 		}
 		return mfst.MediaType, nil
 	case schema1.MediaTypeManifest:
+		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+			err := DeprecatedSchema1ImageError(nil)
+			log.G(context.TODO()).Warn(err.Error())
+			return "", err
+		}
 		if mfst.Manifests != nil || mfst.Layers != nil {
 			return "", fmt.Errorf(`media-type: %q should not have "manifests" or "layers"`, mfst.MediaType)
 		}
@@ -303,6 +308,11 @@ func detectManifestBlobMediaType(dt []byte) (string, error) {
 	}
 	switch {
 	case mfst.FSLayers != nil && mfst.Manifests == nil && mfst.Layers == nil && mfst.Config == nil:
+		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+			err := DeprecatedSchema1ImageError(nil)
+			log.G(context.TODO()).Warn(err.Error())
+			return "", err
+		}
 		return schema1.MediaTypeManifest, nil
 	case mfst.Config != nil && mfst.Manifests == nil && mfst.FSLayers == nil,
 		mfst.Layers != nil && mfst.Manifests == nil && mfst.FSLayers == nil:

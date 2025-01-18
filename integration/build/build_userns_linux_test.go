@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -17,6 +19,7 @@ import (
 	"github.com/docker/docker/testutil/fakecontext"
 	"github.com/docker/docker/testutil/fixtures/load"
 	"gotest.tools/v3/assert"
+	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
 )
 
@@ -43,7 +46,7 @@ func TestBuildUserNamespaceValidateCapabilitiesAreV2(t *testing.T) {
 	clientUserRemap := dUserRemap.NewClientT(t)
 	defer clientUserRemap.Close()
 
-	err = load.FrozenImagesLinux(ctx, clientUserRemap, "debian:bullseye-slim")
+	err = load.FrozenImagesLinux(ctx, clientUserRemap, "debian:bookworm-slim")
 	assert.NilError(t, err)
 
 	dUserRemapRunning := true
@@ -55,7 +58,7 @@ func TestBuildUserNamespaceValidateCapabilitiesAreV2(t *testing.T) {
 	}()
 
 	dockerfile := `
-		FROM debian:bullseye-slim
+		FROM debian:bookworm-slim
 		RUN apt-get update && apt-get install -y libcap2-bin --no-install-recommends
 		RUN setcap CAP_NET_BIND_SERVICE=+eip /bin/sleep
 	`
@@ -75,7 +78,7 @@ func TestBuildUserNamespaceValidateCapabilitiesAreV2(t *testing.T) {
 	err = jsonmessage.DisplayJSONMessagesStream(resp.Body, buf, 0, false, nil)
 	assert.NilError(t, err)
 
-	reader, err := clientUserRemap.ImageSave(ctx, []string{imageTag})
+	reader, err := clientUserRemap.ImageSave(ctx, []string{imageTag}, image.SaveOptions{})
 	assert.NilError(t, err, "failed to download capabilities image")
 	defer reader.Close()
 
@@ -105,7 +108,7 @@ func TestBuildUserNamespaceValidateCapabilitiesAreV2(t *testing.T) {
 	defer tarFile.Close()
 
 	tarReader := bufio.NewReader(tarFile)
-	loadResp, err := clientNoUserRemap.ImageLoad(ctx, tarReader, false)
+	loadResp, err := clientNoUserRemap.ImageLoad(ctx, tarReader, image.LoadOptions{})
 	assert.NilError(t, err, "failed to load image tar file")
 	defer loadResp.Body.Close()
 	buf = bytes.NewBuffer(nil)
@@ -116,7 +119,9 @@ func TestBuildUserNamespaceValidateCapabilitiesAreV2(t *testing.T) {
 		container.WithImage(imageTag),
 		container.WithCmd("/sbin/getcap", "-n", "/bin/sleep"),
 	)
-	logReader, err := clientNoUserRemap.ContainerLogs(ctx, cid, types.ContainerLogsOptions{
+
+	poll.WaitOn(t, container.IsStopped(ctx, clientNoUserRemap, cid))
+	logReader, err := clientNoUserRemap.ContainerLogs(ctx, cid, containertypes.LogsOptions{
 		ShowStdout: true,
 	})
 	assert.NilError(t, err)

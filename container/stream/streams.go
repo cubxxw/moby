@@ -2,15 +2,14 @@ package stream // import "github.com/docker/docker/container/stream"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/pkg/broadcaster"
-	"github.com/docker/docker/pkg/ioutils"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/log"
+	"github.com/docker/docker/container/stream/bytespipe"
 	"github.com/docker/docker/pkg/pools"
 )
 
@@ -25,8 +24,8 @@ import (
 // a kind of "broadcaster".
 type Config struct {
 	wg        sync.WaitGroup
-	stdout    *broadcaster.Unbuffered
-	stderr    *broadcaster.Unbuffered
+	stdout    *unbuffered
+	stderr    *unbuffered
 	stdin     io.ReadCloser
 	stdinPipe io.WriteCloser
 	dio       *cio.DirectIO
@@ -36,18 +35,18 @@ type Config struct {
 // the standard err and standard out to new unbuffered broadcasters.
 func NewConfig() *Config {
 	return &Config{
-		stderr: new(broadcaster.Unbuffered),
-		stdout: new(broadcaster.Unbuffered),
+		stderr: new(unbuffered),
+		stdout: new(unbuffered),
 	}
 }
 
 // Stdout returns the standard output in the configuration.
-func (c *Config) Stdout() *broadcaster.Unbuffered {
+func (c *Config) Stdout() io.Writer {
 	return c.stdout
 }
 
 // Stderr returns the standard error in the configuration.
-func (c *Config) Stderr() *broadcaster.Unbuffered {
+func (c *Config) Stderr() io.Writer {
 	return c.stderr
 }
 
@@ -65,7 +64,7 @@ func (c *Config) StdinPipe() io.WriteCloser {
 // It adds this new out pipe to the Stdout broadcaster.
 // This will block stdout if unconsumed.
 func (c *Config) StdoutPipe() io.ReadCloser {
-	bytesPipe := ioutils.NewBytesPipe()
+	bytesPipe := bytespipe.New()
 	c.stdout.Add(bytesPipe)
 	return bytesPipe
 }
@@ -74,7 +73,7 @@ func (c *Config) StdoutPipe() io.ReadCloser {
 // It adds this new err pipe to the Stderr broadcaster.
 // This will block stderr if unconsumed.
 func (c *Config) StderrPipe() io.ReadCloser {
-	bytesPipe := ioutils.NewBytesPipe()
+	bytesPipe := bytespipe.New()
 	c.stderr.Add(bytesPipe)
 	return bytesPipe
 }
@@ -86,32 +85,34 @@ func (c *Config) NewInputPipes() {
 
 // NewNopInputPipe creates a new input pipe that will silently drop all messages in the input.
 func (c *Config) NewNopInputPipe() {
-	c.stdinPipe = ioutils.NopWriteCloser(io.Discard)
+	c.stdinPipe = &nopWriteCloser{io.Discard}
 }
+
+type nopWriteCloser struct {
+	io.Writer
+}
+
+func (w *nopWriteCloser) Close() error { return nil }
 
 // CloseStreams ensures that the configured streams are properly closed.
 func (c *Config) CloseStreams() error {
-	var errors []string
+	var errs error
 
 	if c.stdin != nil {
 		if err := c.stdin.Close(); err != nil {
-			errors = append(errors, fmt.Sprintf("error close stdin: %s", err))
+			errs = errors.Join(errs, fmt.Errorf("error close stdin: %w", err))
 		}
 	}
 
 	if err := c.stdout.Clean(); err != nil {
-		errors = append(errors, fmt.Sprintf("error close stdout: %s", err))
+		errs = errors.Join(errs, fmt.Errorf("error close stdout: %w", err))
 	}
 
 	if err := c.stderr.Clean(); err != nil {
-		errors = append(errors, fmt.Sprintf("error close stderr: %s", err))
+		errs = errors.Join(errs, fmt.Errorf("error close stderr: %w", err))
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf(strings.Join(errors, "\n"))
-	}
-
-	return nil
+	return errs
 }
 
 // CopyToPipe connects streamconfig with a libcontainerd.IOPipe
@@ -119,30 +120,35 @@ func (c *Config) CopyToPipe(iop *cio.DirectIO) {
 	ctx := context.TODO()
 
 	c.dio = iop
-	copyFunc := func(w io.Writer, r io.ReadCloser) {
+	copyFunc := func(name string, w io.Writer, r io.ReadCloser) {
 		c.wg.Add(1)
 		go func() {
 			if _, err := pools.Copy(w, r); err != nil {
-				log.G(ctx).Errorf("stream copy error: %v", err)
+				log.G(ctx).WithFields(log.Fields{"stream": name, "error": err}).Error("copy stream failed")
 			}
-			r.Close()
+			if err := r.Close(); err != nil {
+				log.G(ctx).WithFields(log.Fields{"stream": name, "error": err}).Warn("close stream failed")
+			}
 			c.wg.Done()
 		}()
 	}
 
 	if iop.Stdout != nil {
-		copyFunc(c.Stdout(), iop.Stdout)
+		copyFunc("stdout", c.Stdout(), iop.Stdout)
 	}
 	if iop.Stderr != nil {
-		copyFunc(c.Stderr(), iop.Stderr)
+		copyFunc("stderr", c.Stderr(), iop.Stderr)
 	}
 
 	if stdin := c.Stdin(); stdin != nil {
 		if iop.Stdin != nil {
 			go func() {
-				pools.Copy(iop.Stdin, stdin)
+				_, err := pools.Copy(iop.Stdin, stdin)
+				if err != nil {
+					log.G(ctx).WithFields(log.Fields{"stream": "stdin", "error": err}).Error("copy stream failed")
+				}
 				if err := iop.Stdin.Close(); err != nil {
-					log.G(ctx).Warnf("failed to close stdin: %v", err)
+					log.G(ctx).WithFields(log.Fields{"stream": "stdin", "error": err}).Warn("close stream failed")
 				}
 			}()
 		}
