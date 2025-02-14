@@ -167,6 +167,7 @@ const (
 	gwModeNAT       gwMode = "nat"
 	gwModeNATUnprot gwMode = "nat-unprotected"
 	gwModeRouted    gwMode = "routed"
+	gwModeIsolated  gwMode = "isolated"
 )
 
 // New constructs a new bridge driver
@@ -369,6 +370,8 @@ func newGwMode(gwMode string) (gwMode, error) {
 		return gwModeNATUnprot, nil
 	case "routed":
 		return gwModeRouted, nil
+	case "isolated":
+		return gwModeIsolated, nil
 	}
 	return gwModeDefault, fmt.Errorf("unknown gateway mode %s", gwMode)
 }
@@ -379,6 +382,10 @@ func (m gwMode) routed() bool {
 
 func (m gwMode) unprotected() bool {
 	return m == gwModeNATUnprot
+}
+
+func (m gwMode) isolated() bool {
+	return m == gwModeIsolated
 }
 
 func parseErr(label, value, errString string) error {
@@ -707,6 +714,10 @@ func parseNetworkOptions(id string, option options.Generic) (*networkConfigurati
 		return nil, err
 	}
 
+	if (config.GwModeIPv4.isolated() || config.GwModeIPv6.isolated()) && !config.Internal {
+		return nil, fmt.Errorf("gateway mode 'isolated' can only be used for an internal network")
+	}
+
 	if !exists {
 		config.BridgeIfaceCreator = ifaceCreatedByLibnetwork
 	} else {
@@ -751,10 +762,12 @@ func (d *driver) GetSkipGwAlloc(opts options.Generic) (ipv4, ipv6 bool, _ error)
 	if err != nil {
 		return false, false, err
 	}
-	// cfg.InhibitIPv4 means no gateway address will be assigned to the bridge, if
-	// the network is also cfg.Internal, there will not be a default route to use
-	// the gateway address either.
-	return cfg.InhibitIPv4 && cfg.Internal, false, nil
+	// An isolated network should not have a gateway. Also, cfg.InhibitIPv4 means no
+	// gateway address will be assigned to the bridge. So, if the network is also
+	// cfg.Internal, there will not be a default route to use the gateway address.
+	ipv4 = cfg.GwModeIPv4.isolated() || (cfg.InhibitIPv4 && cfg.Internal)
+	ipv6 = cfg.GwModeIPv6.isolated()
+	return ipv4, ipv6, nil
 }
 
 // CreateNetwork creates a new network using the bridge driver.
@@ -1431,7 +1444,7 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 }
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
-func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, epOpts, sbOpts map[string]interface{}) error {
 	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.Join", trace.WithAttributes(
 		attribute.String("nid", nid),
 		attribute.String("eid", eid),
@@ -1452,7 +1465,7 @@ func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinf
 		return endpointNotFoundError(eid)
 	}
 
-	endpoint.containerConfig, err = parseContainerOptions(options)
+	endpoint.containerConfig, err = parseContainerOptions(sbOpts)
 	if err != nil {
 		return err
 	}
@@ -1462,7 +1475,7 @@ func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinf
 	if network.config.ContainerIfacePrefix != "" {
 		containerVethPrefix = network.config.ContainerIfacePrefix
 	}
-	if err := iNames.SetNames(endpoint.srcName, containerVethPrefix); err != nil {
+	if err := iNames.SetNames(endpoint.srcName, containerVethPrefix, netlabel.GetIfname(epOpts)); err != nil {
 		return err
 	}
 
