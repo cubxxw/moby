@@ -10,22 +10,24 @@ import (
 )
 
 func TestIsValidHealthString(t *testing.T) {
-	contexts := []struct {
-		Health   string
-		Expected bool
+	tests := []struct {
+		health   container.HealthStatus
+		expected bool
 	}{
-		{container.Healthy, true},
-		{container.Unhealthy, true},
-		{container.Starting, true},
-		{container.NoHealthcheck, true},
-		{"fail", false},
+		{health: container.Healthy, expected: true},
+		{health: container.Unhealthy, expected: true},
+		{health: container.Starting, expected: true},
+		{health: container.NoHealthcheck, expected: true},
+		{health: "fail", expected: false},
 	}
 
-	for _, c := range contexts {
-		v := IsValidHealthString(c.Health)
-		if v != c.Expected {
-			t.Fatalf("Expected %t, but got %t", c.Expected, v)
-		}
+	for _, tc := range tests {
+		t.Run(tc.health, func(t *testing.T) {
+			v := IsValidHealthString(tc.health)
+			if v != tc.expected {
+				t.Fatalf("Expected %t, but got %t", tc.expected, v)
+			}
+		})
 	}
 }
 
@@ -43,7 +45,7 @@ func TestStateRunStop(t *testing.T) {
 	// within 200 milliseconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	removalWait := s.Wait(ctx, WaitConditionRemoved)
+	removalWait := s.Wait(ctx, container.WaitConditionRemoved)
 
 	// Full lifecycle two times.
 	for i := 1; i <= 2; i++ {
@@ -55,7 +57,7 @@ func TestStateRunStop(t *testing.T) {
 		defer cancel()
 		// Expectx exit code to be i-1 since it should be the exit
 		// code from the previous loop or 0 for the created state.
-		if status := <-s.Wait(ctx, WaitConditionNotRunning); status.ExitCode() != i-1 {
+		if status := <-s.Wait(ctx, container.WaitConditionNotRunning); status.ExitCode() != i-1 {
 			t.Fatalf("ExitCode %v, expected %v, err %q", status.ExitCode(), i-1, status.Err())
 		}
 
@@ -64,7 +66,7 @@ func TestStateRunStop(t *testing.T) {
 		// than 100 milliseconds.
 		ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
-		initialWait := s.Wait(ctx, WaitConditionNextExit)
+		initialWait := s.Wait(ctx, container.WaitConditionNextExit)
 
 		// Set the state to "Running".
 		s.Lock()
@@ -87,7 +89,7 @@ func TestStateRunStop(t *testing.T) {
 		// more than 100 milliseconds.
 		ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
-		exitWait := s.Wait(ctx, WaitConditionNotRunning)
+		exitWait := s.Wait(ctx, container.WaitConditionNotRunning)
 
 		// Set the state to "Exited".
 		s.Lock()
@@ -139,7 +141,7 @@ func TestStateTimeoutWait(t *testing.T) {
 	// Start a wait with a timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	waitC := s.Wait(ctx, WaitConditionNotRunning)
+	waitC := s.Wait(ctx, container.WaitConditionNotRunning)
 
 	// It should timeout *before* this 200ms timer does.
 	select {
@@ -164,7 +166,7 @@ func TestStateTimeoutWait(t *testing.T) {
 	// immediately.
 	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	waitC = s.Wait(ctx, WaitConditionNotRunning)
+	waitC = s.Wait(ctx, container.WaitConditionNotRunning)
 
 	select {
 	case <-time.After(200 * time.Millisecond):
@@ -185,7 +187,7 @@ func TestCorrectStateWaitResultAfterRestart(t *testing.T) {
 	s.SetRunning(nil, nil, time.Now())
 	s.Unlock()
 
-	waitC := s.Wait(context.Background(), WaitConditionNotRunning)
+	waitC := s.Wait(context.Background(), container.WaitConditionNotRunning)
 	want := ExitStatus{ExitCode: 10, ExitedAt: time.Now()}
 
 	s.Lock()
@@ -197,8 +199,8 @@ func TestCorrectStateWaitResultAfterRestart(t *testing.T) {
 	s.Unlock()
 
 	got := <-waitC
-	if got.exitCode != want.ExitCode {
-		t.Fatalf("expected exit code %v, got %v", want.ExitCode, got.exitCode)
+	if got.ExitCode() != want.ExitCode {
+		t.Fatalf("expected exit code %v, got %v", want.ExitCode, got.ExitCode())
 	}
 }
 

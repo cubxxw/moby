@@ -104,6 +104,61 @@ func TestCreateWithIPv6WithoutEnableIPv6Flag(t *testing.T) {
 	t.Fatalf("Network %s has no ULA prefix, expected one.", nwName)
 }
 
+// TestDefaultIPvOptOverride checks that when default-network-opts set enable_ipv4 or
+// enable_ipv6, and those values are overridden for a network, the default option
+// values don't show up in network inspect output. (Because it's confusing if the
+// default shows up when it's been overridden with a different value.)
+func TestDefaultIPvOptOverride(t *testing.T) {
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	const opt4 = "false"
+	const opt6 = "true"
+	d.StartWithBusybox(ctx, t,
+		"--default-network-opt=bridge=com.docker.network.enable_ipv4="+opt4,
+		"--default-network-opt=bridge=com.docker.network.enable_ipv6="+opt6,
+	)
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
+	t.Run("TestDefaultIPvOptOverride", func(t *testing.T) {
+		for _, override4 := range []bool{false, true} {
+			for _, override6 := range []bool{false, true} {
+				t.Run(fmt.Sprintf("override4=%v,override6=%v", override4, override6), func(t *testing.T) {
+					t.Parallel()
+					netName := fmt.Sprintf("tdioo-%v-%v", override4, override6)
+					var nopts []func(*networktypes.CreateOptions)
+					if override4 {
+						nopts = append(nopts, network.WithIPv4(true))
+					}
+					if override6 {
+						nopts = append(nopts, network.WithIPv6())
+					}
+					network.CreateNoError(ctx, t, c, netName, nopts...)
+					defer network.RemoveNoError(ctx, t, c, netName)
+
+					insp, err := c.NetworkInspect(ctx, netName, networktypes.InspectOptions{})
+					assert.NilError(t, err)
+					t.Log("override4", override4, "override6", override6, "->", insp.Options)
+
+					gotOpt4, have4 := insp.Options[netlabel.EnableIPv4]
+					assert.Check(t, is.Equal(have4, !override4))
+					assert.Check(t, is.Equal(insp.EnableIPv4, override4))
+					if have4 {
+						assert.Check(t, is.Equal(gotOpt4, opt4))
+					}
+
+					gotOpt6, have6 := insp.Options[netlabel.EnableIPv6]
+					assert.Check(t, is.Equal(have6, !override6))
+					assert.Check(t, is.Equal(insp.EnableIPv6, true))
+					if have6 {
+						assert.Check(t, is.Equal(gotOpt6, opt6))
+					}
+				})
+			}
+		}
+	})
+}
+
 // Check that it's possible to create IPv6 networks with a 64-bit ip-range,
 // in 64-bit and bigger subnets, with and without a gateway.
 func Test64BitIPRange(t *testing.T) {
@@ -403,7 +458,12 @@ func TestIsolated(t *testing.T) {
 		defer apiClient.ContainerRemove(ctx, res.ContainerID, containertypes.RemoveOptions{Force: true})
 		if ipv == "-6" && networking.FirewalldRunning() {
 			// FIXME(robmry) - this fails due to https://github.com/moby/moby/issues/49680
-			assert.Check(t, is.Equal(res.ExitCode, 1))
+			if res.ExitCode != 1 {
+				t.Log("Unexpected pass!")
+				t.Log(icmd.RunCommand("nft", "list ruleset").Stdout())
+				t.Log(icmd.RunCommand("ip", "a").Stdout())
+				t.Log(icmd.RunCommand("route", "-6").Stdout())
+			}
 			t.Skip("XFAIL - IPv6, firewalld, isolated - see https://github.com/moby/moby/issues/49680")
 		}
 		assert.Check(t, is.Equal(res.ExitCode, 0))
@@ -557,6 +617,80 @@ func TestFirewalldReloadNoZombies(t *testing.T) {
 	assert.NilError(t, resAfterReload.Error)
 	assert.Check(t, !strings.Contains(resAfterReload.Combined(), bridgeName),
 		"After deletes: did not expect rules for %s in: %s", bridgeName, resAfterReload.Combined())
+}
+
+// TestLegacyLink checks that a legacy link ("--link" in the default bridge network)
+// sets up a hostname and opens ports when the daemon is running with icc=false.
+func TestLegacyLink(t *testing.T) {
+	ctx := setupTest(t)
+
+	// Tidy up after the test by starting a new daemon, which will remove the icc=false
+	// rules this test will create for docker0.
+	defer func() {
+		d := daemon.New(t)
+		d.StartWithBusybox(ctx, t)
+		defer d.Stop(t)
+	}()
+
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t, "--icc=false")
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
+	// Run an http server.
+	const svrName = "svr"
+	cid := ctr.Run(ctx, t, c,
+		ctr.WithExposedPorts("80/tcp"),
+		ctr.WithName(svrName),
+		ctr.WithCmd("httpd", "-f"),
+	)
+
+	defer ctr.Remove(ctx, t, c, cid, containertypes.RemoveOptions{Force: true})
+	insp := ctr.Inspect(ctx, t, c, cid)
+	svrAddr := insp.NetworkSettings.Networks["bridge"].IPAddress
+
+	const svrAlias = "thealias"
+	testcases := []struct {
+		name   string
+		host   string
+		links  []string
+		expect string
+	}{
+		{
+			name:   "no link",
+			host:   svrAddr,
+			expect: "download timed out",
+		},
+		{
+			name:   "access by address",
+			links:  []string{svrName},
+			host:   svrAddr,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+		{
+			name:   "access by name",
+			links:  []string{svrName},
+			host:   svrName,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+		{
+			name:   "access by alias",
+			links:  []string{svrName + ":" + svrAlias},
+			host:   svrAlias,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+			res := ctr.RunAttach(ctx, t, c,
+				ctr.WithLinks(tc.links...),
+				ctr.WithCmd("wget", "-T3", "http://"+tc.host),
+			)
+			assert.Check(t, is.Contains(res.Stderr.String(), tc.expect))
+		})
+	}
 }
 
 // TestRemoveLegacyLink checks that a legacy link can be deleted while the

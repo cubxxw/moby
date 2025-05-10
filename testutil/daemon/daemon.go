@@ -502,7 +502,7 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 	if d.init {
 		d.args = append(d.args, "--init")
 	}
-	if !(d.UseDefaultHost || d.UseDefaultTLSHost) {
+	if !d.UseDefaultHost && !d.UseDefaultTLSHost {
 		d.args = append(d.args, "--host", d.Sock())
 	}
 	if root := os.Getenv("DOCKER_REMAP_ROOT"); root != "" {
@@ -699,13 +699,13 @@ func (d *Daemon) Stop(t testing.TB) {
 // If it timeouts, a SIGKILL is sent.
 // Stop will not delete the daemon directory. If a purged daemon is needed,
 // instantiate a new one with NewDaemon.
-func (d *Daemon) StopWithError() (err error) {
+func (d *Daemon) StopWithError() (retErr error) {
 	if d.cmd == nil || d.Wait == nil {
 		return errDaemonNotStarted
 	}
 	defer func() {
-		if err != nil {
-			d.log.Logf("[%s] error while stopping daemon: %v", d.id, err)
+		if retErr != nil {
+			d.log.Logf("[%s] error while stopping daemon: %v", d.id, retErr)
 		} else {
 			d.log.Logf("[%s] daemon stopped", d.id)
 			if d.pidFile != "" {

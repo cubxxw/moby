@@ -57,7 +57,6 @@ import (
 	"github.com/moby/buildkit/worker/containerd"
 	"github.com/moby/buildkit/worker/label"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
 	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
@@ -208,7 +207,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 }
 
 func openHistoryDB(root string, fn string, cfg *config.BuilderHistoryConfig) (*bolt.DB, *bkconfig.HistoryConfig, error) {
-	db, err := bbolt.Open(filepath.Join(root, fn), 0o600, nil)
+	db, err := bolt.Open(filepath.Join(root, fn), 0o600, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -445,7 +444,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 
 func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, error) {
 	var gcPolicy []client.PruneInfo
-	if conf.GC.Enabled {
+	if conf.GC.IsEnabled() {
 		if conf.GC.Policy == nil {
 			reservedSpace, maxUsedSpace, minFreeSpace, err := parseGCPolicy(config.BuilderGCRule{
 				ReservedSpace: conf.GC.DefaultReservedSpace,
