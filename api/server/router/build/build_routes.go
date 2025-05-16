@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/registry"
@@ -179,7 +180,7 @@ func (br *buildRouter) postPrune(ctx context.Context, w http.ResponseWriter, r *
 		return err
 	}
 
-	opts := types.BuildCachePruneOptions{
+	opts := build.CachePruneOptions{
 		All:     httputils.BoolValue(r, "all"),
 		Filters: fltrs,
 	}
@@ -197,17 +198,18 @@ func (br *buildRouter) postPrune(ctx context.Context, w http.ResponseWriter, r *
 
 	version := httputils.VersionFromContext(ctx)
 	if versions.GreaterThanOrEqualTo(version, "1.48") {
-		bs, err := parseBytesFromFormValue("reserved-space")
-		if err != nil {
+		if bs, err := parseBytesFromFormValue("reserved-space"); err != nil {
 			return err
-		} else if bs == 0 {
-			// Deprecated parameter. Only checked if reserved-space is not used.
-			bs, err = parseBytesFromFormValue("keep-storage")
-			if err != nil {
-				return err
+		} else {
+			if bs == 0 {
+				// Deprecated parameter. Only checked if reserved-space is not used.
+				bs, err = parseBytesFromFormValue("keep-storage")
+				if err != nil {
+					return err
+				}
 			}
+			opts.ReservedSpace = bs
 		}
-		opts.ReservedSpace = bs
 
 		if bs, err := parseBytesFromFormValue("max-used-space"); err != nil {
 			return err
@@ -222,11 +224,11 @@ func (br *buildRouter) postPrune(ctx context.Context, w http.ResponseWriter, r *
 		}
 	} else {
 		// Only keep-storage was valid in pre-1.48 versions.
-		bs, err := parseBytesFromFormValue("keep-storage")
-		if err != nil {
+		if bs, err := parseBytesFromFormValue("keep-storage"); err != nil {
 			return err
+		} else {
+			opts.ReservedSpace = bs
 		}
-		opts.ReservedSpace = bs
 	}
 
 	report, err := br.backend.PruneCache(ctx, opts)

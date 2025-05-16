@@ -23,7 +23,6 @@ import (
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/blkiodev"
-	pblkiodev "github.com/docker/docker/api/types/blkiodev"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/container"
@@ -413,7 +412,7 @@ func adaptSharedNamespaceContainer(daemon containerGetter, hostConfig *container
 }
 
 // verifyPlatformContainerResources performs platform-specific validation of the container's resource-configuration
-func verifyPlatformContainerResources(resources *containertypes.Resources, sysInfo *sysinfo.SysInfo, update bool) (warnings []string, err error) {
+func verifyPlatformContainerResources(resources *containertypes.Resources, sysInfo *sysinfo.SysInfo, update bool) (warnings []string, _ error) {
 	fixMemorySwappiness(resources)
 
 	// memory subsystem checks and adjustments
@@ -563,23 +562,23 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, sysIn
 	}
 	if len(resources.BlkioWeightDevice) > 0 && !sysInfo.BlkioWeightDevice {
 		warnings = append(warnings, "Your kernel does not support Block I/O weight_device or the cgroup is not mounted. Weight-device discarded.")
-		resources.BlkioWeightDevice = []*pblkiodev.WeightDevice{}
+		resources.BlkioWeightDevice = []*blkiodev.WeightDevice{}
 	}
 	if len(resources.BlkioDeviceReadBps) > 0 && !sysInfo.BlkioReadBpsDevice {
 		warnings = append(warnings, "Your kernel does not support BPS Block I/O read limit or the cgroup is not mounted. Block I/O BPS read limit discarded.")
-		resources.BlkioDeviceReadBps = []*pblkiodev.ThrottleDevice{}
+		resources.BlkioDeviceReadBps = []*blkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceWriteBps) > 0 && !sysInfo.BlkioWriteBpsDevice {
 		warnings = append(warnings, "Your kernel does not support BPS Block I/O write limit or the cgroup is not mounted. Block I/O BPS write limit discarded.")
-		resources.BlkioDeviceWriteBps = []*pblkiodev.ThrottleDevice{}
+		resources.BlkioDeviceWriteBps = []*blkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceReadIOps) > 0 && !sysInfo.BlkioReadIOpsDevice {
 		warnings = append(warnings, "Your kernel does not support IOPS Block read limit or the cgroup is not mounted. Block I/O IOPS read limit discarded.")
-		resources.BlkioDeviceReadIOps = []*pblkiodev.ThrottleDevice{}
+		resources.BlkioDeviceReadIOps = []*blkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceWriteIOps) > 0 && !sysInfo.BlkioWriteIOpsDevice {
 		warnings = append(warnings, "Your kernel does not support IOPS Block write limit or the cgroup is not mounted. Block I/O IOPS write limit discarded.")
-		resources.BlkioDeviceWriteIOps = []*pblkiodev.ThrottleDevice{}
+		resources.BlkioDeviceWriteIOps = []*blkiodev.ThrottleDevice{}
 	}
 
 	return warnings, nil
@@ -650,7 +649,7 @@ func isRunningSystemd() bool {
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
 // hostconfig and config structures.
-func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, err error) {
+func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, _ error) {
 	if hostConfig == nil {
 		return nil, nil
 	}
@@ -683,7 +682,7 @@ func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hos
 	}
 
 	// ip-forwarding does not affect container with '--net=host' (or '--net=none')
-	if sysInfo.IPv4ForwardingDisabled && !(hostConfig.NetworkMode.IsHost() || hostConfig.NetworkMode.IsNone()) {
+	if sysInfo.IPv4ForwardingDisabled && (!hostConfig.NetworkMode.IsHost() && !hostConfig.NetworkMode.IsNone()) {
 		warnings = append(warnings, "IPv4 forwarding is disabled. Networking will not work.")
 	}
 	if hostConfig.NetworkMode.IsHost() && len(hostConfig.PortBindings) > 0 {
@@ -933,6 +932,7 @@ func driverOptions(config *config.Config) nwconfig.Option {
 			"EnableIP6Tables":          config.BridgeConfig.EnableIP6Tables,
 			"EnableUserlandProxy":      config.BridgeConfig.EnableUserlandProxy,
 			"UserlandProxyPath":        config.BridgeConfig.UserlandProxyPath,
+			"AllowDirectRouting":       config.BridgeConfig.AllowDirectRouting,
 			"Rootless":                 config.Rootless,
 		},
 	})

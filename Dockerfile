@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.23.8
+ARG GO_VERSION=1.24.3
 ARG BASE_DEBIAN_DISTRO="bookworm"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
 ARG XX_VERSION=1.6.1
 
-ARG VPNKIT_VERSION=0.5.0
+# VPNKIT_VERSION is the version of the vpnkit binary which is used as a fallback
+# network driver for rootless.
+ARG VPNKIT_VERSION=0.6.0
 
 # DOCKERCLI_VERSION is the version of the CLI to install in the dev-container.
 ARG DOCKERCLI_VERSION=v28.1.1
@@ -19,7 +21,7 @@ ARG DOCKERCLI_INTEGRATION_VERSION=v18.06.3-ce
 ARG BUILDX_VERSION=0.23.0
 
 # COMPOSE_VERSION is the version of compose to install in the dev container.
-ARG COMPOSE_VERSION=v2.35.1
+ARG COMPOSE_VERSION=v2.36.0
 
 ARG SYSTEMD="false"
 ARG FIREWALLD="false"
@@ -233,10 +235,10 @@ FROM binary-dummy AS containerd-windows
 FROM containerd-${TARGETOS} AS containerd
 
 FROM base AS golangci_lint
-ARG GOLANGCI_LINT_VERSION=v1.64.5
+ARG GOLANGCI_LINT_VERSION=v2.1.5
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-        GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
+        GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
      && /build/golangci-lint --version
 
 FROM base AS gotestsum
@@ -390,7 +392,8 @@ FROM binary-dummy AS rootlesskit-windows
 FROM rootlesskit-${TARGETOS} AS rootlesskit
 
 FROM base AS crun
-ARG CRUN_VERSION=1.12
+# CRUN_VERSION is the version of crun to install in the dev-container.
+ARG CRUN_VERSION=1.21
 RUN --mount=type=cache,sharing=locked,id=moby-crun-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-crun-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install -y --no-install-recommends \
@@ -421,8 +424,8 @@ FROM scratch AS vpnkit-linux-arm
 FROM scratch AS vpnkit-linux-ppc64le
 FROM scratch AS vpnkit-linux-riscv64
 FROM scratch AS vpnkit-linux-s390x
-FROM djs55/vpnkit:${VPNKIT_VERSION} AS vpnkit-linux-amd64
-FROM djs55/vpnkit:${VPNKIT_VERSION} AS vpnkit-linux-arm64
+FROM moby/vpnkit-bin:${VPNKIT_VERSION} AS vpnkit-linux-amd64
+FROM moby/vpnkit-bin:${VPNKIT_VERSION} AS vpnkit-linux-arm64
 FROM vpnkit-linux-${TARGETARCH} AS vpnkit-linux
 FROM vpnkit-${TARGETOS} AS vpnkit
 

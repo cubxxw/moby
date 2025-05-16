@@ -36,7 +36,7 @@ import (
 	networktypes "github.com/docker/docker/api/types/network"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/volume"
+	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/container"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
@@ -78,7 +78,7 @@ import (
 	"github.com/moby/sys/user"
 	"github.com/moby/sys/userns"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/semaphore"
@@ -131,9 +131,9 @@ type Daemon struct {
 	seccompProfile     []byte
 	seccompProfilePath string
 
-	usageContainers singleflight.Group[struct{}, []*containertypes.Summary]
+	usageContainers singleflight.Group[struct{}, *containertypes.DiskUsage]
 	usageImages     singleflight.Group[struct{}, []*imagetypes.Summary]
-	usageVolumes    singleflight.Group[struct{}, []*volume.Volume]
+	usageVolumes    singleflight.Group[struct{}, *volumetypes.DiskUsage]
 	usageLayer      singleflight.Group[struct{}, int64]
 
 	pruneRunning atomic.Bool
@@ -146,7 +146,7 @@ type Daemon struct {
 	// This is used for Windows which doesn't currently support running on containerd
 	// It stores metadata for the content store (used for manifest caching)
 	// This needs to be closed on daemon exit
-	mdDB *bbolt.DB
+	mdDB *bolt.DB
 
 	usesSnapshotter bool
 }
@@ -495,6 +495,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 			}
 
 			c.Lock()
+			// TODO(thaJeztah): we no longer persist RemovalInProgress on disk, so this code is likely redundant; see https://github.com/moby/moby/pull/49968
 			if c.RemovalInProgress {
 				// We probably crashed in the middle of a removal, reset
 				// the flag.
@@ -760,7 +761,7 @@ func (daemon *Daemon) IsSwarmCompatible() error {
 
 // NewDaemon sets up everything for the daemon to be able to service
 // requests from the webserver.
-func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store, authzMiddleware *authorization.Middleware) (daemon *Daemon, err error) {
+func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store, authzMiddleware *authorization.Middleware) (_ *Daemon, retErr error) {
 	// Verify platform-specific requirements.
 	// TODO(thaJeztah): this should be called before we try to create the daemon; perhaps together with the config validation.
 	if err := checkSystem(); err != nil {
@@ -841,7 +842,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// Ensure the daemon is properly shutdown if there is a failure during
 	// initialization
 	defer func() {
-		if err != nil {
+		if retErr != nil {
 			// Use a fresh context here. Passed context could be cancelled.
 			if err := d.Shutdown(context.Background()); err != nil {
 				log.G(ctx).Error(err)
@@ -1224,7 +1225,7 @@ func (daemon *Daemon) shutdownContainer(c *container.Container) error {
 
 	// Wait without timeout for the container to exit.
 	// Ignore the result.
-	<-c.Wait(ctx, container.WaitConditionNotRunning)
+	<-c.Wait(ctx, containertypes.WaitConditionNotRunning)
 	return nil
 }
 
