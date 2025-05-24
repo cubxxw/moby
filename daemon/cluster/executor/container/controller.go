@@ -210,7 +210,7 @@ func (r *controller) Start(ctx context.Context) error {
 	//
 	// TODO(stevvooe): This is very racy. While reading inspect, another could
 	// start the process and we could end up starting it twice.
-	if ctnr.State.Status != "created" {
+	if ctnr.State.Status != container.StateCreated {
 		return exec.ErrTaskStarted
 	}
 
@@ -382,7 +382,7 @@ func (r *controller) Shutdown(ctx context.Context) error {
 	}
 
 	if err := r.adapter.shutdown(ctx); err != nil {
-		if !(errdefs.IsNotFound(err) || errdefs.IsNotModified(err)) {
+		if !errdefs.IsNotFound(err) && !errdefs.IsNotModified(err) {
 			return err
 		}
 	}
@@ -467,10 +467,10 @@ func (r *controller) waitReady(pctx context.Context) error {
 		}
 	} else {
 		switch ctnr.State.Status {
-		case "running", "exited", "dead":
+		case container.StateRunning, container.StateExited, container.StateDead:
 			return nil
-		default:
-			// TODO(thaJeztah): make switch exhaustive
+		case container.StateCreated, container.StatePaused, container.StateRestarting, container.StateRemoving:
+			// not yet ready
 		}
 	}
 
@@ -556,9 +556,10 @@ func (r *controller) Logs(ctx context.Context, publisher exec.LogPublisher, opti
 			return errors.Wrap(err, "failed to convert timestamp")
 		}
 		var stream api.LogStream
-		if msg.Source == "stdout" {
+		switch msg.Source {
+		case "stdout":
 			stream = api.LogStreamStdout
-		} else if msg.Source == "stderr" {
+		case "stderr":
 			stream = api.LogStreamStderr
 		}
 

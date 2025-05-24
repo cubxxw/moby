@@ -95,7 +95,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	}
 
 	if opts.params.Platform == nil && opts.params.Config.Image != "" {
-		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
+		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{})
 		if err != nil {
 			return containertypes.CreateResponse{}, err
 		}
@@ -108,7 +108,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 			}
 
 			if !images.OnlyPlatformWithFallback(p).Match(imgPlat) {
-				warnings = append(warnings, fmt.Sprintf("The requested image's platform (%s) does not match the detected host platform (%s) and no specific platform was requested", platforms.Format(imgPlat), platforms.Format(p)))
+				warnings = append(warnings, fmt.Sprintf("The requested image's platform (%s) does not match the detected host platform (%s) and no specific platform was requested", platforms.FormatAll(imgPlat), platforms.FormatAll(p)))
 			}
 		}
 	}
@@ -215,7 +215,10 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 				RemoveVolume: true,
 			})
 			if err != nil {
-				log.G(ctx).WithError(err).Error("failed to cleanup container on create error")
+				log.G(ctx).WithFields(log.Fields{
+					"error":     err,
+					"container": ctr.ID,
+				}).Errorf("failed to cleanup container on create error")
 			}
 		}
 	}()
