@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -79,14 +79,14 @@ func (i *ImageService) PullImage(ctx context.Context, baseRef reference.Named, p
 func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registrytypes.AuthConfig, out progress.Output) error {
 	var opts []containerd.RemoteOpt
 	if platform != nil {
-		opts = append(opts, containerd.WithPlatform(platforms.Format(*platform)))
+		opts = append(opts, containerd.WithPlatform(platforms.FormatAll(*platform)))
 	}
 
 	resolver, _ := i.newResolverFromAuthConfig(ctx, authConfig, ref)
 	opts = append(opts, containerd.WithResolver(resolver))
 
 	oldImage, err := i.resolveImage(ctx, ref.String())
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return err
 	}
 
@@ -151,23 +151,27 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 		}
 	}()
 
-	var sentPullingFrom, sentSchema1Deprecation bool
+	var sentPullingFrom, sentModelNotSupported atomic.Bool
 	ah := c8dimages.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		if desc.MediaType == c8dimages.MediaTypeDockerSchema1Manifest && !sentSchema1Deprecation {
-			err := distribution.DeprecatedSchema1ImageError(ref)
-			if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
-				log.G(context.TODO()).Warn(err.Error())
-				return nil, err
+		if desc.MediaType == c8dimages.MediaTypeDockerSchema1Manifest {
+			return nil, distribution.DeprecatedSchema1ImageError(ref)
+		}
+
+		ociAiArtifactManifest := c8dimages.IsManifestType(desc.MediaType) && isModelMediaType(desc.ArtifactType)
+		aiMediaType := isModelMediaType(desc.MediaType)
+
+		if ociAiArtifactManifest || aiMediaType {
+			if !sentModelNotSupported.Load() {
+				sentModelNotSupported.Store(true)
+				progress.Message(out, "", `WARNING: AI models are not supported by the Engine yet, did you mean to use "docker model pull/run" instead?`)
 			}
-			progress.Message(out, "", err.Error())
-			sentSchema1Deprecation = true
 		}
 		if c8dimages.IsLayerType(desc.MediaType) {
 			id := stringid.TruncateID(desc.Digest.String())
 			progress.Update(out, id, "Pulling fs layer")
 		}
 		if c8dimages.IsManifestType(desc.MediaType) {
-			if !sentPullingFrom {
+			if !sentPullingFrom.Load() {
 				var tagOrDigest string
 				if tagged, ok := ref.(reference.Tagged); ok {
 					tagOrDigest = tagged.Tag()
@@ -175,7 +179,7 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 					tagOrDigest = ref.String()
 				}
 				progress.Message(out, tagOrDigest, "Pulling from "+reference.Path(ref))
-				sentPullingFrom = true
+				sentPullingFrom.Store(true)
 			}
 
 			available, _, _, missing, err := c8dimages.Check(ctx, i.content, desc, p)
@@ -223,7 +227,7 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 			if strings.Contains(err.Error(), "platform") {
 				platformStr := platforms.DefaultString()
 				if platform != nil {
-					platformStr = platforms.Format(*platform)
+					platformStr = platforms.FormatAll(*platform)
 				}
 				return errdefs.NotFound(fmt.Errorf("no matching manifest for %s in the manifest list entries: %w", platformStr, err))
 			}
@@ -260,4 +264,8 @@ func writeStatus(out progress.Output, requestedTag string, newerDownloaded bool)
 	} else {
 		progress.Message(out, "", "Status: Image is up to date for "+requestedTag)
 	}
+}
+
+func isModelMediaType(mediaType string) bool {
+	return strings.HasPrefix(strings.ToLower(mediaType), "application/vnd.docker.ai.")
 }

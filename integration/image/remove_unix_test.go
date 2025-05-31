@@ -1,6 +1,6 @@
 //go:build !windows
 
-package image // import "github.com/docker/docker/integration/image"
+package image
 
 import (
 	"io"
@@ -12,7 +12,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/image"
 	_ "github.com/docker/docker/daemon/graphdriver/register" // register graph drivers
 	"github.com/docker/docker/daemon/images"
@@ -62,7 +62,7 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 	defer source.Close()
 	resp, err := client.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 			Tags:        []string{imgName},
@@ -92,7 +92,7 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 	assert.Equal(t, "errno 0", errno.Error())
 	assert.Assert(t, err != nil)
 	errStr := err.Error()
-	if !(strings.Contains(errStr, "permission denied") || strings.Contains(errStr, "operation not permitted")) {
+	if !strings.Contains(errStr, "permission denied") && !strings.Contains(errStr, "operation not permitted") {
 		t.Errorf("ImageRemove error not an permission error %s", errStr)
 	}
 

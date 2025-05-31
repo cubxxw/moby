@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"testing"
@@ -29,7 +29,7 @@ func TestStopContainerWithRestartPolicyAlways(t *testing.T) {
 	}
 
 	for _, name := range names {
-		poll.WaitOn(t, container.IsInState(ctx, apiClient, name, "running", "restarting"))
+		poll.WaitOn(t, container.IsInState(ctx, apiClient, name, containertypes.StateRunning, containertypes.StateRestarting))
 	}
 
 	for _, name := range names {

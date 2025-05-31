@@ -1,4 +1,4 @@
-package distribution // import "github.com/docker/docker/distribution"
+package distribution
 
 import (
 	"context"
@@ -91,7 +91,7 @@ func (e unsupportedMediaTypeError) Error() string {
 // log at info level.
 func translatePullError(err error, ref reference.Named) error {
 	// FIXME(thaJeztah): cleanup error and context handling in this package, as it's really messy.
-	if errdefs.IsContext(err) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	switch v := err.(type) {
@@ -114,28 +114,11 @@ func translatePullError(err error, ref reference.Named) error {
 	return errdefs.Unknown(err)
 }
 
-func isNotFound(err error) bool {
-	switch v := err.(type) {
-	case errcode.Errors:
-		for _, e := range v {
-			if isNotFound(e) {
-				return true
-			}
-		}
-	case errcode.Error:
-		switch v.Code {
-		case errcode.ErrorCodeDenied, v2.ErrorCodeManifestUnknown, v2.ErrorCodeNameUnknown:
-			return true
-		}
-	}
-	return false
-}
-
 // continueOnError returns true if we should fallback to the next endpoint
 // as a result of this error.
 func continueOnError(err error, mirrorEndpoint bool) bool {
 	// FIXME(thaJeztah): cleanup error and context handling in this package, as it's really messy.
-	if errdefs.IsContext(err) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	switch v := err.(type) {
@@ -203,6 +186,14 @@ func retryOnError(err error) error {
 	return err
 }
 
+type AIModelNotSupportedError struct{}
+
+func (e AIModelNotSupportedError) Error() string {
+	return `AI models are not yet supported by the Engine, please use "docker model pull/run" instead`
+}
+
+func (e AIModelNotSupportedError) InvalidParameter() {}
+
 type invalidManifestClassError struct {
 	mediaType string
 	class     string
@@ -235,7 +226,7 @@ type invalidArgumentErr struct{ error }
 func (invalidArgumentErr) InvalidParameter() {}
 
 func DeprecatedSchema1ImageError(ref reference.Named) error {
-	msg := "[DEPRECATION NOTICE] Docker Image Format v1 and Docker Image manifest version 2, schema 1 support is disabled by default and will be removed in an upcoming release."
+	msg := "Docker Image Format v1 and Docker Image manifest version 2, schema 1 support has been removed."
 	if ref != nil {
 		msg += " Suggest the author of " + ref.String() + " to upgrade the image to the OCI Format or Docker Image manifest v2, schema 2."
 	}

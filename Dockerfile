@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.23.8
+ARG GO_VERSION=1.24.3
 ARG BASE_DEBIAN_DISTRO="bookworm"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
 ARG XX_VERSION=1.6.1
 
-ARG VPNKIT_VERSION=0.5.0
+# VPNKIT_VERSION is the version of the vpnkit binary which is used as a fallback
+# network driver for rootless.
+ARG VPNKIT_VERSION=0.6.0
 
 # DOCKERCLI_VERSION is the version of the CLI to install in the dev-container.
-ARG DOCKERCLI_VERSION=v28.1.1
+ARG DOCKERCLI_VERSION=v28.2.0-rc.2
 ARG DOCKERCLI_REPOSITORY="https://github.com/docker/cli.git"
 
 # cli version used for integration-cli tests
@@ -16,10 +18,10 @@ ARG DOCKERCLI_INTEGRATION_REPOSITORY="https://github.com/docker/cli.git"
 ARG DOCKERCLI_INTEGRATION_VERSION=v18.06.3-ce
 
 # BUILDX_VERSION is the version of buildx to install in the dev container.
-ARG BUILDX_VERSION=0.23.0
+ARG BUILDX_VERSION=0.24.0
 
 # COMPOSE_VERSION is the version of compose to install in the dev container.
-ARG COMPOSE_VERSION=v2.35.1
+ARG COMPOSE_VERSION=v2.36.2
 
 ARG SYSTEMD="false"
 ARG FIREWALLD="false"
@@ -76,41 +78,8 @@ RUN --mount=type=cache,sharing=locked,id=moby-criu-aptlib,target=/var/lib/apt \
         && /build/criu --version
 
 # registry
-FROM base AS registry-src
-WORKDIR /usr/src/registry
-RUN git init . && git remote add origin "https://github.com/distribution/distribution.git"
-
-FROM base AS registry
-WORKDIR /go/src/github.com/docker/distribution
-
-# REGISTRY_VERSION_SCHEMA1 specifies the version of the registry to build and
-# install from the https://github.com/docker/distribution repository. This is
-# an older (pre v2.3.0) version of the registry that only supports schema1
-# manifests. This version of the registry is not working on arm64, so installation
-# is skipped on that architecture.
-ARG REGISTRY_VERSION_SCHEMA1=v2.1.0
-ARG TARGETPLATFORM
-RUN --mount=from=registry-src,src=/usr/src/registry,rw \
-    --mount=type=cache,target=/root/.cache/go-build,id=registry-build-$TARGETPLATFORM \
-    --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=tmpfs,target=/go/src <<EOT
-  set -ex
-  export GOPATH="/go/src/github.com/docker/distribution/Godeps/_workspace:$GOPATH"
-  # Make the /build directory no matter what so that it doesn't fail on arm64 or
-  # any other platform where we don't build this registry
-  mkdir /build
-  case $TARGETPLATFORM in
-    linux/amd64|linux/arm/v7|linux/ppc64le|linux/s390x)
-      git fetch -q --depth 1 origin "${REGISTRY_VERSION_SCHEMA1}" +refs/tags/*:refs/tags/*
-      git checkout -q FETCH_HEAD
-      CGO_ENABLED=0 xx-go build -o /build/registry-v2-schema1 -v ./cmd/registry
-      xx-verify /build/registry-v2-schema1
-      ;;
-  esac
-EOT
-
-FROM distribution/distribution:$REGISTRY_VERSION AS registry-v2
-RUN mkdir /build && mv /bin/registry /build/registry-v2
+FROM distribution/distribution:$REGISTRY_VERSION AS registry
+RUN mkdir /build && mv /bin/registry /build/registry
 
 # go-swagger
 FROM base AS swagger-src
@@ -233,10 +202,10 @@ FROM binary-dummy AS containerd-windows
 FROM containerd-${TARGETOS} AS containerd
 
 FROM base AS golangci_lint
-ARG GOLANGCI_LINT_VERSION=v1.64.5
+ARG GOLANGCI_LINT_VERSION=v2.1.5
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-        GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
+        GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
      && /build/golangci-lint --version
 
 FROM base AS gotestsum
@@ -390,7 +359,8 @@ FROM binary-dummy AS rootlesskit-windows
 FROM rootlesskit-${TARGETOS} AS rootlesskit
 
 FROM base AS crun
-ARG CRUN_VERSION=1.12
+# CRUN_VERSION is the version of crun to install in the dev-container.
+ARG CRUN_VERSION=1.21
 RUN --mount=type=cache,sharing=locked,id=moby-crun-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-crun-aptcache,target=/var/cache/apt \
         apt-get update && apt-get install -y --no-install-recommends \
@@ -421,8 +391,8 @@ FROM scratch AS vpnkit-linux-arm
 FROM scratch AS vpnkit-linux-ppc64le
 FROM scratch AS vpnkit-linux-riscv64
 FROM scratch AS vpnkit-linux-s390x
-FROM djs55/vpnkit:${VPNKIT_VERSION} AS vpnkit-linux-amd64
-FROM djs55/vpnkit:${VPNKIT_VERSION} AS vpnkit-linux-arm64
+FROM moby/vpnkit-bin:${VPNKIT_VERSION} AS vpnkit-linux-amd64
+FROM moby/vpnkit-bin:${VPNKIT_VERSION} AS vpnkit-linux-arm64
 FROM vpnkit-linux-${TARGETARCH} AS vpnkit-linux
 FROM vpnkit-${TARGETOS} AS vpnkit
 
@@ -464,7 +434,6 @@ COPY --link --from=delve         /build/ /usr/local/bin/
 COPY --link --from=gowinres      /build/ /usr/local/bin/
 COPY --link --from=tini          /build/ /usr/local/bin/
 COPY --link --from=registry      /build/ /usr/local/bin/
-COPY --link --from=registry-v2   /build/ /usr/local/bin/
 
 # Skip the CRIU stage for now, as the opensuse package repository is sometimes
 # unstable, and we're currently not using it in CI.
@@ -543,6 +512,7 @@ RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
             libnl-3-200 \
             libprotobuf-c1 \
             libyajl2 \
+            nano \
             net-tools \
             netcat-openbsd \
             patch \

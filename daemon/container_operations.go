@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -761,12 +762,12 @@ func (daemon *Daemon) connectToNetwork(ctx context.Context, cfg *config.Config, 
 	if !ctr.Managed {
 		// add container name/alias to DNS
 		if err := daemon.ActivateContainerServiceBinding(ctr.Name); err != nil {
-			return fmt.Errorf("Activate container service binding for %s failed: %v", ctr.Name, err)
+			return fmt.Errorf("activate container service binding for %s failed: %v", ctr.Name, err)
 		}
 	}
 
 	if err := updateJoinInfo(ctr.NetworkSettings, n, ep); err != nil {
-		return fmt.Errorf("Updating join info failed: %v", err)
+		return fmt.Errorf("updating join info failed: %v", err)
 	}
 
 	ctr.NetworkSettings.Ports = getPortMapInfo(sb)
@@ -899,7 +900,7 @@ func (daemon *Daemon) getNetworkedContainer(containerID, connectedContainerPrefi
 	nc, err := daemon.GetContainer(connectedContainerPrefixOrName)
 	if err != nil {
 		err = fmt.Errorf("joining network namespace of container: %w", err)
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			// Deliberately masking "not found" errors, because failing to find
 			// the network container is a system error. We return a system error,
 			// not an "invalid parameter" because getNetworkedContainer is called

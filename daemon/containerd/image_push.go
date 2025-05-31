@@ -144,7 +144,16 @@ func (i *ImageService) pushRef(ctx context.Context, targetRef reference.Named, p
 	wrapped := wrapWithFakeMountableBlobs(store, mountableBlobs)
 	store = wrapped
 
-	pusher, err := resolver.Pusher(ctx, targetRef.String())
+	// Annotate ref with digest to push only push tag for single digest
+	ref := targetRef
+	if _, digested := ref.(reference.Digested); !digested {
+		ref, err = reference.WithDigest(ref, target.Digest)
+		if err != nil {
+			return err
+		}
+	}
+
+	pusher, err := resolver.Pusher(ctx, ref.String())
 	if err != nil {
 		return err
 	}
@@ -322,7 +331,7 @@ func findMissingMountable(ctx context.Context, store content.Store, queue *jobs,
 
 	sources, err := getDigestSources(ctx, store, target.Digest)
 	if err != nil {
-		if !errdefs.IsNotFound(err) {
+		if !cerrdefs.IsNotFound(err) {
 			return nil, err
 		}
 		log.G(ctx).WithField("target", target).Debug("distribution source label not found")

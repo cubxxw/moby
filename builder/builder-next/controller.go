@@ -16,7 +16,7 @@ import (
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/builder/builder-next/adapters/containerimage"
 	"github.com/docker/docker/builder/builder-next/adapters/localinlinecache"
@@ -57,7 +57,6 @@ import (
 	"github.com/moby/buildkit/worker/containerd"
 	"github.com/moby/buildkit/worker/label"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
 	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
@@ -152,7 +151,18 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	wo.RegistryHosts = opt.RegistryHosts
 	wo.Labels = getLabels(opt, wo.Labels)
 
-	exec, err := newExecutor(opt.Root, opt.DefaultCgroupParent, opt.NetworkController, dns, opt.Rootless, opt.IdentityMapping, opt.ApparmorProfile, cdiManager)
+	exec, err := newExecutor(
+		opt.Root,
+		opt.DefaultCgroupParent,
+		opt.NetworkController,
+		dns,
+		opt.Rootless,
+		opt.IdentityMapping,
+		opt.ApparmorProfile,
+		cdiManager,
+		opt.ContainerdAddress,
+		opt.ContainerdNamespace,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +218,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 }
 
 func openHistoryDB(root string, fn string, cfg *config.BuilderHistoryConfig) (*bolt.DB, *bkconfig.HistoryConfig, error) {
-	db, err := bbolt.Open(filepath.Join(root, fn), 0o600, nil)
+	db, err := bolt.Open(filepath.Join(root, fn), 0o600, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -332,7 +342,18 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 		return nil, err
 	}
 
-	exec, err := newExecutor(root, opt.DefaultCgroupParent, opt.NetworkController, dns, opt.Rootless, opt.IdentityMapping, opt.ApparmorProfile, cdiManager)
+	exec, err := newExecutorGD(
+		root,
+		opt.DefaultCgroupParent,
+		opt.NetworkController,
+		dns,
+		opt.Rootless,
+		opt.IdentityMapping,
+		opt.ApparmorProfile,
+		cdiManager,
+		opt.ContainerdAddress,
+		opt.ContainerdNamespace,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +466,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 
 func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, error) {
 	var gcPolicy []client.PruneInfo
-	if conf.GC.Enabled {
+	if conf.GC.IsEnabled() {
 		if conf.GC.Policy == nil {
 			reservedSpace, maxUsedSpace, minFreeSpace, err := parseGCPolicy(config.BuilderGCRule{
 				ReservedSpace: conf.GC.DefaultReservedSpace,
@@ -464,7 +485,7 @@ func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, er
 					return nil, err
 				}
 
-				gcPolicy[i], err = toBuildkitPruneInfo(types.BuildCachePruneOptions{
+				gcPolicy[i], err = toBuildkitPruneInfo(build.CachePruneOptions{
 					All:           p.All,
 					ReservedSpace: reservedSpace,
 					MaxUsedSpace:  maxUsedSpace,

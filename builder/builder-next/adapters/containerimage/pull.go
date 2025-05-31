@@ -19,10 +19,8 @@ import (
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
-	"github.com/containerd/containerd/v2/core/remotes/docker/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/containerd/containerd/remotes/docker/schema1" is deprecated: use images formatted in Docker Image Manifest v2, Schema 2, or OCI Image Spec v1.
 	"github.com/containerd/containerd/v2/pkg/gc"
-	cdreference "github.com/containerd/containerd/v2/pkg/reference"
-	ctdreference "github.com/containerd/containerd/v2/pkg/reference"
+	c8dreference "github.com/containerd/containerd/v2/pkg/reference"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
@@ -183,7 +181,7 @@ func (is *Source) resolveRemote(ctx context.Context, ref string, platform *ocisp
 		p = *platform
 	}
 	// key is used to synchronize resolutions that can happen in parallel when doing multi-stage.
-	key := "getconfig::" + ref + "::" + platforms.Format(p)
+	key := "getconfig::" + ref + "::" + platforms.FormatAll(p)
 	res, err := is.g.Do(ctx, key, func(ctx context.Context) (*resolveRemoteResult, error) {
 		res := resolver.DefaultPool.GetResolver(is.RegistryHosts, ref, "pull", sm, g)
 		dgst, dt, err := imageutil.Config(ctx, ref, res, is.ContentStore, is.LeaseManager, platform)
@@ -343,10 +341,10 @@ func (p *puller) resolveLocal() {
 }
 
 func (p *puller) resolve(ctx context.Context, g session.Group) error {
-	_, err := p.g.Do(ctx, "", func(ctx context.Context) (_ struct{}, err error) {
+	_, err := p.g.Do(ctx, "", func(ctx context.Context) (_ struct{}, retErr error) {
 		resolveProgressDone := oneOffProgress(ctx, "resolve "+p.src.Reference.String())
 		defer func() {
-			resolveProgressDone(err)
+			_ = resolveProgressDone(retErr)
 		}()
 
 		ref, err := distreference.ParseNormalizedNamed(p.src.Reference.String())
@@ -370,11 +368,11 @@ func (p *puller) resolve(ctx context.Context, g session.Group) error {
 		// It may be possible to have a mapping between schema 1 manifests
 		// and the schema 2 manifests they are converted to.
 		if p.config == nil && p.desc.MediaType != c8dimages.MediaTypeDockerSchema1Manifest {
-			ref, err := distreference.WithDigest(ref, p.desc.Digest)
+			refWithDigest, err := distreference.WithDigest(ref, p.desc.Digest)
 			if err != nil {
 				return struct{}{}, err
 			}
-			_, dt, err := p.is.ResolveImageConfig(ctx, ref.String(), sourceresolver.Opt{
+			_, dt, err := p.is.ResolveImageConfig(ctx, refWithDigest.String(), sourceresolver.Opt{
 				Platform: &p.platform,
 				ImageOpt: &sourceresolver.ResolveImageOpt{
 					ResolveMode: p.src.ResolveMode.String(),
@@ -384,7 +382,7 @@ func (p *puller) resolve(ctx context.Context, g session.Group) error {
 				return struct{}{}, err
 			}
 
-			p.ref = ref.String()
+			p.ref = refWithDigest.String()
 			p.config = dt
 		}
 		return struct{}{}, nil
@@ -519,18 +517,13 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 
 	var nonLayers []digest.Digest
 
-	var (
-		schema1Converter *schema1.Converter
-		handlers         []c8dimages.Handler
-	)
+	var handlers []c8dimages.Handler
 	if p.desc.MediaType == c8dimages.MediaTypeDockerSchema1Manifest {
-		schema1Converter, err = schema1.NewConverter(p.is.ContentStore, fetcher)
-		if err != nil {
-			stopProgress()
-			return nil, err
-		}
-		handlers = append(handlers, schema1Converter)
-
+		stopProgress()
+		// similar to [github.com/docker/docker/distribution/DeprecatedSchema1ImageError]
+		errMsg := "support for Docker Image Format v1 and Docker Image manifest version 2, schema 1 has been removed in Docker Engine v28.2. " +
+			"More information at https://docs.docker.com/go/deprecated-image-specs/"
+		return nil, cerrdefs.ErrInvalidArgument.WithMessage(errMsg)
 		// TODO: Optimize to do dispatch and integrate pulling with download manager,
 		// leverage existing blob mapping and layer storage
 	} else {
@@ -568,13 +561,6 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (cache.Immutable
 		return nil, err
 	}
 	defer stopProgress()
-
-	if schema1Converter != nil {
-		p.desc, err = schema1Converter.Convert(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	mfst, err := c8dimages.Manifest(ctx, p.is.ContentStore, p.desc, platform)
 	if err != nil {
@@ -697,7 +683,7 @@ type layerDescriptor struct {
 	fetcher remotes.Fetcher
 	desc    ocispec.Descriptor
 	diffID  layer.DiffID
-	ref     ctdreference.Spec
+	ref     c8dreference.Spec
 }
 
 func (ld *layerDescriptor) Key() string {
@@ -902,15 +888,15 @@ type statusInfo struct {
 
 func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	pw, _, _ := progress.NewFromContext(ctx)
-	now := time.Now()
+	s := time.Now()
 	st := progress.Status{
-		Started: &now,
+		Started: &s,
 	}
 	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
-		now := time.Now()
-		st.Completed = &now
+		c := time.Now()
+		st.Completed = &c
 		_ = pw.Write(id, st)
 		_ = pw.Close()
 		return err
@@ -943,7 +929,7 @@ func platformMatches(img *image.Image, p *ocispec.Platform) bool {
 }
 
 func applySourcePolicies(ctx context.Context, str string, spls []*spb.Policy) (string, error) {
-	ref, err := cdreference.Parse(str)
+	ref, err := c8dreference.Parse(str)
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
@@ -964,7 +950,7 @@ func applySourcePolicies(ctx context.Context, str string, spls []*spb.Policy) (s
 		if t != srctypes.DockerImageScheme {
 			return "", &imageutil.ResolveToNonImageError{Ref: str, Updated: newRef}
 		}
-		ref, err = cdreference.Parse(newRef)
+		ref, err = c8dreference.Parse(newRef)
 		if err != nil {
 			return "", errors.WithStack(err)
 		}
