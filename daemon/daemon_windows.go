@@ -1,9 +1,10 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
 	"fmt"
 	"math"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,7 +68,7 @@ func (daemon *Daemon) adaptContainerSettings(daemonCfg *config.Config, hostConfi
 }
 
 // verifyPlatformContainerResources performs platform-specific validation of the container's resource-configuration
-func verifyPlatformContainerResources(resources *containertypes.Resources, isHyperv bool) (warnings []string, err error) {
+func verifyPlatformContainerResources(resources *containertypes.Resources, isHyperv bool) (warnings []string, _ error) {
 	fixMemorySwappiness(resources)
 	if !isHyperv {
 		// The processor resource controls are mutually exclusive on
@@ -171,7 +172,7 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, isHyp
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
 // hostconfig and config structures.
-func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, err error) {
+func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, _ error) {
 	if hostConfig == nil {
 		return nil, nil
 	}
@@ -242,7 +243,7 @@ func (daemon *Daemon) initNetworkController(daemonCfg *config.Config, activeSand
 		return errors.Wrap(err, "error obtaining controller instance")
 	}
 
-	hnsresponse, err := hcsshim.HNSListNetworkRequest("GET", "", "")
+	hnsresponse, err := hcsshim.HNSListNetworkRequest(http.MethodGet, "", "")
 	if err != nil {
 		return err
 	}

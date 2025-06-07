@@ -168,6 +168,7 @@ func New(ctx context.Context, cfgOptions ...config.Option) (_ *Controller, retEr
 		diagnosticServer: diagnostic.New(),
 	}
 
+	c.selectFirewallBackend()
 	c.drvRegistry.Notify = c
 
 	// External plugins don't need config passed through daemon. They can
@@ -660,7 +661,7 @@ func (c *Controller) NewNetwork(ctx context.Context, networkType, name string, i
 	//
 	// To cut a long story short: if this broke anything, you know who to blame :)
 	if err := c.addNetwork(ctx, nw); err != nil {
-		if _, ok := err.(types.MaskableError); !ok { //nolint:gosimple
+		if _, ok := err.(types.MaskableError); !ok {
 			return nil, err
 		}
 	}

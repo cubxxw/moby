@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/daemon/cluster/executor/container"
+package container
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libnetwork"
 	"github.com/docker/go-connections/nat"
 	gogotypes "github.com/gogo/protobuf/types"
@@ -66,7 +66,7 @@ func (r *controller) Task() (*api.Task, error) {
 func (r *controller) ContainerStatus(ctx context.Context) (*api.ContainerStatus, error) {
 	ctnr, err := r.adapter.inspect(ctx)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -77,7 +77,7 @@ func (r *controller) ContainerStatus(ctx context.Context) (*api.ContainerStatus,
 func (r *controller) PortStatus(ctx context.Context) (*api.PortStatus, error) {
 	ctnr, err := r.adapter.inspect(ctx)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil, nil
 		}
 
@@ -179,7 +179,7 @@ func (r *controller) Prepare(ctx context.Context) error {
 		}
 	}
 	if err := r.adapter.create(ctx); err != nil {
-		if errdefs.IsConflict(err) {
+		if cerrdefs.IsConflict(err) {
 			if _, err := r.adapter.inspect(ctx); err != nil {
 				return err
 			}
@@ -210,7 +210,7 @@ func (r *controller) Start(ctx context.Context) error {
 	//
 	// TODO(stevvooe): This is very racy. While reading inspect, another could
 	// start the process and we could end up starting it twice.
-	if ctnr.State.Status != "created" {
+	if ctnr.State.Status != container.StateCreated {
 		return exec.ErrTaskStarted
 	}
 
@@ -382,7 +382,7 @@ func (r *controller) Shutdown(ctx context.Context) error {
 	}
 
 	if err := r.adapter.shutdown(ctx); err != nil {
-		if !(errdefs.IsNotFound(err) || errdefs.IsNotModified(err)) {
+		if !cerrdefs.IsNotFound(err) && !cerrdefs.IsNotModified(err) {
 			return err
 		}
 	}
@@ -390,7 +390,7 @@ func (r *controller) Shutdown(ctx context.Context) error {
 	// Try removing networks referenced in this task in case this
 	// task is the last one referencing it
 	if err := r.adapter.removeNetworks(ctx); err != nil {
-		if !errdefs.IsNotFound(err) {
+		if !cerrdefs.IsNotFound(err) {
 			return err
 		}
 	}
@@ -409,7 +409,7 @@ func (r *controller) Terminate(ctx context.Context) error {
 	}
 
 	if err := r.adapter.terminate(ctx); err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil
 		}
 
@@ -431,7 +431,7 @@ func (r *controller) Remove(ctx context.Context) error {
 
 	// It may be necessary to shut down the task before removing it.
 	if err := r.Shutdown(ctx); err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil
 		}
 		// This may fail if the task was already shut down.
@@ -439,7 +439,7 @@ func (r *controller) Remove(ctx context.Context) error {
 	}
 
 	if err := r.adapter.remove(ctx); err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return nil
 		}
 
@@ -462,15 +462,15 @@ func (r *controller) waitReady(pctx context.Context) error {
 
 	ctnr, err := r.adapter.inspect(ctx)
 	if err != nil {
-		if !errdefs.IsNotFound(err) {
+		if !cerrdefs.IsNotFound(err) {
 			return errors.Wrap(err, "inspect container failed")
 		}
 	} else {
 		switch ctnr.State.Status {
-		case "running", "exited", "dead":
+		case container.StateRunning, container.StateExited, container.StateDead:
 			return nil
-		default:
-			// TODO(thaJeztah): make switch exhaustive
+		case container.StateCreated, container.StatePaused, container.StateRestarting, container.StateRemoving:
+			// not yet ready
 		}
 	}
 
@@ -556,9 +556,10 @@ func (r *controller) Logs(ctx context.Context, publisher exec.LogPublisher, opti
 			return errors.Wrap(err, "failed to convert timestamp")
 		}
 		var stream api.LogStream
-		if msg.Source == "stdout" {
+		switch msg.Source {
+		case "stdout":
 			stream = api.LogStreamStdout
-		} else if msg.Source == "stderr" {
+		case "stderr":
 			stream = api.LogStreamStderr
 		}
 

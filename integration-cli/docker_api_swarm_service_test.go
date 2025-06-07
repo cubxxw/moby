@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/integration-cli/checker"
 	"github.com/docker/docker/integration-cli/cli"
@@ -75,7 +74,7 @@ func (s *DockerSwarmSuite) TestAPISwarmServicesCreate(c *testing.T) {
 	client := d.NewClientT(c)
 	defer client.Close()
 
-	options := types.ServiceInspectOptions{InsertDefaults: true}
+	options := swarm.ServiceInspectOptions{InsertDefaults: true}
 
 	// insertDefaults inserts UpdateConfig when service is fetched by ID
 	resp, _, err := client.ServiceInspectWithRaw(ctx, id, options)
@@ -225,8 +224,8 @@ func (s *DockerSwarmSuite) TestAPISwarmServicesUpdateStartFirst(c *testing.T) {
 
 	checkStartingTasks := func(expected int) []swarm.Task {
 		var startingTasks []swarm.Task
-		poll.WaitOn(c, pollCheck(c, func(c *testing.T) (interface{}, string) {
-			tasks := d.GetServiceTasks(ctx, c, id)
+		poll.WaitOn(c, pollCheck(c, func(t *testing.T) (interface{}, string) {
+			tasks := d.GetServiceTasks(ctx, t, id)
 			startingTasks = nil
 			for _, t := range tasks {
 				if t.Status.State == swarm.TaskStateStarting {

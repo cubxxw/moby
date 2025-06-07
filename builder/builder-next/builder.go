@@ -12,8 +12,8 @@ import (
 
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/platforms"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	timetypes "github.com/docker/docker/api/types/time"
@@ -149,15 +149,15 @@ func (b *Builder) Cancel(ctx context.Context, id string) error {
 }
 
 // DiskUsage returns a report about space used by build cache
-func (b *Builder) DiskUsage(ctx context.Context) ([]*types.BuildCache, error) {
+func (b *Builder) DiskUsage(ctx context.Context) ([]*build.CacheRecord, error) {
 	duResp, err := b.controller.DiskUsage(ctx, &controlapi.DiskUsageRequest{})
 	if err != nil {
 		return nil, err
 	}
 
-	var items []*types.BuildCache
+	var items []*build.CacheRecord
 	for _, r := range duResp.Record {
-		items = append(items, &types.BuildCache{
+		items = append(items, &build.CacheRecord{
 			ID:          r.ID,
 			Parent:      r.Parent, //nolint:staticcheck // ignore SA1019 (Parent field is deprecated)
 			Parents:     r.Parents,
@@ -186,7 +186,7 @@ func (b *Builder) DiskUsage(ctx context.Context) ([]*types.BuildCache, error) {
 }
 
 // Prune clears all reclaimable build cache.
-func (b *Builder) Prune(ctx context.Context, opts types.BuildCachePruneOptions) (int64, []string, error) {
+func (b *Builder) Prune(ctx context.Context, opts build.CachePruneOptions) (int64, []string, error) {
 	ch := make(chan *controlapi.UsageRecord)
 
 	eg, ctx := errgroup.WithContext(ctx)
@@ -437,7 +437,7 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 			return errors.Errorf("missing image id")
 		}
 		out.ImageID = imgID
-		return aux.Emit("moby.image.id", types.BuildResult{ID: imgID})
+		return aux.Emit("moby.image.id", build.Result{ID: imgID})
 	})
 
 	ch := make(chan *controlapi.StatusResponse)
@@ -535,11 +535,12 @@ type wrapRC struct {
 func (w *wrapRC) Read(b []byte) (int, error) {
 	n, err := w.ReadCloser.Read(b)
 	if err != nil {
-		e := err
-		if e == io.EOF {
-			e = nil
+		switch err {
+		case io.EOF:
+			w.close(nil)
+		default:
+			w.close(err)
 		}
-		w.close(e)
 	}
 	return n, err
 }
@@ -639,7 +640,7 @@ func toBuildkitUlimits(inp []*container.Ulimit) (string, error) {
 	return strings.Join(ulimits, ","), nil
 }
 
-func toBuildkitPruneInfo(opts types.BuildCachePruneOptions) (client.PruneInfo, error) {
+func toBuildkitPruneInfo(opts build.CachePruneOptions) (client.PruneInfo, error) {
 	var until time.Duration
 	untilValues := opts.Filters.Get("until")          // canonical
 	unusedForValues := opts.Filters.Get("unused-for") // deprecated synonym for "until" filter

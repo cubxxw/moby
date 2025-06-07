@@ -241,7 +241,7 @@ func (i *ImageService) multiPlatformSummary(ctx context.Context, img c8dimages.I
 		})
 
 		available, err := img.CheckContentAvailable(ctx)
-		if err != nil && !errdefs.IsNotFound(err) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			logger.WithError(err).Warn("checking availability of platform specific manifest failed")
 			return nil
 		}
@@ -276,7 +276,7 @@ func (i *ImageService) multiPlatformSummary(ctx context.Context, img c8dimages.I
 		// so we don't error out the whole list in case the error is related to
 		// the content itself (e.g. corrupted data) or just manifest kind that
 		// we don't know about (yet).
-		if err != nil && !errdefs.IsNotFound(err) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			logger.WithError(err).Debug("pseudo image check failed")
 			return nil
 		}
@@ -654,13 +654,13 @@ func setupLabelFilter(ctx context.Context, store content.Store, fltrs filters.Ar
 		// It will be returned once a matching config is found.
 		errFoundConfig := errors.New("success, found matching config")
 
-		err := c8dimages.Dispatch(ctx, presentChildrenHandler(store, c8dimages.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
+		err := c8dimages.Dispatch(ctx, presentChildrenHandler(store, c8dimages.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, _ error) {
 			if !c8dimages.IsConfigType(desc.MediaType) {
 				return nil, nil
 			}
 			var cfg configLabels
 			if err := readJSON(ctx, store, desc, &cfg); err != nil {
-				if errdefs.IsNotFound(err) {
+				if cerrdefs.IsNotFound(err) {
 					return nil, nil
 				}
 				return nil, err

@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"encoding/json"
@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/integration/internal/build"
 	"github.com/docker/docker/integration/internal/container"
+	"github.com/docker/docker/testutil/fakecontext"
 	req "github.com/docker/docker/testutil/request"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -242,7 +244,7 @@ func TestExecResize(t *testing.T) {
 			Height: 40,
 			Width:  40,
 		})
-		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 		assert.Check(t, is.ErrorContains(err, "No such exec instance: no-such-exec-id"))
 	})
 
@@ -270,7 +272,7 @@ func TestExecResize(t *testing.T) {
 			Height: 40,
 			Width:  40,
 		})
-		assert.Check(t, is.ErrorType(err, errdefs.IsConflict))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsConflict))
 		assert.Check(t, is.ErrorContains(err, "is not running"))
 	})
 }
@@ -280,12 +282,128 @@ func TestExecUser(t *testing.T) {
 	ctx := setupTest(t)
 	apiClient := testEnv.APIClient()
 
-	cID := container.Run(ctx, t, apiClient, container.WithTty(true), container.WithUser("1:1"))
+	ctrOpts := []func(*container.TestContainerConfig){
+		container.WithTty(true),
+		container.WithUser("1:1"),
+	}
+	withoutEtcGroups := container.WithImage(build.Do(ctx, t, apiClient, fakecontext.New(t, "", fakecontext.WithDockerfile("FROM busybox\nRUN rm /etc/group"))))
+	withoutEtcPasswd := container.WithImage(build.Do(ctx, t, apiClient, fakecontext.New(t, "", fakecontext.WithDockerfile("FROM busybox\nRUN rm /etc/passwd"))))
 
-	result, err := container.Exec(ctx, apiClient, cID, []string{"id"})
-	assert.NilError(t, err)
+	withUser := func(user string) func(options *containertypes.ExecOptions) {
+		return func(options *containertypes.ExecOptions) { options.User = user }
+	}
 
-	assert.Check(t, is.Contains(result.Stdout(), "uid=1(daemon) gid=1(daemon)"), "exec command not running as uid/gid 1")
+	tests := []struct {
+		doc         string
+		user        string
+		ctrOpts     []func(*container.TestContainerConfig)
+		expectedErr string
+		expectedOut string
+	}{
+		{
+			doc:         "default user",
+			expectedOut: "uid=1(daemon) gid=1(daemon)",
+		},
+		{
+			doc:         "uid",
+			user:        "0",
+			expectedOut: "uid=0(root) gid=0(root) groups=0(root)",
+		},
+		{
+			doc:         "uid gid",
+			user:        "0:0",
+			expectedOut: "uid=0(root) gid=0(root) groups=0(root)",
+		},
+		{
+			doc:         "username groupname",
+			user:        "root:root",
+			expectedOut: "uid=0(root) gid=0(root) groups=0(root)",
+		},
+		{
+			doc:         "unknown user",
+			user:        "no-such-user",
+			expectedErr: `Error response from daemon: unable to find user no-such-user: no matching entries in passwd file`,
+		},
+		{
+			doc:         "unknown user with gid",
+			user:        "no-such-user:1",
+			expectedErr: `Error response from daemon: unable to find user no-such-user: no matching entries in passwd file`,
+		},
+		{
+			doc:         "unknown group",
+			user:        "1:no-such-group",
+			expectedErr: `Error response from daemon: unable to find group no-such-group: no matching entries in group file`,
+		},
+		{
+			doc:     "missing etc/group",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcGroups},
+		},
+		{
+			doc:     "uid:gid and missing etc/group",
+			user:    "0:0",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcGroups},
+		},
+		{
+			doc:     "user and missing etc/group",
+			user:    "root",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcGroups},
+		},
+		{
+			doc:         "user:gid and missing etc/group",
+			user:        "root;0",
+			ctrOpts:     []func(*container.TestContainerConfig){withoutEtcGroups},
+			expectedErr: `Error response from daemon: unable to find user root;0: no matching entries in passwd file`,
+		},
+		{
+			doc:         "group and missing etc/group",
+			user:        "0:root",
+			ctrOpts:     []func(*container.TestContainerConfig){withoutEtcGroups},
+			expectedErr: `Error response from daemon: unable to find group root: no matching entries in group file`,
+		},
+		{
+			doc:     "missing etc/passwd",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcPasswd},
+		},
+		{
+			doc:     "uid:gid and missing etc/passwd",
+			user:    "0:0",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcPasswd},
+		},
+		{
+			doc:         "user and missing etc/passwd",
+			user:        "root",
+			ctrOpts:     []func(*container.TestContainerConfig){withoutEtcPasswd},
+			expectedErr: `Error response from daemon: unable to find user root: no matching entries in passwd file`,
+		},
+		{
+			doc:         "user:gid and missing etc/passwd",
+			user:        "root;0",
+			ctrOpts:     []func(*container.TestContainerConfig){withoutEtcPasswd},
+			expectedErr: `Error response from daemon: unable to find user root;0: no matching entries in passwd file`,
+		},
+		{
+			doc:     "group and missing etc/passwd",
+			user:    "0:root",
+			ctrOpts: []func(*container.TestContainerConfig){withoutEtcPasswd},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.doc, func(t *testing.T) {
+			cID := container.Run(ctx, t, apiClient, append(ctrOpts, tc.ctrOpts...)...)
+			result, err := container.Exec(ctx, apiClient, cID, []string{"id"}, withUser(tc.user))
+			if tc.expectedErr != "" {
+				assert.Check(t, is.Error(err, tc.expectedErr))
+				assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
+				assert.Check(t, is.Equal(result.Stdout(), "<nil>"))
+				assert.Check(t, is.Equal(result.Stderr(), "<nil>"))
+			} else {
+				assert.Check(t, err)
+				assert.Check(t, is.Contains(result.Stdout(), tc.expectedOut))
+				assert.Check(t, is.Equal(result.Stderr(), ""))
+			}
+		})
+	}
 }
 
 // Test that additional groups set with `--group-add` are kept on exec when the container

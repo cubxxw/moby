@@ -15,8 +15,8 @@ import (
 	"syscall"
 
 	"github.com/containerd/log"
+	"github.com/docker/docker/libnetwork/drivers/bridge/internal/firewaller"
 	"github.com/docker/docker/libnetwork/drivers/bridge/internal/rlkclient"
-	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/portallocator"
 	"github.com/docker/docker/libnetwork/portmapper"
@@ -104,7 +104,7 @@ func (n *bridgeNetwork) addPortMappings(
 
 	defer func() {
 		if retErr != nil {
-			if err := n.releasePortBindings(bindings); err != nil {
+			if err := releasePortBindings(bindings, n.firewallerNetwork); err != nil {
 				log.G(ctx).Warnf("Release port bindings: %s", err.Error())
 			}
 		}
@@ -168,7 +168,7 @@ func (n *bridgeNetwork) addPortMappings(
 		}
 
 		// Allocate and bind a host port.
-		newB, err := bindHostPorts(ctx, toBind, proxyPath)
+		newB, err := bindHostPorts(ctx, toBind, proxyPath, pdc, n.firewallerNetwork)
 		if err != nil {
 			return nil, err
 		}
@@ -178,66 +178,12 @@ func (n *bridgeNetwork) addPortMappings(
 		toBind = toBind[:0]
 	}
 
-	for i := range bindings {
-		b := bindings[i]
-		if pdc != nil && b.HostPort != 0 {
-			var err error
-			hip, ok := netip.AddrFromSlice(b.HostIP)
-			if !ok {
-				return nil, fmt.Errorf("invalid host IP address in %s", b)
-			}
-			chip, ok := netip.AddrFromSlice(b.childHostIP)
-			if !ok {
-				return nil, fmt.Errorf("invalid child host IP address %s in %s", b.childHostIP, b)
-			}
-			bindings[i].portDriverRemove, err = pdc.AddPort(ctx, b.Proto.String(), hip, chip, int(b.HostPort))
-			if err != nil {
-				var pErr *rlkclient.ProtocolUnsupportedError
-				if errors.As(err, &pErr) {
-					log.G(ctx).WithFields(log.Fields{
-						"error": pErr,
-					}).Warnf("discarding request for %q", net.JoinHostPort(hip.String(), strconv.Itoa(int(b.HostPort))))
-					bindings[i].rootlesskitUnsupported = true
-					continue
-				}
-				return nil, err
-			}
-		}
-	}
-
-	if err := n.iptablesNetwork.AddPorts(ctx, mergeChildHostIPs(bindings)); err != nil {
-		return nil, err
-	}
-
-	// Now the iptables rules are set up, it's safe to start the userland proxy.
-	// (If it was started before the iptables rules were created, it may have
-	// accepted a connection, then become unreachable due to NAT rules sending
-	// packets directly to the container.)
-	// If not starting the proxy, nothing will ever accept a connection on the
-	// socket. But, listen anyway so that the binding shows up in "netstat -at".
-	somaxconn := 0
+	// Start userland proxy processes.
 	if proxyPath != "" {
-		somaxconn = -1 // silently capped to "/proc/sys/net/core/somaxconn"
-	}
-	for i := range bindings {
-		if bindings[i].boundSocket == nil || bindings[i].rootlesskitUnsupported {
-			continue
-		}
-		if bindings[i].Proto == types.TCP {
-			rc, err := bindings[i].boundSocket.SyscallConn()
-			if err != nil {
-				return nil, fmt.Errorf("raw conn not available on TCP socket: %w", err)
+		for i := range bindings {
+			if bindings[i].boundSocket == nil || bindings[i].rootlesskitUnsupported || bindings[i].stopProxy != nil {
+				continue
 			}
-			if errC := rc.Control(func(fd uintptr) {
-				err = syscall.Listen(int(fd), somaxconn)
-			}); errC != nil {
-				return nil, fmt.Errorf("failed to Control TCP socket: %w", err)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to listen on TCP socket: %w", err)
-			}
-		}
-		if proxyPath != "" {
 			var err error
 			bindings[i].stopProxy, err = startProxy(
 				bindings[i].childPortBinding(), proxyPath, bindings[i].boundSocket,
@@ -469,6 +415,8 @@ func bindHostPorts(
 	ctx context.Context,
 	cfg []portBindingReq,
 	proxyPath string,
+	pdc portDriverClient,
+	fwn firewaller.Network,
 ) ([]portBinding, error) {
 	if len(cfg) == 0 {
 		return nil, nil
@@ -487,16 +435,19 @@ func bindHostPorts(
 	var err error
 	for i := 0; i < maxAllocatePortAttempts; i++ {
 		var b []portBinding
-		b, err = attemptBindHostPorts(ctx, cfg, proto.String(), hostPort, hostPortEnd, proxyPath)
+		b, err = attemptBindHostPorts(ctx, cfg, proto.String(), hostPort, hostPortEnd, proxyPath, pdc, fwn)
 		if err == nil {
 			return b, nil
 		}
 		// There is no point in immediately retrying to map an explicitly chosen port.
 		if hostPort != 0 && hostPort == hostPortEnd {
-			log.G(ctx).Warnf("Failed to allocate and map port: %s", err)
+			log.G(ctx).WithError(err).Warnf("Failed to allocate and map port")
 			break
 		}
-		log.G(ctx).Warnf("Failed to allocate and map port: %s, retry: %d", err, i+1)
+		log.G(ctx).WithFields(log.Fields{
+			"error":   err,
+			"attempt": i + 1,
+		}).Warn("Failed to allocate and map port")
 	}
 	return nil, err
 }
@@ -518,6 +469,8 @@ func attemptBindHostPorts(
 	proto string,
 	hostPortStart, hostPortEnd uint16,
 	proxyPath string,
+	pdc portDriverClient,
+	fwn firewaller.Network,
 ) (_ []portBinding, retErr error) {
 	var err error
 	var port int
@@ -547,20 +500,8 @@ func attemptBindHostPorts(
 	res := make([]portBinding, 0, len(cfg))
 	defer func() {
 		if retErr != nil {
-			for _, pb := range res {
-				if pb.boundSocket != nil {
-					if err := pb.boundSocket.Close(); err != nil {
-						log.G(ctx).Warnf("Failed to close port binding for %s: %s", pb, err)
-					}
-				}
-				// TODO(robmry) - this is only needed because the userland proxy may have
-				//  been started for SCTP. If a bound socket is passed to the proxy after
-				//  iptables rules have been configured (as it is for TCP/UDP), remove this.
-				if pb.stopProxy != nil {
-					if err := pb.stopProxy(); err != nil {
-						log.G(ctx).Warnf("Failed to stop proxy for %s: %s", pb, err)
-					}
-				}
+			if err := releasePortBindings(res, fwn); err != nil {
+				log.G(ctx).WithError(err).Warn("Failed to release port bindings")
 			}
 		}
 	}()
@@ -589,11 +530,10 @@ func attemptBindHostPorts(
 					//  to the userland proxy, because the proxy is not able to convert the
 					//  file descriptor into an sctp.SCTPListener (fd is an unexported member
 					//  of the struct, and ListenSCTP is the only constructor).
-					//  So, it is possible for the proxy to start listening and accept
+					//  If that changes, remove this.
+					//  Until then, it is possible for the proxy to start listening and accept
 					//  connections before iptables rules are created that would bypass
 					//  the proxy for external connections.
-					//  Remove this and pb.stopProxy() from the cleanup function above if
-					//  this is fixed.
 					pb, err = startSCTPProxy(c, port, proxyPath)
 				}
 			default:
@@ -604,6 +544,24 @@ func attemptBindHostPorts(
 			}
 		}
 		res = append(res, pb)
+	}
+
+	if err := configPortDriver(ctx, res, pdc); err != nil {
+		return nil, err
+	}
+	if err := fwn.AddPorts(ctx, mergeChildHostIPs(res)); err != nil {
+		return nil, err
+	}
+	// Now the firewall rules are set up, it's safe to listen on the socket. (Listening
+	// earlier could result in dropped connections if the proxy becomes unreachable due
+	// to NAT rules sending packets directly to the container.)
+	//
+	// If not starting the proxy, nothing will ever accept a connection on the
+	// socket. Listen here anyway because SO_REUSEADDR is set, so bind() won't notice
+	// the problem if a port's bound to both INADDR_ANY and a specific address. (Also
+	// so the binding shows up in "netstat -at".)
+	if err := tcpListenBoundPorts(res, proxyPath); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -733,6 +691,64 @@ func startSCTPProxy(cfg portBindingReq, port int, proxyPath string) (_ portBindi
 	return pb, nil
 }
 
+// configPortDriver passes the port binding's details to rootlesskit, and updates the
+// port binding with callbacks to remove the rootlesskit config (or marks the binding as
+// unsupported by rootlesskit).
+func configPortDriver(ctx context.Context, pbs []portBinding, pdc portDriverClient) error {
+	for i := range pbs {
+		b := pbs[i]
+		if pdc != nil && b.HostPort != 0 {
+			var err error
+			hip, ok := netip.AddrFromSlice(b.HostIP)
+			if !ok {
+				return fmt.Errorf("invalid host IP address in %s", b)
+			}
+			chip, ok := netip.AddrFromSlice(b.childHostIP)
+			if !ok {
+				return fmt.Errorf("invalid child host IP address %s in %s", b.childHostIP, b)
+			}
+			pbs[i].portDriverRemove, err = pdc.AddPort(ctx, b.Proto.String(), hip, chip, int(b.HostPort))
+			if err != nil {
+				var pErr *rlkclient.ProtocolUnsupportedError
+				if errors.As(err, &pErr) {
+					log.G(ctx).WithFields(log.Fields{
+						"error": pErr,
+					}).Warnf("discarding request for %q", net.JoinHostPort(hip.String(), strconv.Itoa(int(b.HostPort))))
+					pbs[i].rootlesskitUnsupported = true
+					continue
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func tcpListenBoundPorts(pbs []portBinding, proxyPath string) error {
+	somaxconn := 0
+	if proxyPath != "" {
+		somaxconn = -1 // silently capped to "/proc/sys/net/core/somaxconn"
+	}
+	for i := range pbs {
+		if pbs[i].boundSocket == nil || pbs[i].rootlesskitUnsupported || pbs[i].Proto != types.TCP {
+			continue
+		}
+		rc, err := pbs[i].boundSocket.SyscallConn()
+		if err != nil {
+			return fmt.Errorf("raw conn not available on TCP socket: %w", err)
+		}
+		if errC := rc.Control(func(fd uintptr) {
+			err = syscall.Listen(int(fd), somaxconn)
+		}); errC != nil {
+			return fmt.Errorf("failed to Control TCP socket: %w", err)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to listen on TCP socket: %w", err)
+		}
+	}
+	return nil
+}
+
 // releasePorts attempts to release all port bindings, does not stop on failure
 func (n *bridgeNetwork) releasePorts(ep *bridgeEndpoint) error {
 	n.Lock()
@@ -740,10 +756,10 @@ func (n *bridgeNetwork) releasePorts(ep *bridgeEndpoint) error {
 	ep.portMapping = nil
 	n.Unlock()
 
-	return n.releasePortBindings(pbs)
+	return releasePortBindings(pbs, n.firewallerNetwork)
 }
 
-func (n *bridgeNetwork) releasePortBindings(pbs []portBinding) error {
+func releasePortBindings(pbs []portBinding, fwn firewaller.Network) error {
 	var errs []error
 	for _, pb := range pbs {
 		if pb.boundSocket != nil {
@@ -762,7 +778,7 @@ func (n *bridgeNetwork) releasePortBindings(pbs []portBinding) error {
 			}
 		}
 	}
-	if err := n.iptablesNetwork.DelPorts(context.TODO(), mergeChildHostIPs(pbs)); err != nil {
+	if err := fwn.DelPorts(context.TODO(), mergeChildHostIPs(pbs)); err != nil {
 		errs = append(errs, err)
 	}
 	for _, pb := range pbs {
@@ -773,232 +789,6 @@ func (n *bridgeNetwork) releasePortBindings(pbs []portBinding) error {
 	return errors.Join(errs...)
 }
 
-func (n *iptablesNetwork) AddPorts(ctx context.Context, pbs []types.PortBinding) error {
-	return n.modPorts(ctx, pbs, true)
-}
-
-func (n *iptablesNetwork) DelPorts(ctx context.Context, pbs []types.PortBinding) error {
-	return n.modPorts(ctx, pbs, false)
-}
-
-func (n *iptablesNetwork) modPorts(ctx context.Context, pbs []types.PortBinding, enable bool) error {
-	for _, pb := range pbs {
-		if err := n.setPerPortIptables(ctx, pb, enable); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (n *iptablesNetwork) setPerPortIptables(ctx context.Context, b types.PortBinding, enable bool) error {
-	v := iptables.IPv4
-	enabled := n.fw.IPv4
-	config := n.Config4
-	if b.IP.To4() == nil {
-		v = iptables.IPv6
-		enabled = n.fw.IPv6
-		config = n.Config6
-	}
-
-	if !enabled {
-		// Nothing to do, iptables/ip6tables is not enabled.
-		return nil
-	}
-
-	if err := filterPortMappedOnLoopback(ctx, b, b.HostIP, enable); err != nil {
-		return err
-	}
-
-	if err := n.filterDirectAccess(ctx, b, enable); err != nil {
-		return err
-	}
-
-	if (b.IP.To4() != nil) != (b.HostIP.To4() != nil) {
-		// The binding is between containerV4 and hostV6 (not vice versa as that
-		// will have been rejected earlier). It's handled by docker-proxy. So, no
-		// further iptables rules are required.
-		return nil
-	}
-
-	if err := n.setPerPortNAT(v, b, enable); err != nil {
-		return err
-	}
-
-	if !config.Unprotected {
-		if err := setPerPortForwarding(b, v, n.IfName, enable); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (n *iptablesNetwork) setPerPortNAT(ipv iptables.IPVersion, b types.PortBinding, enable bool) error {
-	if b.HostPort == 0 {
-		// NAT is disabled.
-		return nil
-	}
-	// iptables interprets "0.0.0.0" as "0.0.0.0/32", whereas we
-	// want "0.0.0.0/0". "0/0" is correctly interpreted as "any
-	// value" by both iptables and ip6tables.
-	hostIP := "0/0"
-	if !b.HostIP.IsUnspecified() {
-		hostIP = b.HostIP.String()
-	}
-	args := []string{
-		"-p", b.Proto.String(),
-		"-d", hostIP,
-		"--dport", strconv.Itoa(int(b.HostPort)),
-		"-j", "DNAT",
-		"--to-destination", net.JoinHostPort(b.IP.String(), strconv.Itoa(int(b.Port))),
-	}
-	if !n.fw.Hairpin {
-		args = append(args, "!", "-i", n.IfName)
-	}
-	if ipv == iptables.IPv6 {
-		args = append(args, "!", "-s", "fe80::/10")
-	}
-	rule := iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: DockerChain, Args: args}
-	if err := appendOrDelChainRule(rule, "DNAT", enable); err != nil {
-		return err
-	}
-
-	rule = iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: "POSTROUTING", Args: []string{
-		"-p", b.Proto.String(),
-		"-s", b.IP.String(),
-		"-d", b.IP.String(),
-		"--dport", strconv.Itoa(int(b.Port)),
-		"-j", "MASQUERADE",
-	}}
-	if err := appendOrDelChainRule(rule, "MASQUERADE", n.fw.Hairpin && enable); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func setPerPortForwarding(b types.PortBinding, ipv iptables.IPVersion, bridgeName string, enable bool) error {
-	// Insert rules for open ports at the top of the filter table's DOCKER
-	// chain (a per-network DROP rule, which must come after these per-port
-	// per-container ACCEPT rules, is appended to the chain when the network
-	// is created).
-	rule := iptables.Rule{IPVer: ipv, Table: iptables.Filter, Chain: DockerChain, Args: []string{
-		"!", "-i", bridgeName,
-		"-o", bridgeName,
-		"-p", b.Proto.String(),
-		"-d", b.IP.String(),
-		"--dport", strconv.Itoa(int(b.Port)),
-		"-j", "ACCEPT",
-	}}
-	if err := programChainRule(rule, "OPEN PORT", enable); err != nil {
-		return err
-	}
-
-	if b.Proto == types.SCTP && os.Getenv("DOCKER_IPTABLES_SCTP_CHECKSUM") == "1" {
-		// Linux kernel v4.9 and below enables NETIF_F_SCTP_CRC for veth by
-		// the following commit.
-		// This introduces a problem when combined with a physical NIC without
-		// NETIF_F_SCTP_CRC. As for a workaround, here we add an iptables entry
-		// to fill the checksum.
-		//
-		// https://github.com/torvalds/linux/commit/c80fafbbb59ef9924962f83aac85531039395b18
-		rule := iptables.Rule{IPVer: ipv, Table: iptables.Mangle, Chain: "POSTROUTING", Args: []string{
-			"-p", b.Proto.String(),
-			"--sport", strconv.Itoa(int(b.Port)),
-			"-j", "CHECKSUM",
-			"--checksum-fill",
-		}}
-		if err := appendOrDelChainRule(rule, "SCTP CHECKSUM", enable); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// filterPortMappedOnLoopback adds an iptables rule that drops remote
-// connections to ports mapped on loopback addresses.
-//
-// This is a no-op if the portBinding is for IPv6 (IPv6 loopback address is
-// non-routable), or over a network with gw_mode=routed (PBs in routed mode
-// don't map ports on the host).
-func filterPortMappedOnLoopback(ctx context.Context, b types.PortBinding, hostIP net.IP, enable bool) error {
-	if rawRulesDisabled(ctx) {
-		return nil
-	}
-	if b.HostPort == 0 || !hostIP.IsLoopback() || hostIP.To4() == nil {
-		return nil
-	}
-
-	acceptMirrored := iptables.Rule{IPVer: iptables.IPv4, Table: iptables.Raw, Chain: "PREROUTING", Args: []string{
-		"-p", b.Proto.String(),
-		"-d", hostIP.String(),
-		"--dport", strconv.Itoa(int(b.HostPort)),
-		"-i", "loopback0",
-		"-j", "ACCEPT",
-	}}
-	enableMirrored := enable && isRunningUnderWSL2MirroredMode()
-	if err := appendOrDelChainRule(acceptMirrored, "LOOPBACK FILTERING - ACCEPT MIRRORED", enableMirrored); err != nil {
-		return err
-	}
-
-	drop := iptables.Rule{IPVer: iptables.IPv4, Table: iptables.Raw, Chain: "PREROUTING", Args: []string{
-		"-p", b.Proto.String(),
-		"-d", hostIP.String(),
-		"--dport", strconv.Itoa(int(b.HostPort)),
-		"!", "-i", "lo",
-		"-j", "DROP",
-	}}
-	if err := appendOrDelChainRule(drop, "LOOPBACK FILTERING - DROP", enable); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// filterDirectAccess adds an iptables rule that drops 'direct' remote
-// connections made to the container's IP address, when the network gateway
-// mode is "nat".
-//
-// This is a no-op if the gw_mode is "nat-unprotected" or "routed".
-func (n *iptablesNetwork) filterDirectAccess(ctx context.Context, b types.PortBinding, enable bool) error {
-	if rawRulesDisabled(ctx) {
-		return nil
-	}
-	ipv := iptables.IPv4
-	config := n.Config4
-	if b.IP.To4() == nil {
-		ipv = iptables.IPv6
-		config = n.Config6
-	}
-
-	// gw_mode=nat-unprotected means there's minimal security for NATed ports,
-	// so don't filter direct access.
-	if config.Unprotected || config.Routed {
-		return nil
-	}
-
-	drop := iptables.Rule{IPVer: ipv, Table: iptables.Raw, Chain: "PREROUTING", Args: []string{
-		"-p", b.Proto.String(),
-		"-d", b.IP.String(), // Container IP address
-		"--dport", strconv.Itoa(int(b.Port)), // Container port
-		"!", "-i", n.IfName,
-		"-j", "DROP",
-	}}
-	if err := appendOrDelChainRule(drop, "DIRECT ACCESS FILTERING - DROP", enable); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func rawRulesDisabled(ctx context.Context) bool {
-	if os.Getenv("DOCKER_INSECURE_NO_IPTABLES_RAW") == "1" {
-		log.G(ctx).Debug("DOCKER_INSECURE_NO_IPTABLES_RAW=1 - skipping raw rules")
-		return true
-	}
-	return false
-}
-
 func (n *bridgeNetwork) reapplyPerPortIptables() {
 	n.Lock()
 	var allPBs []portBinding
@@ -1007,7 +797,7 @@ func (n *bridgeNetwork) reapplyPerPortIptables() {
 	}
 	n.Unlock()
 
-	if err := n.iptablesNetwork.AddPorts(context.Background(), mergeChildHostIPs(allPBs)); err != nil {
+	if err := n.firewallerNetwork.AddPorts(context.Background(), mergeChildHostIPs(allPBs)); err != nil {
 		log.G(context.TODO()).Warnf("Failed to reconfigure NAT: %s", err)
 	}
 }

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -102,6 +103,61 @@ func TestCreateWithIPv6WithoutEnableIPv6Flag(t *testing.T) {
 	}
 
 	t.Fatalf("Network %s has no ULA prefix, expected one.", nwName)
+}
+
+// TestDefaultIPvOptOverride checks that when default-network-opts set enable_ipv4 or
+// enable_ipv6, and those values are overridden for a network, the default option
+// values don't show up in network inspect output. (Because it's confusing if the
+// default shows up when it's been overridden with a different value.)
+func TestDefaultIPvOptOverride(t *testing.T) {
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	const opt4 = "false"
+	const opt6 = "true"
+	d.StartWithBusybox(ctx, t,
+		"--default-network-opt=bridge=com.docker.network.enable_ipv4="+opt4,
+		"--default-network-opt=bridge=com.docker.network.enable_ipv6="+opt6,
+	)
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
+	t.Run("TestDefaultIPvOptOverride", func(t *testing.T) {
+		for _, override4 := range []bool{false, true} {
+			for _, override6 := range []bool{false, true} {
+				t.Run(fmt.Sprintf("override4=%v,override6=%v", override4, override6), func(t *testing.T) {
+					t.Parallel()
+					netName := fmt.Sprintf("tdioo-%v-%v", override4, override6)
+					var nopts []func(*networktypes.CreateOptions)
+					if override4 {
+						nopts = append(nopts, network.WithIPv4(true))
+					}
+					if override6 {
+						nopts = append(nopts, network.WithIPv6())
+					}
+					network.CreateNoError(ctx, t, c, netName, nopts...)
+					defer network.RemoveNoError(ctx, t, c, netName)
+
+					insp, err := c.NetworkInspect(ctx, netName, networktypes.InspectOptions{})
+					assert.NilError(t, err)
+					t.Log("override4", override4, "override6", override6, "->", insp.Options)
+
+					gotOpt4, have4 := insp.Options[netlabel.EnableIPv4]
+					assert.Check(t, is.Equal(have4, !override4))
+					assert.Check(t, is.Equal(insp.EnableIPv4, override4))
+					if have4 {
+						assert.Check(t, is.Equal(gotOpt4, opt4))
+					}
+
+					gotOpt6, have6 := insp.Options[netlabel.EnableIPv6]
+					assert.Check(t, is.Equal(have6, !override6))
+					assert.Check(t, is.Equal(insp.EnableIPv6, true))
+					if have6 {
+						assert.Check(t, is.Equal(gotOpt6, opt6))
+					}
+				})
+			}
+		}
+	})
 }
 
 // Check that it's possible to create IPv6 networks with a 64-bit ip-range,
@@ -250,17 +306,30 @@ func TestFilterForwardPolicy(t *testing.T) {
 			)
 			host := l3.Hosts[hostname]
 
-			getFwdPolicy := func(cmd string) string {
+			getFwdPolicy := func(usingNftables bool, fam string) string {
 				t.Helper()
-				out := host.MustRun(t, cmd, "-S", "FORWARD")
-				if strings.HasPrefix(out, "-P FORWARD ACCEPT") {
-					return "ACCEPT"
+				if usingNftables {
+					out := host.MustRun(t, "nft", "list chain "+fam+" docker-bridges filter-FORWARD")
+					if strings.Contains(out, "policy accept") {
+						return "ACCEPT"
+					}
+					if strings.Contains(out, "policy drop") {
+						return "DROP"
+					}
+					t.Fatalf("Failed to determine nftables filter-FORWARD policy: %s", out)
+					return ""
+				} else {
+					cmd := fam + "tables"
+					out := host.MustRun(t, cmd, "-S", "FORWARD")
+					if strings.HasPrefix(out, "-P FORWARD ACCEPT") {
+						return "ACCEPT"
+					}
+					if strings.HasPrefix(out, "-P FORWARD DROP") {
+						return "DROP"
+					}
+					t.Fatalf("Failed to determine %s FORWARD policy: %s", cmd, out)
+					return ""
 				}
-				if strings.HasPrefix(out, "-P FORWARD DROP") {
-					return "DROP"
-				}
-				t.Fatalf("Failed to determine %s FORWARD policy: %s", cmd, out)
-				return ""
 			}
 
 			type sysctls struct{ v4, v6def, v6all string }
@@ -286,21 +355,22 @@ func TestFilterForwardPolicy(t *testing.T) {
 				d.StartWithBusybox(ctx, t, tc.daemonArgs...)
 				t.Cleanup(func() { d.Stop(t) })
 			})
+			usingNftables := d.FirewallBackendDriver(t) == "nftables"
 			c := d.NewClientT(t)
 			t.Cleanup(func() { c.Close() })
 
 			// If necessary, the IPv4 policy should have been updated when the default bridge network was created.
-			assert.Check(t, is.Equal(getFwdPolicy("iptables"), tc.expPolicy))
+			assert.Check(t, is.Equal(getFwdPolicy(usingNftables, "ip"), tc.expPolicy))
 			// IPv6 policy should not have been updated yet.
-			assert.Check(t, is.Equal(getFwdPolicy("ip6tables"), "ACCEPT"))
+			assert.Check(t, is.Equal(getFwdPolicy(usingNftables, "ip6"), "ACCEPT"))
 			assert.Check(t, is.Equal(getSysctls(), sysctls{tc.expForwarding, tc.initForwarding, tc.initForwarding}))
 
 			// If necessary, creating an IPv6 network should update the sysctls and policy.
 			const netName = "testnetffp"
 			network.CreateNoError(ctx, t, c, netName, network.WithIPv6())
 			t.Cleanup(func() { network.RemoveNoError(ctx, t, c, netName) })
-			assert.Check(t, is.Equal(getFwdPolicy("iptables"), tc.expPolicy))
-			assert.Check(t, is.Equal(getFwdPolicy("ip6tables"), tc.expPolicy))
+			assert.Check(t, is.Equal(getFwdPolicy(usingNftables, "ip"), tc.expPolicy))
+			assert.Check(t, is.Equal(getFwdPolicy(usingNftables, "ip6"), tc.expPolicy))
 			assert.Check(t, is.Equal(getSysctls(), sysctls{tc.expForwarding, tc.expForwarding, tc.expForwarding}))
 		})
 	}
@@ -403,7 +473,12 @@ func TestIsolated(t *testing.T) {
 		defer apiClient.ContainerRemove(ctx, res.ContainerID, containertypes.RemoveOptions{Force: true})
 		if ipv == "-6" && networking.FirewalldRunning() {
 			// FIXME(robmry) - this fails due to https://github.com/moby/moby/issues/49680
-			assert.Check(t, is.Equal(res.ExitCode, 1))
+			if res.ExitCode != 1 {
+				t.Log("Unexpected pass!")
+				t.Log(icmd.RunCommand("nft", "list ruleset").Stdout())
+				t.Log(icmd.RunCommand("ip", "a").Stdout())
+				t.Log(icmd.RunCommand("route", "-6").Stdout())
+			}
 			t.Skip("XFAIL - IPv6, firewalld, isolated - see https://github.com/moby/moby/issues/49680")
 		}
 		assert.Check(t, is.Equal(res.ExitCode, 0))
@@ -459,7 +534,7 @@ func TestPublishedPortAlreadyInUse(t *testing.T) {
 
 	inspect, err := apiClient.ContainerInspect(ctx, ctr2)
 	assert.NilError(t, err)
-	assert.Check(t, is.Equal(inspect.State.Status, "created"))
+	assert.Check(t, is.Equal(inspect.State.Status, containertypes.StateCreated))
 }
 
 // TestAllPortMappingsAreReturned check that dual-stack ports mapped through
@@ -559,6 +634,80 @@ func TestFirewalldReloadNoZombies(t *testing.T) {
 		"After deletes: did not expect rules for %s in: %s", bridgeName, resAfterReload.Combined())
 }
 
+// TestLegacyLink checks that a legacy link ("--link" in the default bridge network)
+// sets up a hostname and opens ports when the daemon is running with icc=false.
+func TestLegacyLink(t *testing.T) {
+	ctx := setupTest(t)
+
+	// Tidy up after the test by starting a new daemon, which will remove the icc=false
+	// rules this test will create for docker0.
+	defer func() {
+		d := daemon.New(t)
+		d.StartWithBusybox(ctx, t)
+		defer d.Stop(t)
+	}()
+
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t, "--icc=false")
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
+	// Run an http server.
+	const svrName = "svr"
+	cid := ctr.Run(ctx, t, c,
+		ctr.WithExposedPorts("80/tcp"),
+		ctr.WithName(svrName),
+		ctr.WithCmd("httpd", "-f"),
+	)
+
+	defer ctr.Remove(ctx, t, c, cid, containertypes.RemoveOptions{Force: true})
+	insp := ctr.Inspect(ctx, t, c, cid)
+	svrAddr := insp.NetworkSettings.Networks["bridge"].IPAddress
+
+	const svrAlias = "thealias"
+	testcases := []struct {
+		name   string
+		host   string
+		links  []string
+		expect string
+	}{
+		{
+			name:   "no link",
+			host:   svrAddr,
+			expect: "download timed out",
+		},
+		{
+			name:   "access by address",
+			links:  []string{svrName},
+			host:   svrAddr,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+		{
+			name:   "access by name",
+			links:  []string{svrName},
+			host:   svrName,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+		{
+			name:   "access by alias",
+			links:  []string{svrName + ":" + svrAlias},
+			host:   svrAlias,
+			expect: "404 Not Found", // Got a response, but the server has nothing to serve.
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+			res := ctr.RunAttach(ctx, t, c,
+				ctr.WithLinks(tc.links...),
+				ctr.WithCmd("wget", "-T3", "http://"+tc.host),
+			)
+			assert.Check(t, is.Contains(res.Stderr.String(), tc.expect))
+		})
+	}
+}
+
 // TestRemoveLegacyLink checks that a legacy link can be deleted while the
 // linked containers are running.
 //
@@ -619,4 +768,60 @@ func TestRemoveLegacyLink(t *testing.T) {
 	svrAddr := inspSvr.NetworkSettings.Networks["bridge"].IPAddress
 	res = ctr.ExecT(ctx, t, c, clientId, []string{"wget", "-T3", "http://" + svrAddr})
 	assert.Check(t, is.Contains(res.Stderr(), "download timed out"))
+}
+
+// TestPortMappingRestore check that port mappings are restored when a container
+// is restarted after a daemon restart.
+//
+// Replacement for integration-cli test DockerDaemonSuite/TestDaemonIptablesCreate
+func TestPortMappingRestore(t *testing.T) {
+	skip.If(t, testEnv.IsRootless(), "fails before and after restart")
+
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
+	const svrName = "svr"
+	cid := ctr.Run(ctx, t, c,
+		ctr.WithExposedPorts("80/tcp"),
+		ctr.WithPortMap(nat.PortMap{"80/tcp": {}}),
+		ctr.WithName(svrName),
+		ctr.WithRestartPolicy(containertypes.RestartPolicyUnlessStopped),
+		ctr.WithCmd("httpd", "-f"),
+	)
+	defer func() { ctr.Remove(ctx, t, c, cid, containertypes.RemoveOptions{Force: true}) }()
+
+	check := func() {
+		t.Helper()
+		insp := ctr.Inspect(ctx, t, c, cid)
+		assert.Check(t, is.Equal(insp.State.Running, true))
+		if assert.Check(t, is.Contains(insp.NetworkSettings.Ports, nat.Port("80/tcp"))) &&
+			assert.Check(t, is.Len(insp.NetworkSettings.Ports["80/tcp"], 2)) {
+			hostPort := insp.NetworkSettings.Ports["80/tcp"][0].HostPort
+			res := ctr.RunAttach(ctx, t, c,
+				ctr.WithExtraHost("thehost:host-gateway"),
+				ctr.WithCmd("wget", "-T3", "http://"+net.JoinHostPort("thehost", hostPort)),
+			)
+			// 404 means the http request worked, but the http server had nothing to serve.
+			assert.Check(t, is.Contains(res.Stderr.String(), "404 Not Found"))
+		}
+	}
+
+	check()
+	d.Restart(t)
+	check()
+}
+
+// TestNoSuchExternalBridge checks that the daemon won't start if it's given a "--bridge"
+// that doesn't exist.
+//
+// Replacement for part of DockerDaemonSuite/TestDaemonBridgeExternal
+func TestNoSuchExternalBridge(t *testing.T) {
+	_ = setupTest(t)
+	d := daemon.New(t)
+	defer d.Stop(t)
+	err := d.StartWithError("--bridge", "nosuchbridge")
+	assert.Check(t, err != nil, "Expected daemon startup to fail")
 }

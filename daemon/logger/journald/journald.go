@@ -1,6 +1,6 @@
 //go:build linux
 
-package journald // import "github.com/docker/docker/daemon/logger/journald"
+package journald
 
 import (
 	"fmt"
@@ -87,10 +87,11 @@ func sanitizeKeyMod(s string) string {
 		} else if ('Z' < v || v < 'A') && ('9' < v || v < '0') {
 			v = '_'
 		}
-		// If (n == "" && v == '_'), then we will skip as this is the beginning with '_'
-		if !(n == "" && v == '_') {
-			n += string(v)
+		if n == "" && v == '_' {
+			// skip leading underscores
+			continue
 		}
+		n += string(v)
 	}
 	return n
 }

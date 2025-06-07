@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -244,7 +245,7 @@ func (daemon *Daemon) filterByNameIDMatches(view *container.View, filter *listCo
 	for id := range matches {
 		c, err := view.Get(id)
 		if err != nil {
-			if errdefs.IsNotFound(err) {
+			if cerrdefs.IsNotFound(err) {
 				// ignore error
 				continue
 			}
@@ -279,10 +280,9 @@ func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, conf
 	}
 
 	err = psFilters.WalkValues("status", func(value string) error {
-		if !container.IsValidStateString(value) {
-			return errdefs.InvalidParameter(fmt.Errorf("invalid filter 'status=%s'", value))
+		if err := containertypes.ValidateContainerState(value); err != nil {
+			return errdefs.InvalidParameter(fmt.Errorf("invalid filter 'status=%s': %w", value, err))
 		}
-
 		config.All = true
 		return nil
 	})
@@ -297,10 +297,9 @@ func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, conf
 	}
 
 	err = psFilters.WalkValues("health", func(value string) error {
-		if !container.IsValidHealthString(value) {
-			return errdefs.InvalidParameter(fmt.Errorf("unrecognized filter value for health: %s", value))
+		if err := containertypes.ValidateHealthStatus(value); err != nil {
+			return errdefs.InvalidParameter(fmt.Errorf("invalid filter 'health=%s': %w", value, err))
 		}
-
 		return nil
 	})
 	if err != nil {
@@ -377,7 +376,7 @@ func (daemon *Daemon) foldFilter(ctx context.Context, view *container.View, conf
 
 func idOrNameFilter(view *container.View, value string) (*container.Snapshot, error) {
 	filter, err := view.Get(value)
-	if err != nil && errdefs.IsNotFound(err) {
+	if err != nil && cerrdefs.IsNotFound(err) {
 		// Try name search instead
 		found := ""
 		searchName := strings.TrimPrefix(value, "/")
@@ -636,7 +635,7 @@ func (daemon *Daemon) refreshImage(ctx context.Context, s *container.Snapshot) *
 	// reason. Update the Image to the specific ID of the original image it
 	// resolved to when the container was created.
 	if err != nil {
-		if !errdefs.IsNotFound(err) {
+		if !cerrdefs.IsNotFound(err) {
 			log.G(ctx).WithFields(log.Fields{
 				"error":       err,
 				"containerID": c.ID,

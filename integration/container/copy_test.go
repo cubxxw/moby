@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"archive/tar"
@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types/build"
 	containertypes "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/testutil/fakecontext"
@@ -30,7 +30,7 @@ func TestCopyFromContainerPathDoesNotExist(t *testing.T) {
 	cid := container.Create(ctx, t, apiClient)
 
 	_, _, err := apiClient.CopyFromContainer(ctx, cid, "/dne")
-	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	assert.Check(t, is.ErrorContains(err, "Could not find the file /dne in container "+cid))
 }
 
@@ -58,7 +58,7 @@ func TestCopyToContainerPathDoesNotExist(t *testing.T) {
 	cid := container.Create(ctx, t, apiClient)
 
 	err := apiClient.CopyToContainer(ctx, cid, "/dne", nil, containertypes.CopyToContainerOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	assert.Check(t, is.ErrorContains(err, "Could not find the file /dne in container "+cid))
 }
 
@@ -195,12 +195,12 @@ func makeTestImage(ctx context.Context, t *testing.T) (imageID string) {
 	`))
 	defer buildCtx.Close()
 
-	resp, err := apiClient.ImageBuild(ctx, buildCtx.AsTarReader(t), types.ImageBuildOptions{})
+	resp, err := apiClient.ImageBuild(ctx, buildCtx.AsTarReader(t), build.ImageBuildOptions{})
 	assert.NilError(t, err)
 	defer resp.Body.Close()
 
 	err = jsonmessage.DisplayJSONMessagesStream(resp.Body, io.Discard, 0, false, func(msg jsonmessage.JSONMessage) {
-		var r types.BuildResult
+		var r build.Result
 		assert.NilError(t, json.Unmarshal(*msg.Aux, &r))
 		imageID = r.ID
 	})
@@ -269,13 +269,13 @@ func TestCopyFromContainer(t *testing.T) {
 	`))
 	defer buildCtx.Close()
 
-	resp, err := apiClient.ImageBuild(ctx, buildCtx.AsTarReader(t), types.ImageBuildOptions{})
+	resp, err := apiClient.ImageBuild(ctx, buildCtx.AsTarReader(t), build.ImageBuildOptions{})
 	assert.NilError(t, err)
 	defer resp.Body.Close()
 
 	var imageID string
 	err = jsonmessage.DisplayJSONMessagesStream(resp.Body, io.Discard, 0, false, func(msg jsonmessage.JSONMessage) {
-		var r types.BuildResult
+		var r build.Result
 		assert.NilError(t, json.Unmarshal(*msg.Aux, &r))
 		imageID = r.ID
 	})
