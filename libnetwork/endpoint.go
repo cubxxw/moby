@@ -6,6 +6,7 @@ package libnetwork
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -385,7 +386,9 @@ func (ep *Endpoint) needResolver() bool {
 	return !ep.disableResolution
 }
 
-// endpoint Key structure : endpoint/network-id/endpoint-id
+// Key returns the endpoint's key.
+//
+// Key structure: endpoint/network-id/endpoint-id
 func (ep *Endpoint) Key() []string {
 	if ep.network == nil {
 		return nil
@@ -482,8 +485,8 @@ func (ep *Endpoint) Join(ctx context.Context, sb *Sandbox, options ...EndpointOp
 		return types.InvalidParameterErrorf("invalid Sandbox passed to endpoint join: %v", sb)
 	}
 
-	sb.joinLeaveStart()
-	defer sb.joinLeaveEnd()
+	sb.joinLeaveMu.Lock()
+	defer sb.joinLeaveMu.Unlock()
 
 	return ep.sbJoin(ctx, sb, options...)
 }
@@ -818,8 +821,8 @@ func (ep *Endpoint) Leave(ctx context.Context, sb *Sandbox) error {
 		return types.InvalidParameterErrorf("invalid Sandbox passed to endpoint leave: %v", sb)
 	}
 
-	sb.joinLeaveStart()
-	defer sb.joinLeaveEnd()
+	sb.joinLeaveMu.Lock()
+	defer sb.joinLeaveMu.Unlock()
 
 	return ep.sbLeave(ctx, sb, false)
 }
@@ -1332,7 +1335,7 @@ func (ep *Endpoint) assignAddressVersion(ipVer int, ipam ipamapi.Ipam) error {
 			ep.mu.Unlock()
 			return nil
 		}
-		if err != ipamapi.ErrNoAvailableIPs || progAdd != nil {
+		if !errors.Is(err, ipamapi.ErrNoAvailableIPs) || progAdd != nil {
 			return err
 		}
 	}

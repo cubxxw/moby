@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package testutil // import "github.com/docker/docker/testutil"
+package testutil
 
 import (
 	"context"
@@ -30,7 +30,7 @@ var DevZero io.Reader = devZero{}
 
 type devZero struct{}
 
-func (d devZero) Read(p []byte) (n int, err error) {
+func (d devZero) Read(p []byte) (int, error) {
 	for i := range p {
 		p[i] = 0
 	}

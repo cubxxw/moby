@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -92,7 +92,10 @@ func (daemon *Daemon) containerStop(ctx context.Context, ctr *container.Containe
 	}
 	defer cancel()
 
-	if status := <-ctr.Wait(subCtx, container.WaitConditionNotRunning); status.Err() == nil {
+	if status := <-ctr.Wait(subCtx, containertypes.WaitConditionNotRunning); status.Err() == nil {
+		// Ensure container status changes are committed by handler of container exit before returning control to the caller
+		ctr.Lock()
+		defer ctr.Unlock()
 		// container did exit, so ignore any previous errors and return
 		return nil
 	}
@@ -114,13 +117,17 @@ func (daemon *Daemon) containerStop(ctx context.Context, ctr *container.Containe
 		// got a kill error, but give container 2 more seconds to exit just in case
 		subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		status := <-ctr.Wait(subCtx, container.WaitConditionNotRunning)
+		status := <-ctr.Wait(subCtx, containertypes.WaitConditionNotRunning)
 		if status.Err() != nil {
 			log.G(ctx).WithError(err).WithField("container", ctr.ID).Errorf("error killing container: %v", status.Err())
 			return err
 		}
 		// container did exit, so ignore previous errors and continue
 	}
+
+	// Ensure container status changes are committed by handler of container exit before returning control to the caller
+	ctr.Lock()
+	defer ctr.Unlock()
 
 	return nil
 }

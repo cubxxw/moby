@@ -1,4 +1,4 @@
-package tarsum // import "github.com/docker/docker/pkg/tarsum"
+package tarsum
 
 import (
 	"archive/tar"
@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -330,7 +331,7 @@ func TestTarSums(t *testing.T) {
 			fh  io.Reader
 			err error
 		)
-		if len(layer.filename) > 0 {
+		if layer.filename != "" {
 			fh, err = os.Open(layer.filename)
 			if err != nil {
 				t.Errorf("failed to open %s: %s", layer.filename, err)
@@ -380,7 +381,7 @@ func TestTarSums(t *testing.T) {
 			continue
 		}
 		var gotSum string
-		if len(layer.jsonfile) > 0 {
+		if layer.jsonfile != "" {
 			jfh, err := os.Open(layer.jsonfile)
 			if err != nil {
 				t.Errorf("failed to open %s: %s", layer.jsonfile, err)
@@ -545,7 +546,7 @@ func renderSumForHeader(v Version, h *tar.Header, data []byte) (string, error) {
 	tr := tar.NewReader(ts)
 	for {
 		hdr, err := tr.Next()
-		if hdr == nil || err == io.EOF {
+		if hdr == nil || errors.Is(err, io.EOF) {
 			// Signals the end of the archive.
 			break
 		}

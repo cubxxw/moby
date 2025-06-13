@@ -1,7 +1,8 @@
-package resumable // import "github.com/docker/docker/registry/resumable"
+package resumable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,10 +35,12 @@ func NewRequestReaderWithInitialResponse(c *http.Client, r *http.Request, maxfai
 	return &requestReader{client: c, request: r, maxFailures: maxfail, totalSize: totalsize, currentResponse: initialResponse, waitDuration: 5 * time.Second}
 }
 
-func (r *requestReader) Read(p []byte) (n int, err error) {
+func (r *requestReader) Read(p []byte) (n int, _ error) {
 	if r.client == nil || r.request == nil {
 		return 0, fmt.Errorf("client and request can't be nil")
 	}
+
+	var err error
 	isFreshRequest := false
 	if r.lastRange != 0 && r.currentResponse == nil {
 		readRange := fmt.Sprintf("bytes=%d-%d", r.lastRange, r.totalSize)
@@ -75,7 +78,7 @@ func (r *requestReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		r.cleanUpResponse()
 	}
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		log.G(context.TODO()).Infof("encountered error during pull and clearing it before resume: %s", err)
 		err = nil
 	}

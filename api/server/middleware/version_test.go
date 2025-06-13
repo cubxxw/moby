@@ -1,4 +1,4 @@
-package middleware // import "github.com/docker/docker/api/server/middleware"
+package middleware
 
 import (
 	"context"
@@ -79,7 +79,7 @@ func TestVersionMiddlewareVersion(t *testing.T) {
 	assert.NilError(t, err)
 	h := m.WrapHandler(handler)
 
-	req, _ := http.NewRequest(http.MethodGet, "/containers/json", nil)
+	req, _ := http.NewRequest(http.MethodGet, "/containers/json", http.NoBody)
 	resp := httptest.NewRecorder()
 	ctx := context.Background()
 
@@ -121,7 +121,7 @@ func TestVersionMiddlewareVersion(t *testing.T) {
 func TestVersionMiddlewareWithErrorsReturnsHeaders(t *testing.T) {
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 		v := httputils.VersionFromContext(ctx)
-		assert.Check(t, len(v) != 0)
+		assert.Check(t, v != "")
 		return nil
 	}
 
@@ -129,7 +129,7 @@ func TestVersionMiddlewareWithErrorsReturnsHeaders(t *testing.T) {
 	assert.NilError(t, err)
 	h := m.WrapHandler(handler)
 
-	req, _ := http.NewRequest(http.MethodGet, "/containers/json", nil)
+	req, _ := http.NewRequest(http.MethodGet, "/containers/json", http.NoBody)
 	resp := httptest.NewRecorder()
 	ctx := context.Background()
 

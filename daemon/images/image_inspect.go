@@ -39,7 +39,7 @@ func (i *ImageService) ImageInspect(ctx context.Context, refOrID string, opts ba
 	}
 
 	comment := img.Comment
-	if len(comment) == 0 && len(img.History) > 0 {
+	if comment == "" && len(img.History) > 0 {
 		comment = img.History[len(img.History)-1].Comment
 	}
 
@@ -53,6 +53,7 @@ func (i *ImageService) ImageInspect(ctx context.Context, refOrID string, opts ba
 		layers = append(layers, l.String())
 	}
 
+	imgConfig := containerConfigToDockerOCIImageConfig(img.Config)
 	return &imagetypes.InspectResponse{
 		ID:              img.ID().String(),
 		RepoTags:        repoTags,
@@ -64,7 +65,7 @@ func (i *ImageService) ImageInspect(ctx context.Context, refOrID string, opts ba
 		ContainerConfig: &img.ContainerConfig, //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
 		DockerVersion:   img.DockerVersion,
 		Author:          img.Author,
-		Config:          img.Config,
+		Config:          &imgConfig,
 		Architecture:    img.Architecture,
 		Variant:         img.Variant,
 		Os:              img.OperatingSystem(),

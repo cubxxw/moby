@@ -1,4 +1,4 @@
-package config // import "github.com/docker/docker/daemon/config"
+package config
 
 import (
 	"context"
@@ -48,6 +48,7 @@ type BridgeConfig struct {
 	EnableIPMasq             bool   `json:"ip-masq,omitempty"`
 	EnableUserlandProxy      bool   `json:"userland-proxy,omitempty"`
 	UserlandProxyPath        string `json:"userland-proxy-path,omitempty"`
+	AllowDirectRouting       bool   `json:"allow-direct-routing,omitempty"`
 }
 
 // DefaultBridgeConfig stores all the parameters for the default bridge network.

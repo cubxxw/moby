@@ -2,6 +2,7 @@ package libnetwork
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -123,8 +124,8 @@ func (n *Network) addLBBackend(ip net.IP, lb *loadBalancer) {
 
 		if sb.ingress {
 			var gwIP net.IP
-			if ep, _ := sb.getGatewayEndpoint(); ep != nil {
-				gwIP = ep.Iface().Address().IP
+			if gwEP, _ := sb.getGatewayEndpoint(); gwEP != nil {
+				gwIP = gwEP.Iface().Address().IP
 			}
 			if err := programIngress(gwIP, lb.service.ingressPorts, false); err != nil {
 				log.G(context.TODO()).Errorf("Failed to add ingress: %v", err)
@@ -138,25 +139,27 @@ func (n *Network) addLBBackend(ip net.IP, lb *loadBalancer) {
 			return
 		}
 
-		if err := i.NewService(s); err != nil && err != syscall.EEXIST {
+		if err := i.NewService(s); err != nil && !errors.Is(err, syscall.EEXIST) {
 			log.G(context.TODO()).Errorf("Failed to create a new service for vip %s fwmark %d in sbox %.7s (%.7s): %v", lb.vip, lb.fwMark, sb.ID(), sb.ContainerID(), err)
 			return
 		}
 	}
 
-	d := &ipvs.Destination{
-		AddressFamily: nl.FAMILY_V4,
-		Address:       ip,
-		Weight:        1,
-	}
-	if n.loadBalancerMode == loadBalancerModeDSR {
-		d.ConnectionFlags = ipvs.ConnFwdDirectRoute
-	}
-
 	// Remove the sched name before using the service to add
 	// destination.
 	s.SchedName = ""
-	if err := i.NewDestination(s, d); err != nil && err != syscall.EEXIST {
+
+	var flags uint32
+	if n.loadBalancerMode == loadBalancerModeDSR {
+		flags = ipvs.ConnFwdDirectRoute
+	}
+	err = i.NewDestination(s, &ipvs.Destination{
+		AddressFamily:   nl.FAMILY_V4,
+		Address:         ip,
+		Weight:          1,
+		ConnectionFlags: flags,
+	})
+	if err != nil && !errors.Is(err, syscall.EEXIST) {
 		log.G(context.TODO()).Errorf("Failed to create real server %s for vip %s fwmark %d in sbox %.7s (%.7s): %v", ip, lb.vip, lb.fwMark, sb.ID(), sb.ContainerID(), err)
 	}
 
@@ -206,19 +209,19 @@ func (n *Network) rmLBBackend(ip net.IP, lb *loadBalancer, rmService bool, fullR
 	}
 
 	if fullRemove {
-		if err := i.DelDestination(s, d); err != nil && err != syscall.ENOENT {
+		if err := i.DelDestination(s, d); err != nil && !errors.Is(err, syscall.ENOENT) {
 			log.G(context.TODO()).Errorf("Failed to delete real server %s for vip %s fwmark %d in sbox %.7s (%.7s): %v", ip, lb.vip, lb.fwMark, sb.ID(), sb.ContainerID(), err)
 		}
 	} else {
 		d.Weight = 0
-		if err := i.UpdateDestination(s, d); err != nil && err != syscall.ENOENT {
+		if err := i.UpdateDestination(s, d); err != nil && !errors.Is(err, syscall.ENOENT) {
 			log.G(context.TODO()).Errorf("Failed to set LB weight of real server %s to 0 for vip %s fwmark %d in sbox %.7s (%.7s): %v", ip, lb.vip, lb.fwMark, sb.ID(), sb.ContainerID(), err)
 		}
 	}
 
 	if rmService {
 		s.SchedName = ipvs.RoundRobin
-		if err := i.DelService(s); err != nil && err != syscall.ENOENT {
+		if err := i.DelService(s); err != nil && !errors.Is(err, syscall.ENOENT) {
 			log.G(context.TODO()).Errorf("Failed to delete service for vip %s fwmark %d in sbox %.7s (%.7s): %v", lb.vip, lb.fwMark, sb.ID(), sb.ContainerID(), err)
 		}
 

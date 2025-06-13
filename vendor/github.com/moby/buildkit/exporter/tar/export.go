@@ -95,9 +95,10 @@ func (e *localExporterInstance) Export(ctx context.Context, inp *exporter.Source
 	}
 
 	now := time.Now().Truncate(time.Second)
+	isMap := len(inp.Refs) > 0
 
 	getDir := func(ctx context.Context, k string, ref cache.ImmutableRef, attestations []exporter.Attestation) (*fsutil.Dir, error) {
-		outputFS, cleanup, err := local.CreateFS(ctx, sessionID, k, ref, attestations, now, e.opts)
+		outputFS, cleanup, err := local.CreateFS(ctx, sessionID, k, ref, attestations, now, isMap, e.opts)
 		if err != nil {
 			return nil, err
 		}
@@ -119,7 +120,6 @@ func (e *localExporterInstance) Export(ctx context.Context, inp *exporter.Source
 		}, nil
 	}
 
-	isMap := len(inp.Refs) > 0
 	if _, ok := inp.Metadata[exptypes.ExporterPlatformsKey]; isMap && !ok {
 		return nil, nil, errors.Errorf("unable to export multiple refs, missing platforms mapping")
 	}
@@ -164,7 +164,7 @@ func (e *localExporterInstance) Export(ctx context.Context, inp *exporter.Source
 	}
 
 	timeoutCtx, cancel := context.WithCancelCause(ctx)
-	timeoutCtx, _ = context.WithTimeoutCause(timeoutCtx, 5*time.Second, errors.WithStack(context.DeadlineExceeded))
+	timeoutCtx, _ = context.WithTimeoutCause(timeoutCtx, 5*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet
 	defer func() { cancel(errors.WithStack(context.Canceled)) }()
 
 	caller, err := e.opt.SessionManager.Get(timeoutCtx, sessionID, false)

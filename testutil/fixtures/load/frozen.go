@@ -1,4 +1,4 @@
-package load // import "github.com/docker/docker/testutil/fixtures/load"
+package load
 
 import (
 	"bufio"
@@ -195,7 +195,7 @@ func readFrozenImageList(ctx context.Context, dockerfilePath string, images []st
 		if len(line) < 3 {
 			continue
 		}
-		if !(line[0] == "RUN" && line[1] == "./contrib/download-frozen-image-v2.sh") {
+		if line[0] != "RUN" || line[1] != "./contrib/download-frozen-image-v2.sh" {
 			continue
 		}
 

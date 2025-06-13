@@ -1,22 +1,25 @@
-package build // import "github.com/docker/docker/integration/build"
+package build
 
 import (
 	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/fakecontext"
@@ -107,7 +110,7 @@ func TestBuildWithRemoveAndForceRemove(t *testing.T) {
 			_, err := tw.Write(dockerfile)
 			assert.NilError(t, err)
 			assert.NilError(t, tw.Close())
-			resp, err := client.ImageBuild(ctx, buff, types.ImageBuildOptions{Remove: tc.rm, ForceRemove: tc.forceRm, NoCache: true})
+			resp, err := client.ImageBuild(ctx, buff, build.ImageBuildOptions{Remove: tc.rm, ForceRemove: tc.forceRm, NoCache: true})
 			assert.NilError(t, err)
 			defer resp.Body.Close()
 			filter, err := buildContainerIdsFilter(resp.Body)
@@ -163,7 +166,7 @@ func TestBuildMultiStageCopy(t *testing.T) {
 			resp, err := apiclient.ImageBuild(
 				ctx,
 				source.AsTarReader(t),
-				types.ImageBuildOptions{
+				build.ImageBuildOptions{
 					Remove:      true,
 					ForceRemove: true,
 					Target:      target,
@@ -212,7 +215,7 @@ func TestBuildMultiStageParentConfig(t *testing.T) {
 	imgName := strings.ToLower(t.Name())
 	resp, err := apiclient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 			Tags:        []string{imgName},
@@ -259,7 +262,7 @@ func TestBuildLabelWithTargets(t *testing.T) {
 	// For `target-a` build
 	resp, err := apiclient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 			Tags:        []string{imgName},
@@ -286,7 +289,7 @@ func TestBuildLabelWithTargets(t *testing.T) {
 	delete(testLabels, "label-a")
 	resp, err = apiclient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 			Tags:        []string{imgName},
@@ -327,7 +330,7 @@ COPY    3/ /target/
 	apiclient := testEnv.APIClient()
 	resp, err := apiclient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -363,7 +366,7 @@ RUN cat somefile`
 	apiclient := testEnv.APIClient()
 	resp, err := apiclient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -409,7 +412,7 @@ COPY bar /
 	apiclient := testEnv.APIClient()
 	resp, err := apiclient.ImageBuild(ctx,
 		buf,
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -432,7 +435,7 @@ COPY bar /
 
 	resp, err = apiclient.ImageBuild(ctx,
 		buf,
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -471,7 +474,7 @@ RUN [ ! -f foo ]
 	apiClient := testEnv.APIClient()
 	resp, err := apiClient.ImageBuild(ctx,
 		source.AsTarReader(t),
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -517,7 +520,7 @@ RUN for g in $(seq 0 8); do dd if=/dev/urandom of=rnd bs=1K count=1 seek=$((1024
 	apiClient := testEnv.APIClient()
 	resp, err := apiClient.ImageBuild(ctx,
 		buf,
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -558,7 +561,7 @@ COPY --from=intermediate C:\\stuff C:\\stuff
 	apiClient := testEnv.APIClient()
 	resp, err := apiClient.ImageBuild(ctx,
 		buf,
-		types.ImageBuildOptions{
+		build.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
 		})
@@ -623,7 +626,7 @@ func TestBuildWithEmptyDockerfile(t *testing.T) {
 
 			_, err = apiClient.ImageBuild(ctx,
 				buf,
-				types.ImageBuildOptions{
+				build.ImageBuildOptions{
 					Remove:      true,
 					ForceRemove: true,
 				})
@@ -653,7 +656,7 @@ func TestBuildPreserveOwnership(t *testing.T) {
 			resp, err := apiClient.ImageBuild(
 				ctx,
 				source.AsTarReader(t),
-				types.ImageBuildOptions{
+				build.ImageBuildOptions{
 					Remove:      true,
 					ForceRemove: true,
 					Target:      target,
@@ -681,14 +684,14 @@ func TestBuildPlatformInvalid(t *testing.T) {
 	err := w.Close()
 	assert.NilError(t, err)
 
-	_, err = testEnv.APIClient().ImageBuild(ctx, buf, types.ImageBuildOptions{
+	_, err = testEnv.APIClient().ImageBuild(ctx, buf, build.ImageBuildOptions{
 		Remove:      true,
 		ForceRemove: true,
 		Platform:    "foobar",
 	})
 
 	assert.Check(t, is.ErrorContains(err, "unknown operating system or architecture"))
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }
 
 // TestBuildWorkdirNoCacheMiss is a regression test for https://github.com/moby/moby/issues/47627
@@ -710,8 +713,8 @@ func TestBuildWorkdirNoCacheMiss(t *testing.T) {
 			apiClient := testEnv.APIClient()
 
 			buildAndGetID := func() string {
-				resp, err := apiClient.ImageBuild(ctx, source.AsTarReader(t), types.ImageBuildOptions{
-					Version: types.BuilderV1,
+				resp, err := apiClient.ImageBuild(ctx, source.AsTarReader(t), build.ImageBuildOptions{
+					Version: build.BuilderV1,
 				})
 				assert.NilError(t, err)
 				defer resp.Body.Close()
@@ -738,11 +741,9 @@ func TestBuildEmitsImageCreateEvent(t *testing.T) {
 
 	apiClient := testEnv.APIClient()
 
-	for _, builderVersion := range []types.BuilderVersion{types.BuilderV1, types.BuilderBuildKit} {
+	for _, builderVersion := range []build.BuilderVersion{build.BuilderV1, build.BuilderBuildKit} {
 		t.Run("v"+string(builderVersion), func(t *testing.T) {
-			if builderVersion == types.BuilderBuildKit {
-				skip.If(t, testEnv.UsingSnapshotter(),
-					"FIXME: Passing a context via a tarball is not supported with the containerd image store. See: https://github.com/moby/moby/issues/47717")
+			if builderVersion == build.BuilderBuildKit {
 				skip.If(t, testEnv.DaemonInfo.OSType == "windows", "Buildkit is not supported on Windows")
 			}
 
@@ -751,7 +752,7 @@ func TestBuildEmitsImageCreateEvent(t *testing.T) {
 
 			since := time.Now()
 
-			resp, err := apiClient.ImageBuild(ctx, source.AsTarReader(t), types.ImageBuildOptions{
+			resp, err := apiClient.ImageBuild(ctx, source.AsTarReader(t), build.ImageBuildOptions{
 				Version: builderVersion,
 				NoCache: true,
 			})
@@ -780,7 +781,7 @@ func TestBuildEmitsImageCreateEvent(t *testing.T) {
 						imageCreateEvts++
 					}
 				case err := <-errs:
-					assert.Check(t, err == nil || err == io.EOF)
+					assert.Check(t, err == nil || errors.Is(err, io.EOF))
 					finished = true
 				}
 			}
@@ -791,6 +792,44 @@ func TestBuildEmitsImageCreateEvent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildHistoryDoesNotPreventRemoval(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "buildkit is not supported on Windows")
+	skip.If(t, !testEnv.UsingSnapshotter(), "only relevant to c8d integration")
+
+	ctx := setupTest(t)
+
+	dockerfile := "FROM busybox\nRUN echo hello world > /hello"
+	source := fakecontext.New(t, "", fakecontext.WithDockerfile(dockerfile))
+	defer source.Close()
+
+	apiClient := testEnv.APIClient()
+
+	buildImage := func(imgName string) error {
+		resp, err := apiClient.ImageBuild(ctx, source.AsTarReader(t), build.ImageBuildOptions{
+			Remove:      true,
+			ForceRemove: true,
+			Tags:        []string{imgName},
+			Version:     build.BuilderBuildKit,
+		})
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		_, err = io.Copy(io.Discard, resp.Body)
+		return err
+	}
+
+	err := buildImage("history-a")
+	assert.NilError(t, err)
+
+	resp, err := apiClient.ImageRemove(ctx, "history-a", image.RemoveOptions{})
+	assert.NilError(t, err)
+	assert.Check(t, slices.ContainsFunc(resp, func(r image.DeleteResponse) bool {
+		return r.Deleted != ""
+	}))
 }
 
 func readBuildImageIDs(t *testing.T, rd io.Reader) string {
@@ -813,7 +852,8 @@ func readBuildImageIDs(t *testing.T, rd io.Reader) string {
 			ID string `json:"ID"`
 		}
 
-		if json.Unmarshal(*jm.Aux, &auxId); auxId.ID != "" {
+		json.Unmarshal(*jm.Aux, &auxId)
+		if auxId.ID != "" {
 			return auxId.ID
 		}
 	}

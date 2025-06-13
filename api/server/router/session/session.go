@@ -1,4 +1,4 @@
-package session // import "github.com/docker/docker/api/server/router/session"
+package session
 
 import "github.com/docker/docker/api/server/router"
 
@@ -18,12 +18,12 @@ func NewRouter(b Backend) router.Router {
 }
 
 // Routes returns the available routers to the session controller
-func (r *sessionRouter) Routes() []router.Route {
-	return r.routes
+func (sr *sessionRouter) Routes() []router.Route {
+	return sr.routes
 }
 
-func (r *sessionRouter) initRoutes() {
-	r.routes = []router.Route{
-		router.NewPostRoute("/session", r.startSession),
+func (sr *sessionRouter) initRoutes() {
+	sr.routes = []router.Route{
+		router.NewPostRoute("/session", sr.startSession),
 	}
 }

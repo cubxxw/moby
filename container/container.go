@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/container"
+package container
 
 import (
 	"bytes"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/pkg/cio"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -379,7 +380,7 @@ func (container *Container) GetResourcePath(path string) (string, error) {
 // The returned path is always prefixed with a [filepath.Separator].
 func cleanScopedPath(path string) string {
 	if len(path) >= 2 {
-		if v := filepath.VolumeName(path); len(v) > 0 {
+		if v := filepath.VolumeName(path); v != "" {
 			path = path[len(v):]
 		}
 	}
@@ -814,7 +815,7 @@ func (container *Container) RestoreTask(ctx context.Context, client libcontainer
 		return err
 	}
 	container.task, err = container.ctr.AttachTask(ctx, container.InitializeStdio)
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return err
 	}
 	return nil

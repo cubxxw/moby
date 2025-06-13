@@ -1,8 +1,9 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -23,14 +24,14 @@ func TestContainerLogsNotFoundError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusNotFound, "Not found")),
 	}
 	_, err := client.ContainerLogs(context.Background(), "container_id", container.LogsOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 
 	_, err = client.ContainerLogs(context.Background(), "", container.LogsOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	assert.Check(t, is.ErrorContains(err, "value is empty"))
 
 	_, err = client.ContainerLogs(context.Background(), "    ", container.LogsOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	assert.Check(t, is.ErrorContains(err, "value is empty"))
 }
 
@@ -39,7 +40,7 @@ func TestContainerLogsError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
 	_, err := client.ContainerLogs(context.Background(), "container_id", container.LogsOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInternal))
 
 	_, err = client.ContainerLogs(context.Background(), "container_id", container.LogsOptions{
 		Since: "2006-01-02TZ",
@@ -167,7 +168,7 @@ func ExampleClient_ContainerLogs_withTimeout() {
 	}
 
 	_, err = io.Copy(os.Stdout, reader)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		log.Fatal(err)
 	}
 }

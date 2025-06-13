@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package container // import "github.com/docker/docker/container"
+package container
 
 import (
 	"bytes"
@@ -45,7 +45,7 @@ type Snapshot struct {
 	Managed      bool
 	ExposedPorts nat.PortSet
 	PortBindings nat.PortSet
-	Health       string
+	Health       container.HealthStatus
 	HostConfig   struct {
 		Isolation string
 	}

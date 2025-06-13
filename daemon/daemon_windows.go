@@ -1,9 +1,10 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
 	"fmt"
 	"math"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,7 +68,7 @@ func (daemon *Daemon) adaptContainerSettings(daemonCfg *config.Config, hostConfi
 }
 
 // verifyPlatformContainerResources performs platform-specific validation of the container's resource-configuration
-func verifyPlatformContainerResources(resources *containertypes.Resources, isHyperv bool) (warnings []string, err error) {
+func verifyPlatformContainerResources(resources *containertypes.Resources, isHyperv bool) (warnings []string, _ error) {
 	fixMemorySwappiness(resources)
 	if !isHyperv {
 		// The processor resource controls are mutually exclusive on
@@ -171,7 +172,7 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, isHyp
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
 // hostconfig and config structures.
-func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, err error) {
+func verifyPlatformContainerSettings(daemon *Daemon, daemonCfg *configStore, hostConfig *containertypes.HostConfig, update bool) (warnings []string, _ error) {
 	if hostConfig == nil {
 		return nil, nil
 	}
@@ -242,7 +243,7 @@ func (daemon *Daemon) initNetworkController(daemonCfg *config.Config, activeSand
 		return errors.Wrap(err, "error obtaining controller instance")
 	}
 
-	hnsresponse, err := hcsshim.HNSListNetworkRequest("GET", "", "")
+	hnsresponse, err := hcsshim.HNSListNetworkRequest(http.MethodGet, "", "")
 	if err != nil {
 		return err
 	}
@@ -321,9 +322,11 @@ func (daemon *Daemon) initNetworkController(daemonCfg *config.Config, activeSand
 	// discover and add HNS networks to windows
 	// network that exist are removed and added again
 	for _, v := range hnsresponse {
-		networkTypeNorm := strings.ToLower(v.Type)
-		if networkTypeNorm == "private" || networkTypeNorm == "internal" {
-			continue // workaround for HNS reporting unsupported networks
+		// Ignore HNS network types that are not supported by the Docker driver. This
+		// avoids trying to load a plugin named after the network type, which adds a 15s
+		// startup delay per network of this type on the host.
+		if !winlibnetwork.IsAdoptableNetworkType(v.Type) {
+			continue
 		}
 		var n *libnetwork.Network
 		daemon.netController.WalkNetworks(func(current *libnetwork.Network) bool {
@@ -357,6 +360,19 @@ func (daemon *Daemon) initNetworkController(daemonCfg *config.Config, activeSand
 		netOption := map[string]string{
 			winlibnetwork.NetworkName: v.Name,
 			winlibnetwork.HNSID:       v.Id,
+		}
+
+		// If this network wasn't in the store, it's being adopted by docker - which
+		// makes it possible to run containers in networks that were defined on the host.
+		// Add a label to say that's what happened.
+		//
+		// Networks not created by docker should not be deleted by "docker network
+		// prune". (They can still be deleted by "docker network rm", but that's more
+		// likely to be intentional - preventing it may be a breaking change, it would
+		// become impossible to use docker commands to delete a network that was created
+		// by docker but got forgotten because the store somehow got deleted.)
+		if n == nil {
+			netOption[winlibnetwork.HNSOwned] = "true"
 		}
 
 		// add persisted driver options

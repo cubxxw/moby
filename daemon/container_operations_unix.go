@@ -1,6 +1,6 @@
 //go:build linux || freebsd
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -462,7 +462,7 @@ func killProcessDirectly(ctr *container.Container) error {
 	}
 
 	if err := unix.Kill(pid, syscall.SIGKILL); err != nil {
-		if err != unix.ESRCH {
+		if !errors.Is(err, unix.ESRCH) {
 			return errdefs.System(err)
 		}
 		err = errNoSuchProcess{pid, syscall.SIGKILL}

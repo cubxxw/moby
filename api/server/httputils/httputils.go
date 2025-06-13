@@ -1,4 +1,4 @@
-package httputils // import "github.com/docker/docker/api/server/httputils"
+package httputils
 
 import (
 	"context"
@@ -74,7 +74,7 @@ func ReadJSON(r *http.Request, out interface{}) error {
 	err = dec.Decode(out)
 	defer r.Body.Close()
 	if err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return errdefs.InvalidParameter(errors.New("invalid JSON: got EOF while reading request body"))
 		}
 		return errdefs.InvalidParameter(errors.Wrap(err, "invalid JSON"))
