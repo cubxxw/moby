@@ -5,8 +5,10 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/internal/otelutil"
@@ -42,12 +44,12 @@ func (d *driver) initStore() error {
 
 func (d *driver) populateNetworks() error {
 	kvol, err := d.store.List(&networkConfiguration{})
-	if err != nil && err != datastore.ErrKeyNotFound {
-		return fmt.Errorf("failed to get bridge network configurations from store: %v", err)
+	if err != nil && !errors.Is(err, datastore.ErrKeyNotFound) {
+		return fmt.Errorf("failed to get bridge network configurations from store: %w", err)
 	}
 
 	// It's normal for network configuration state to be empty. Just return.
-	if err == datastore.ErrKeyNotFound {
+	if errors.Is(err, datastore.ErrKeyNotFound) {
 		return nil
 	}
 
@@ -67,11 +69,11 @@ func (d *driver) populateNetworks() error {
 
 func (d *driver) populateEndpoints() error {
 	kvol, err := d.store.List(&bridgeEndpoint{})
-	if err != nil && err != datastore.ErrKeyNotFound {
-		return fmt.Errorf("failed to get bridge endpoints from store: %v", err)
+	if err != nil && !errors.Is(err, datastore.ErrKeyNotFound) {
+		return fmt.Errorf("failed to get bridge endpoints from store: %w", err)
 	}
 
-	if err == datastore.ErrKeyNotFound {
+	if errors.Is(err, datastore.ErrKeyNotFound) {
 		return nil
 	}
 
@@ -87,6 +89,13 @@ func (d *driver) populateEndpoints() error {
 			continue
 		}
 		n.endpoints[ep.id] = ep
+		netip4, netip6 := ep.netipAddrs()
+		if err := n.firewallerNetwork.AddEndpoint(context.TODO(), netip4, netip6); err != nil {
+			log.G(context.TODO()).WithFields(log.Fields{
+				"error": err,
+				"ep.id": ep.id,
+			}).Warn("Failed to restore per-endpoint firewall rules")
+		}
 		n.restorePortAllocations(ep)
 		log.G(context.TODO()).Debugf("Endpoint (%.7s) restored to network (%.7s)", ep.id, ep.nid)
 	}
@@ -130,6 +139,7 @@ func (ncfg *networkConfiguration) MarshalJSON() ([]byte, error) {
 	nMap["GwModeIPv4"] = ncfg.GwModeIPv4
 	nMap["GwModeIPv6"] = ncfg.GwModeIPv6
 	nMap["EnableICC"] = ncfg.EnableICC
+	nMap["TrustedHostInterfaces"] = strings.Join(ncfg.TrustedHostInterfaces, ":")
 	nMap["InhibitIPv4"] = ncfg.InhibitIPv4
 	nMap["Mtu"] = ncfg.Mtu
 	nMap["Internal"] = ncfg.Internal
@@ -208,6 +218,10 @@ func (ncfg *networkConfiguration) UnmarshalJSON(b []byte) error {
 		ncfg.GwModeIPv6, _ = newGwMode(v.(string))
 	}
 	ncfg.EnableICC = nMap["EnableICC"].(bool)
+	if v, ok := nMap["TrustedHostInterfaces"]; ok {
+		s, _ := v.(string)
+		ncfg.TrustedHostInterfaces = strings.FieldsFunc(s, func(r rune) bool { return r == ':' })
+	}
 	if v, ok := nMap["InhibitIPv4"]; ok {
 		ncfg.InhibitIPv4 = v.(bool)
 	}

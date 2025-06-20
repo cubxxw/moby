@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -36,7 +36,7 @@ import (
 //     unique enough to only return a single container object
 //     If none of these searches succeed, an error is returned
 func (daemon *Daemon) GetContainer(prefixOrName string) (*container.Container, error) {
-	if len(prefixOrName) == 0 {
+	if prefixOrName == "" {
 		return nil, errors.WithStack(invalidIdentifier(prefixOrName))
 	}
 
@@ -178,7 +178,7 @@ func getEntrypointAndArgs(configEntrypoint, configCmd []string) (string, []strin
 
 // GetByName returns a container given a name.
 func (daemon *Daemon) GetByName(name string) (*container.Container, error) {
-	if len(name) == 0 {
+	if name == "" {
 		return nil, fmt.Errorf("No container name supplied")
 	}
 	fullName := name
@@ -226,10 +226,10 @@ func (daemon *Daemon) setHostConfig(container *container.Container, hostConfig *
 
 // verifyContainerSettings performs validation of the hostconfig and config
 // structures.
-func (daemon *Daemon) verifyContainerSettings(daemonCfg *configStore, hostConfig *containertypes.HostConfig, config *containertypes.Config, update bool) (warnings []string, err error) {
+func (daemon *Daemon) verifyContainerSettings(daemonCfg *configStore, hostConfig *containertypes.HostConfig, config *containertypes.Config, update bool) (warnings []string, _ error) {
 	// First perform verification of settings common across all platforms.
-	if err = validateContainerConfig(config); err != nil {
-		return warnings, err
+	if err := validateContainerConfig(config); err != nil {
+		return nil, err
 	}
 
 	warns, err := validateHostConfig(hostConfig)
@@ -252,7 +252,7 @@ func validateContainerConfig(config *containertypes.Config) error {
 	if err := translateWorkingDir(config); err != nil {
 		return err
 	}
-	if len(config.StopSignal) > 0 {
+	if config.StopSignal != "" {
 		if _, err := signal.ParseSignal(config.StopSignal); err != nil {
 			return err
 		}

@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -153,19 +153,15 @@ var (
 func (daemon *Daemon) startIngressWorker() {
 	ingressJobsChannel = make(chan *ingressJob, 100)
 	go func() {
-		//nolint: gosimple
-		for {
-			select {
-			case r := <-ingressJobsChannel:
-				if r.create != nil {
-					daemon.setupIngress(&daemon.config().Config, r.create, r.ip, ingressID)
-					ingressID = r.create.ID
-				} else {
-					daemon.releaseIngress(ingressID)
-					ingressID = ""
-				}
-				close(r.jobDone)
+		for r := range ingressJobsChannel {
+			if r.create != nil {
+				daemon.setupIngress(&daemon.config().Config, r.create, r.ip, ingressID)
+				ingressID = r.create.ID
+			} else {
+				daemon.releaseIngress(ingressID)
+				ingressID = ""
 			}
+			close(r.jobDone)
 		}
 	}()
 }
@@ -318,6 +314,9 @@ func (daemon *Daemon) createNetwork(ctx context.Context, cfg *config.Config, cre
 	enableIPv4 := true
 	if create.EnableIPv4 != nil {
 		enableIPv4 = *create.EnableIPv4
+		// Make sure there's no conflicting DefaultNetworkOpts value (it'd be ignored but
+		// would look wrong in inspect output).
+		delete(networkOptions, netlabel.EnableIPv4)
 	} else if v, ok := networkOptions[netlabel.EnableIPv4]; ok {
 		var err error
 		if enableIPv4, err = strconv.ParseBool(v); err != nil {
@@ -328,6 +327,9 @@ func (daemon *Daemon) createNetwork(ctx context.Context, cfg *config.Config, cre
 	var enableIPv6 bool
 	if create.EnableIPv6 != nil {
 		enableIPv6 = *create.EnableIPv6
+		// Make sure there's no conflicting DefaultNetworkOpts value (it'd be ignored but
+		// would look wrong in inspect output).
+		delete(networkOptions, netlabel.EnableIPv6)
 	} else if v, ok := networkOptions[netlabel.EnableIPv6]; ok {
 		var err error
 		if enableIPv6, err = strconv.ParseBool(v); err != nil {
@@ -420,10 +422,13 @@ func (daemon *Daemon) createNetwork(ctx context.Context, cfg *config.Config, cre
 func (daemon *Daemon) pluginRefCount(driver, capability string, mode int) {
 	var builtinDrivers []string
 
-	if capability == driverapi.NetworkPluginEndpointType {
+	switch capability {
+	case driverapi.NetworkPluginEndpointType:
 		builtinDrivers = daemon.netController.BuiltinDrivers()
-	} else if capability == ipamapi.PluginEndpointType {
+	case ipamapi.PluginEndpointType:
 		builtinDrivers = daemon.netController.BuiltinIPAMDrivers()
+	default:
+		// other capabilities can be ignored for now
 	}
 
 	for _, d := range builtinDrivers {
@@ -583,14 +588,14 @@ func (daemon *Daemon) deleteNetwork(nw *libnetwork.Network, dynamic bool) error 
 }
 
 // GetNetworks returns a list of all networks
-func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkListConfig) (networks []networktypes.Inspect, err error) {
+func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkListConfig) ([]networktypes.Inspect, error) {
 	var idx map[string]*libnetwork.Network
 	if config.Detailed {
 		idx = make(map[string]*libnetwork.Network)
 	}
 
 	allNetworks := daemon.getAllNetworks()
-	networks = make([]networktypes.Inspect, 0, len(allNetworks))
+	networks := make([]networktypes.Inspect, 0, len(allNetworks))
 	for _, n := range allNetworks {
 		nr := buildNetworkResource(n)
 		networks = append(networks, nr)
@@ -599,6 +604,7 @@ func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkLis
 		}
 	}
 
+	var err error
 	networks, err = network.FilterNetworks(networks, filter)
 	if err != nil {
 		return nil, err

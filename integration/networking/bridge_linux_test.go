@@ -350,11 +350,13 @@ func TestBridgeINC(t *testing.T) {
 // TestBridgeINCRouted makes sure a container on a gateway-mode=nat network can establish
 // a connection to a container on a gateway-mode=routed network, but not vice-versa.
 func TestBridgeINCRouted(t *testing.T) {
+	skip.If(t, testEnv.IsRootless(), "can't set filter-forward policy in rootless netns")
 	ctx := setupTest(t)
 
 	d := daemon.New(t)
 	d.StartWithBusybox(ctx, t)
 	t.Cleanup(func() { d.Stop(t) })
+	firewallBackend := d.FirewallBackendDriver(t)
 
 	c := d.NewClientT(t)
 	t.Cleanup(func() { c.Close() })
@@ -454,7 +456,7 @@ func TestBridgeINCRouted(t *testing.T) {
 	}
 
 	for _, fwdPolicy := range []string{"ACCEPT", "DROP"} {
-		networking.SetFilterForwardPolicies(t, fwdPolicy)
+		networking.SetFilterForwardPolicies(t, firewallBackend, fwdPolicy)
 		t.Run(fwdPolicy, func(t *testing.T) {
 			for _, tc := range testcases {
 				t.Run(tc.name+"/v4/ping", func(t *testing.T) {
@@ -494,37 +496,39 @@ func TestBridgeINCRouted(t *testing.T) {
 	}
 }
 
-// TestRoutedAccessToPublishedPort checks that:
-//   - with docker-proxy enabled, a container in a gw-mode=routed network can access a port
-//     published to the host by a container in a gw-mode=nat network.
-//   - if the proxy is disabled, those packets are dropped by the network isolation rules
-//   - working around those INC rules by adding a rule to DOCKER-USER enables access to the
-//     published port (so, packets from the mode-routed network are still DNAT'd).
+// TestAccessToPublishedPort checks that a container in one network can
+// access a port published to the host by a container in another network,
+// with various combinations of gateway-mode, with and without the
+// userland proxy.
 //
 // Regression test for https://github.com/moby/moby/issues/49509
-func TestRoutedAccessToPublishedPort(t *testing.T) {
+func TestAccessToPublishedPort(t *testing.T) {
 	skip.If(t, testEnv.IsRootless, "Published port not accessible from rootless netns")
 
 	ctx := setupTest(t)
 
 	testcases := []struct {
 		name          string
+		clientGwMode  string
 		userlandProxy bool
-		skipINC       bool
-		expResponse   bool
 	}{
 		{
-			name:          "proxy=true/skipICC=false",
+			name:          "client=routed/proxy=true",
+			clientGwMode:  "routed",
 			userlandProxy: true,
-			expResponse:   true,
 		},
 		{
-			name: "proxy=false/skipICC=false",
+			name:         "client=routed/proxy=false",
+			clientGwMode: "routed",
 		},
 		{
-			name:        "proxy=false/skipICC=true",
-			skipINC:     true,
-			expResponse: true,
+			name:          "client=nat/proxy=true",
+			clientGwMode:  "nat",
+			userlandProxy: true,
+		},
+		{
+			name:         "client=nat/proxy=false",
+			clientGwMode: "nat",
 		},
 	}
 
@@ -537,53 +541,32 @@ func TestRoutedAccessToPublishedPort(t *testing.T) {
 			c := d.NewClientT(t)
 			defer c.Close()
 
-			const natNetName = "tnet-nat"
-			const natBridgeName = "br-nat"
-			network.CreateNoError(ctx, t, c, natNetName,
+			const serverNetName = "tnet-server"
+			network.CreateNoError(ctx, t, c, serverNetName,
 				network.WithDriver("bridge"),
 				network.WithIPv6(),
-				network.WithOption(bridge.BridgeName, natBridgeName),
+				network.WithOption(bridge.BridgeName, "br-server"),
 			)
-			defer network.RemoveNoError(ctx, t, c, natNetName)
+			defer network.RemoveNoError(ctx, t, c, serverNetName)
 
 			ctrId := container.Run(ctx, t, c,
-				container.WithNetworkMode(natNetName),
-				container.WithName("ctr-nat"),
+				container.WithNetworkMode(serverNetName),
+				container.WithName("ctr-server"),
 				container.WithExposedPorts("80/tcp"),
 				container.WithPortMap(nat.PortMap{"80/tcp": {nat.PortBinding{HostPort: "8080"}}}),
 				container.WithCmd("httpd", "-f"),
 			)
 			defer c.ContainerRemove(ctx, ctrId, containertypes.RemoveOptions{Force: true})
 
-			const routedNetName = "tnet-routed"
-			network.CreateNoError(ctx, t, c, routedNetName,
+			const clientNetName = "tnet-client"
+			network.CreateNoError(ctx, t, c, clientNetName,
 				network.WithDriver("bridge"),
 				network.WithIPv6(),
-				network.WithOption(bridge.BridgeName, "br-routed"),
-				network.WithOption(bridge.IPv4GatewayMode, "routed"),
-				network.WithOption(bridge.IPv6GatewayMode, "routed"),
+				network.WithOption(bridge.BridgeName, "br-client"),
+				network.WithOption(bridge.IPv4GatewayMode, tc.clientGwMode),
+				network.WithOption(bridge.IPv6GatewayMode, tc.clientGwMode),
 			)
-			defer network.RemoveNoError(ctx, t, c, routedNetName)
-
-			// With docker-proxy disabled, a container can't normally access a port published
-			// from a container in a different bridge network. But, users can add rules to
-			// the DOCKER-USER chain to get around that limitation of docker's iptables rules.
-			// Do that here, if the test requires it.
-			if tc.skipINC {
-				for _, ipv := range []iptables.IPVersion{iptables.IPv4, iptables.IPv6} {
-					rule := iptables.Rule{
-						IPVer: ipv, Table: iptables.Filter, Chain: "DOCKER-USER",
-						Args: []string{"-o", natBridgeName, "-j", "ACCEPT"},
-					}
-					err := rule.Insert()
-					assert.NilError(t, err)
-					defer func() {
-						if err := rule.Delete(); err != nil {
-							t.Errorf("Failed to delete %s DOCKER-USER rule: %v", ipv, err)
-						}
-					}()
-				}
-			}
+			defer network.RemoveNoError(ctx, t, c, clientNetName)
 
 			// Use the default bridge addresses as host addresses (like "host-gateway", but
 			// there's no way to tell wget to prefer ipv4/ipv6 transport, so just use the
@@ -598,17 +581,148 @@ func TestRoutedAccessToPublishedPort(t *testing.T) {
 				t.Run(ipv, func(t *testing.T) {
 					url := "http://" + net.JoinHostPort(ipamCfg.Gateway, "8080")
 					res := container.RunAttach(ctx, t, c,
-						container.WithNetworkMode(routedNetName),
+						container.WithNetworkMode(clientNetName),
 						container.WithCmd("wget", "-O-", "-T3", url),
 					)
-					if tc.expResponse {
+					// 404 Not Found means the server responded, but it's got nothing to serve.
+					assert.Check(t, is.Contains(res.Stderr.String(), "404 Not Found"), "url: %s", url)
+				})
+			}
+		})
+	}
+}
+
+// TestInterNetworkDirectRouting checks whether containers in one network
+// can access ports on container addresses in other networks for combinations
+// of gateway mode, published and unpublished ports, with and without the
+// userland-proxy. (This is about direct routing between containers, so the
+// docker-proxy shouldn't be involved - but the firewall config is a bit
+// different, so it's worth testing.)
+//
+// Regression test for https://github.com/moby/moby/issues/49509
+func TestInterNetworkDirectRouting(t *testing.T) {
+	ctx := setupTest(t)
+
+	testcases := []struct {
+		name          string
+		serverGwMode  string
+		userlandProxy bool
+		expPubResp    bool
+		expUnpubResp  bool
+	}{
+		{
+			name:          "server=nat/proxy=true",
+			serverGwMode:  "nat",
+			userlandProxy: true,
+			expPubResp:    false, // Direct routing is blocked by raw-prerouting rules.
+			expUnpubResp:  false, // Direct routing is blocked by raw-prerouting rules.
+		},
+		{
+			name:         "server=nat/proxy=false",
+			serverGwMode: "nat",
+			expPubResp:   false, // Direct routing is blocked by raw-prerouting rules.
+			expUnpubResp: false, // Direct routing is blocked by raw-prerouting rules.
+		},
+		{
+			name:          "server=routed/proxy=true",
+			serverGwMode:  "routed",
+			userlandProxy: true,
+			expPubResp:    true,
+			expUnpubResp:  false, // Unpublished ports are blocked by port-filtering rules.
+		},
+		{
+			name:         "server=routed/proxy=false",
+			serverGwMode: "routed",
+			expPubResp:   true,
+			expUnpubResp: false, // Unpublished ports are blocked by port-filtering rules.
+		},
+		{
+			name:          "server=nat-unprotected/proxy=true",
+			serverGwMode:  "nat-unprotected",
+			userlandProxy: true,
+			expPubResp:    true,
+			expUnpubResp:  true,
+		},
+		{
+			name:         "server=nat-unprotected/proxy=false",
+			serverGwMode: "nat-unprotected",
+			expPubResp:   true,
+			expUnpubResp: true,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := daemon.New(t)
+			d.StartWithBusybox(ctx, t, "--ipv6", "--userland-proxy="+strconv.FormatBool(tc.userlandProxy))
+			defer d.Stop(t)
+
+			c := d.NewClientT(t)
+			defer c.Close()
+
+			const serverNetName = "tnet-server"
+			network.CreateNoError(ctx, t, c, serverNetName,
+				network.WithDriver("bridge"),
+				network.WithIPv6(),
+				network.WithOption(bridge.BridgeName, "br-server"),
+				network.WithOption(bridge.IPv4GatewayMode, tc.serverGwMode),
+				network.WithOption(bridge.IPv6GatewayMode, tc.serverGwMode),
+			)
+			defer network.RemoveNoError(ctx, t, c, serverNetName)
+
+			ctrPubId := container.Run(ctx, t, c,
+				container.WithNetworkMode(serverNetName),
+				container.WithName("ctr-pub"),
+				container.WithExposedPorts("80/tcp"),
+				container.WithPortMap(nat.PortMap{"80/tcp": {nat.PortBinding{HostPort: "8080"}}}),
+				container.WithCmd("httpd", "-f"),
+			)
+			defer c.ContainerRemove(ctx, ctrPubId, containertypes.RemoveOptions{Force: true})
+			inspPub := container.Inspect(ctx, t, c, ctrPubId)
+			pub4 := inspPub.NetworkSettings.Networks[serverNetName].IPAddress
+			pub6 := inspPub.NetworkSettings.Networks[serverNetName].GlobalIPv6Address
+
+			ctrUnpubId := container.Run(ctx, t, c,
+				container.WithNetworkMode(serverNetName),
+				container.WithName("ctr-unpub"),
+				container.WithCmd("httpd", "-f"),
+			)
+			defer c.ContainerRemove(ctx, ctrUnpubId, containertypes.RemoveOptions{Force: true})
+			inspUnpub := container.Inspect(ctx, t, c, ctrUnpubId)
+			unpub4 := inspUnpub.NetworkSettings.Networks[serverNetName].IPAddress
+			unpub6 := inspUnpub.NetworkSettings.Networks[serverNetName].GlobalIPv6Address
+
+			const clientNetName = "tnet-client"
+			network.CreateNoError(ctx, t, c, clientNetName,
+				network.WithDriver("bridge"),
+				network.WithIPv6(),
+				network.WithOption(bridge.BridgeName, "br-client"),
+			)
+			defer network.RemoveNoError(ctx, t, c, clientNetName)
+
+			checkHTTP := func(addr string, expResp bool) func(t *testing.T) {
+				return func(t *testing.T) {
+					t.Parallel()
+					t.Helper()
+					url := "http://" + net.JoinHostPort(addr, "80")
+					res := container.RunAttach(ctx, t, c,
+						container.WithNetworkMode(clientNetName),
+						container.WithCmd("wget", "-O-", "-T3", url),
+					)
+					if expResp {
 						// 404 Not Found means the server responded, but it's got nothing to serve.
 						assert.Check(t, is.Contains(res.Stderr.String(), "404 Not Found"), "url: %s", url)
 					} else {
 						assert.Check(t, is.Contains(res.Stderr.String(), "download timed out"), "url: %s", url)
 					}
-				})
+				}
 			}
+			t.Run("w", func(t *testing.T) { // Wait for the parallel tests to complete.
+				t.Run("ipv4/pub", checkHTTP(pub4, tc.expPubResp))
+				t.Run("ipv6/pub", checkHTTP(pub6, tc.expPubResp))
+				t.Run("ipv4/unpub", checkHTTP(unpub4, tc.expUnpubResp))
+				t.Run("ipv6/unpub", checkHTTP(unpub6, tc.expUnpubResp))
+			})
 		})
 	}
 }
@@ -625,7 +739,7 @@ func TestDefaultBridgeIPv6(t *testing.T) {
 		},
 		{
 			name:          "IPv6 ULA",
-			fixed_cidr_v6: "fd00:1234::/64",
+			fixed_cidr_v6: "fd00:1235::/64",
 		},
 		{
 			name:          "IPv6 LLA only",
@@ -633,7 +747,7 @@ func TestDefaultBridgeIPv6(t *testing.T) {
 		},
 		{
 			name:          "IPv6 nonstandard LLA only",
-			fixed_cidr_v6: "fe80:1234::/64",
+			fixed_cidr_v6: "fe80:1236::/64",
 		},
 	}
 
@@ -731,16 +845,16 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 					// Modify that prefix, the default bridge's address must be deleted and re-added.
 					// The bridge must still have an address in the required (standard) LL subnet.
 					stepName:    "Nonstandard LL prefix - address change",
-					fixedCIDRV6: "fe80:1234::/32",
-					expAddrs:    []string{"fe80:1234::1/32", "fe80::"},
+					fixedCIDRV6: "fe80:1237::/32",
+					expAddrs:    []string{"fe80:1237::1/32", "fe80::"},
 				},
 				{
 					// Modify the prefix length, the addresses should not change.
 					stepName:    "Modify LL prefix - no address change",
-					fixedCIDRV6: "fe80:1234::/64",
+					fixedCIDRV6: "fe80:1238::/64",
 					// The prefix length displayed by 'ip a' is not updated - it's informational, and
 					// can't be changed without unnecessarily deleting and re-adding the address.
-					expAddrs: []string{"fe80:1234::1/", "fe80::"},
+					expAddrs: []string{"fe80:1238::1/", "fe80::"},
 				},
 			},
 		},
@@ -1030,16 +1144,23 @@ func TestNoIP6Tables(t *testing.T) {
 			id := container.Run(ctx, t, c, container.WithNetworkMode(netName))
 			defer c.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
 
-			res, err := exec.Command("/usr/sbin/ip6tables-save").CombinedOutput()
-			assert.NilError(t, err)
-			if tc.expIPTables {
-				assert.Check(t, is.Contains(string(res), subnet))
-				assert.Check(t, is.Contains(string(res), bridgeName))
+			var cmd *exec.Cmd
+			if d.FirewallBackendDriver(t) == "nftables" {
+				cmd = exec.Command("nft", "list", "table", "ip6", "docker-bridges")
 			} else {
-				assert.Check(t, !strings.Contains(string(res), subnet),
-					fmt.Sprintf("Didn't expect to find '%s' in '%s'", subnet, string(res)))
-				assert.Check(t, !strings.Contains(string(res), bridgeName),
-					fmt.Sprintf("Didn't expect to find '%s' in '%s'", bridgeName, string(res)))
+				cmd = exec.Command("/usr/sbin/ip6tables-save")
+			}
+			res, err := cmd.CombinedOutput()
+			assert.NilError(t, err)
+			dump := string(res)
+			if tc.expIPTables {
+				assert.Check(t, is.Contains(dump, subnet))
+				assert.Check(t, is.Contains(dump, bridgeName))
+			} else {
+				assert.Check(t, !strings.Contains(dump, subnet),
+					fmt.Sprintf("Didn't expect to find '%s' in '%s'", subnet, dump))
+				assert.Check(t, !strings.Contains(dump, bridgeName),
+					fmt.Sprintf("Didn't expect to find '%s' in '%s'", bridgeName, dump))
 			}
 		})
 	}
@@ -1500,7 +1621,7 @@ func TestAdvertiseAddresses(t *testing.T) {
 				network.WithIPAM("172.22.22.0/24", "172.22.22.1"),
 			}, tc.netOpts...)
 			if tc.ipv6LinkLocal {
-				netOpts = append(netOpts, network.WithIPAM("fe80:1234::/64", "fe80:1234::1"))
+				netOpts = append(netOpts, network.WithIPAM("fe80:1240::/64", "fe80:1240::1"))
 			} else {
 				netOpts = append(netOpts, network.WithIPAM("fd3c:e70a:962c::/64", "fd3c:e70a:962c::1"))
 			}
@@ -1523,7 +1644,7 @@ func TestAdvertiseAddresses(t *testing.T) {
 			const ctr2Addr4 = "172.22.22.22"
 			ctr2Addr6 := "fd3c:e70a:962c::2222"
 			if tc.ipv6LinkLocal {
-				ctr2Addr6 = "fe80:1234::2222"
+				ctr2Addr6 = "fe80:1240::2222"
 			}
 			ctr2Id := container.Run(ctx, t, c,
 				container.WithName(ctr2Name),
@@ -1688,6 +1809,8 @@ func TestNetworkInspectGateway(t *testing.T) {
 func TestDropInForwardChain(t *testing.T) {
 	skip.If(t, networking.FirewalldRunning(), "can't use firewalld in host netns to add rules in L3Segment")
 	skip.If(t, testEnv.IsRootless, "rootless has its own netns")
+	skip.If(t, !strings.Contains(testEnv.FirewallBackendDriver(), "iptables"),
+		"test is iptables specific, and iptables isn't in use")
 
 	// Run the test in its own netns, to avoid interfering with iptables on the test host.
 	const l3SegHost = "difc"

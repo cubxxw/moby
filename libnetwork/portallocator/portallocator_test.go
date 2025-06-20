@@ -93,7 +93,7 @@ func TestReleaseUnreadledPort(t *testing.T) {
 func TestUnknowProtocol(t *testing.T) {
 	p := newInstance()
 
-	if _, err := p.RequestPort(net.IPv4zero, "tcpp", 0); err != errUnknownProtocol {
+	if _, err := p.RequestPort(net.IPv4zero, "tcpp", 0); !errors.Is(err, errUnknownProtocol) {
 		t.Fatalf("Expected error %s got %s", errUnknownProtocol, err)
 	}
 }
@@ -112,7 +112,7 @@ func TestAllocateAllPorts(t *testing.T) {
 		}
 	}
 
-	if _, err := p.RequestPort(net.IPv4zero, "tcp", 0); err != errAllPortsAllocated {
+	if _, err := p.RequestPort(net.IPv4zero, "tcp", 0); !errors.Is(err, errAllPortsAllocated) {
 		t.Fatalf("Expected error %s got %s", errAllPortsAllocated, err)
 	}
 
@@ -147,7 +147,7 @@ func TestAllocateAllPorts(t *testing.T) {
 func BenchmarkAllocatePorts(b *testing.B) {
 	p := newInstance()
 
-	for i := 0; i < b.N; i++ {
+	for n := 0; n < b.N; n++ {
 		for i := 0; i <= p.end-p.begin; i++ {
 			port, err := p.RequestPort(net.IPv4zero, "tcp", 0)
 			if err != nil {
@@ -281,7 +281,7 @@ func TestPortAllocationWithCustomRange(t *testing.T) {
 		t.Fatal("Allocated the same port from a custom range")
 	}
 	// request 3rd port from the range of 2
-	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, end); err != errAllPortsAllocated {
+	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, end); !errors.Is(err, errAllPortsAllocated) {
 		t.Fatalf("Expected error %s got %s", errAllPortsAllocated, err)
 	}
 }
@@ -319,7 +319,7 @@ func TestRequestPortForMultipleIPs(t *testing.T) {
 
 	// Same single-port range, expect an error.
 	_, err = p.RequestPortsInRange(addrs, "tcp", 10000, 10000)
-	assert.Check(t, is.Error(err, "Bind for 127.0.0.1:10000 failed: port is already allocated"))
+	assert.Check(t, is.ErrorContains(err, "port is already allocated"))
 
 	// Release the port from one address.
 	p.ReleasePort(addrs[0], "tcp", 10000)
@@ -343,4 +343,16 @@ func TestRequestPortForMultipleIPs(t *testing.T) {
 		assert.Check(t, err)
 		assert.Check(t, is.Equal(port, i))
 	}
+}
+
+func TestMixUnspecAndSpecificAddrs(t *testing.T) {
+	p := newInstance()
+
+	port, err := p.RequestPort(net.IPv4(127, 0, 0, 1), "udp", 0)
+	assert.Check(t, err)
+	assert.Check(t, is.Equal(port, p.begin))
+
+	port, err = p.RequestPort(net.IPv4zero, "udp", 0)
+	assert.Check(t, err)
+	assert.Check(t, is.Equal(port, p.begin+1))
 }

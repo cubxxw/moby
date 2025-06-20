@@ -1,4 +1,4 @@
-package local // import "github.com/docker/docker/libcontainerd/local"
+package local
 
 import (
 	"io"
@@ -13,12 +13,12 @@ type autoClosingReader struct {
 	sync.Once
 }
 
-func (r *autoClosingReader) Read(b []byte) (n int, err error) {
-	n, err = r.ReadCloser.Read(b)
+func (r *autoClosingReader) Read(b []byte) (int, error) {
+	n, err := r.ReadCloser.Read(b)
 	if err != nil {
 		r.Once.Do(func() { r.ReadCloser.Close() })
 	}
-	return
+	return n, err
 }
 
 func createStdInCloser(pipe io.WriteCloser, process hcsshim.Process) io.WriteCloser {

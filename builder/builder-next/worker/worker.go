@@ -158,20 +158,36 @@ func (w *Worker) Labels() map[string]string {
 // Platforms returns one or more platforms supported by the image.
 func (w *Worker) Platforms(noCache bool) []ocispec.Platform {
 	if noCache {
-		pm := make(map[string]struct{}, len(w.Opt.Platforms))
-		for _, p := range w.Opt.Platforms {
-			pm[platforms.Format(p)] = struct{}{}
-		}
-		for _, p := range archutil.SupportedPlatforms(noCache) {
-			if _, ok := pm[platforms.Format(p)]; !ok {
-				w.Opt.Platforms = append(w.Opt.Platforms, p)
-			}
-		}
+		w.Opt.Platforms = mergePlatforms(w.Opt.Platforms, archutil.SupportedPlatforms(noCache))
 	}
 	if len(w.Opt.Platforms) == 0 {
 		return []ocispec.Platform{platforms.DefaultSpec()}
 	}
 	return w.Opt.Platforms
+}
+
+// mergePlatforms merges the defined platforms with the supported platforms
+// and returns a new slice of platforms. It ensures no duplicates.
+func mergePlatforms(defined, supported []ocispec.Platform) []ocispec.Platform {
+	result := []ocispec.Platform{}
+	matchers := make([]platforms.MatchComparer, len(defined))
+	for i, p := range defined {
+		result = append(result, p)
+		matchers[i] = platforms.Only(p)
+	}
+	for _, p := range supported {
+		exists := false
+		for _, m := range matchers {
+			if m.Match(p) {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 // GCPolicy returns automatic GC Policy
@@ -567,15 +583,15 @@ func getLayers(ctx context.Context, descs []ocispec.Descriptor) ([]rootfs.Layer,
 
 func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	pw, _, _ := progress.NewFromContext(ctx)
-	now := time.Now()
+	s := time.Now()
 	st := progress.Status{
-		Started: &now,
+		Started: &s,
 	}
 	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
-		now := time.Now()
-		st.Completed = &now
+		c := time.Now()
+		st.Completed = &c
 		_ = pw.Write(id, st)
 		_ = pw.Close()
 		return err

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"runtime"
 	"strings"
@@ -14,9 +15,12 @@ import (
 
 	"github.com/Microsoft/hcsshim"
 	"github.com/containerd/log"
+	networkSettings "github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/libnetwork/drivers/windows"
+	winlibnetwork "github.com/docker/docker/libnetwork/drivers/windows"
 	"github.com/docker/docker/libnetwork/ipams/defaultipam"
 	"github.com/docker/docker/libnetwork/ipams/windowsipam"
+	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/pkg/errors"
 )
 
@@ -55,7 +59,7 @@ func (n *Network) startResolver() {
 			return
 		}
 
-		hnsresponse, err := hcsshim.HNSNetworkRequest("GET", hnsid, "")
+		hnsresponse, err := hcsshim.HNSNetworkRequest(http.MethodGet, hnsid, "")
 		if err != nil {
 			log.G(context.TODO()).Errorf("Resolver Setup/Start failed for container %s, %q", n.Name(), err)
 			return
@@ -81,6 +85,40 @@ func (n *Network) startResolver() {
 			}
 		}
 	})
+}
+
+var hnsOwnedNetNames = map[string]struct{}{
+	"Default Switch":         {},
+	"WSL (Hyper-V firewall)": {},
+}
+
+// IsPruneable returns true if n can be considered for removal as part of a
+// "docker network prune" (or system prune). The caller must still check that the
+// network should be removed. For example, it may have active endpoints.
+func (n *Network) IsPruneable() bool {
+	// Predefined networks (nat, host, ...) should never be removed.
+	name := n.Name()
+	if networkSettings.IsPredefined(name) {
+		return false
+	}
+	// Don't prune well-known host networks that Docker did not create, but
+	// that were adopted (added to the network store) before the HNSOwned
+	// label existed.
+	if _, ok := hnsOwnedNetNames[name]; ok {
+		return false
+	}
+	gd, ok := n.generic[netlabel.GenericData]
+	if !ok {
+		return true
+	}
+	// Don't prune networks that were marked as being created outside Docker
+	// when they were found on the host and adopted as Docker networks.
+	gdm, ok := gd.(map[string]string)
+	if !ok {
+		return true
+	}
+	_, ok = gdm[winlibnetwork.HNSOwned]
+	return !ok
 }
 
 // addEpToResolver configures the internal DNS resolver for an endpoint.

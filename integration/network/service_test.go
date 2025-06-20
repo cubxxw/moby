@@ -1,4 +1,4 @@
-package network // import "github.com/docker/docker/integration/network"
+package network
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	networktypes "github.com/docker/docker/api/types/network"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
@@ -36,7 +35,7 @@ func TestDaemonRestartWithLiveRestore(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
-	ctx := testutil.StartSpan(baseContext, t)
+	ctx := setupTest(t)
 
 	d := daemon.New(t)
 	defer d.Stop(t)
@@ -67,7 +66,7 @@ func TestDaemonDefaultNetworkPools(t *testing.T) {
 	// Remove docker0 bridge and the start daemon defining the predefined address pools
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
-	ctx := testutil.StartSpan(baseContext, t)
+	ctx := setupTest(t)
 
 	defaultNetworkBridge := "docker0"
 	delInterface(ctx, t, defaultNetworkBridge)
@@ -112,7 +111,7 @@ func TestDaemonRestartWithExistingNetwork(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
-	ctx := testutil.StartSpan(baseContext, t)
+	ctx := setupTest(t)
 
 	d := daemon.New(t)
 	d.Start(t)
@@ -148,7 +147,7 @@ func TestDaemonRestartWithExistingNetworkWithDefaultPoolRange(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
 
-	ctx := testutil.StartSpan(baseContext, t)
+	ctx := setupTest(t)
 
 	d := daemon.New(t)
 	d.Start(t)
@@ -203,7 +202,7 @@ func TestDaemonWithBipAndDefaultNetworkPool(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
 
-	ctx := testutil.StartSpan(baseContext, t)
+	ctx := setupTest(t)
 
 	d := daemon.New(t)
 	defer d.Stop(t)
@@ -246,7 +245,7 @@ func TestServiceWithPredefinedNetwork(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, c, serviceID, instances), swarm.ServicePoll)
 
-	_, _, err := c.ServiceInspectWithRaw(ctx, serviceID, types.ServiceInspectOptions{})
+	_, _, err := c.ServiceInspectWithRaw(ctx, serviceID, swarmtypes.ServiceInspectOptions{})
 	assert.NilError(t, err)
 
 	err = c.ServiceRemove(ctx, serviceID)
@@ -287,7 +286,7 @@ func TestServiceRemoveKeepsIngressNetwork(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, c, serviceID, instances), swarm.ServicePoll)
 
-	_, _, err := c.ServiceInspectWithRaw(ctx, serviceID, types.ServiceInspectOptions{})
+	_, _, err := c.ServiceInspectWithRaw(ctx, serviceID, swarmtypes.ServiceInspectOptions{})
 	assert.NilError(t, err)
 
 	err = c.ServiceRemove(ctx, serviceID)
@@ -334,7 +333,7 @@ func swarmIngressReady(ctx context.Context, client client.NetworkAPIClient) func
 
 func noServices(ctx context.Context, client client.ServiceAPIClient) func(log poll.LogT) poll.Result {
 	return func(log poll.LogT) poll.Result {
-		services, err := client.ServiceList(ctx, types.ServiceListOptions{})
+		services, err := client.ServiceList(ctx, swarmtypes.ServiceListOptions{})
 		switch {
 		case err != nil:
 			return poll.Error(err)
@@ -441,7 +440,7 @@ func TestServiceWithDefaultAddressPoolInit(t *testing.T) {
 
 	poll.WaitOn(t, swarm.RunningTasksCount(ctx, cli, serviceID, instances), swarm.ServicePoll)
 
-	_, _, err := cli.ServiceInspectWithRaw(ctx, serviceID, types.ServiceInspectOptions{})
+	_, _, err := cli.ServiceInspectWithRaw(ctx, serviceID, swarmtypes.ServiceInspectOptions{})
 	assert.NilError(t, err)
 
 	out, err := cli.NetworkInspect(ctx, overlayID, networktypes.InspectOptions{Verbose: true})

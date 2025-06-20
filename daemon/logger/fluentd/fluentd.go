@@ -1,6 +1,6 @@
 // Package fluentd provides the log driver for forwarding server logs
 // to fluentd endpoints.
-package fluentd // import "github.com/docker/docker/daemon/logger/fluentd"
+package fluentd
 
 import (
 	"context"
@@ -58,6 +58,11 @@ const (
 	requestAckKey             = "fluentd-request-ack"
 	retryWaitKey              = "fluentd-retry-wait"
 	subSecondPrecisionKey     = "fluentd-sub-second-precision"
+	// writeTimeoutKey can be used to specify the WriteTimeout config for fluentd.
+	// Ref: https://github.com/fluent/fluent-logger-golang/blob/5538e904aeb515c10a624da620581bdf420d4b8a/fluent/fluent.go#L55
+	// This allows fluentd to give up unhealthy connections and not be blocked forever
+	// when downstream connections get unhealthy.
+	writeTimeoutKey = "fluentd-write-timeout"
 )
 
 func init() {
@@ -156,6 +161,7 @@ func ValidateLogOpt(cfg map[string]string) error {
 		case requestAckKey:
 		case retryWaitKey:
 		case subSecondPrecisionKey:
+		case writeTimeoutKey:
 			// Accepted
 		default:
 			return errors.Errorf("unknown log opt '%s' for fluentd log driver", key)
@@ -194,9 +200,15 @@ func parseConfig(cfg map[string]string) (fluent.Config, error) {
 
 	maxRetries := defaultMaxRetries
 	if cfg[maxRetriesKey] != "" {
-		mr64, err := strconv.ParseUint(cfg[maxRetriesKey], 10, strconv.IntSize)
+		mr64, err := strconv.ParseUint(cfg[maxRetriesKey], 10, 32)
 		if err != nil {
 			return config, err
+		}
+
+		// cap to MaxInt32 to prevent overflowing, and which is documented on
+		// defaultMaxRetries to be the limit above which things fail.
+		if mr64 > math.MaxInt32 {
+			return config, errors.New("invalid fluentd-max-retries: value out of range")
 		}
 		maxRetries = int(mr64)
 	}
@@ -237,6 +249,17 @@ func parseConfig(cfg map[string]string) (fluent.Config, error) {
 		}
 	}
 
+	writeTimeout := time.Duration(0)
+	if cfg[writeTimeoutKey] != "" {
+		if d, err := time.ParseDuration(cfg[writeTimeoutKey]); err != nil {
+			return config, errors.Wrapf(err, "invalid value for %s: value must be a duration", writeTimeoutKey)
+		} else if d < 0 {
+			return config, errors.Errorf("invalid value for %s: value must be a duration that is non-negative", writeTimeoutKey)
+		} else {
+			writeTimeout = d
+		}
+	}
+
 	config = fluent.Config{
 		FluentPort:             loc.port,
 		FluentHost:             loc.host,
@@ -250,6 +273,7 @@ func parseConfig(cfg map[string]string) (fluent.Config, error) {
 		SubSecondPrecision:     subSecondPrecision,
 		RequestAck:             requestAck,
 		ForceStopAsyncSend:     async,
+		WriteTimeout:           writeTimeout,
 	}
 
 	return config, nil

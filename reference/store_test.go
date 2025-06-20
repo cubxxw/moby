@@ -1,13 +1,14 @@
-package reference // import "github.com/docker/docker/reference"
+package reference
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
-	"github.com/docker/docker/errdefs"
 	"github.com/opencontainers/go-digest"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -162,13 +163,13 @@ func TestAddDeleteGet(t *testing.T) {
 		t.Fatalf("error redundantly adding to store: %v", err)
 	}
 	err = store.AddDigest(ref5.(reference.Canonical), testImageID3, false)
-	assert.Check(t, is.ErrorType(err, errdefs.IsConflict), "overwriting a digest with a different digest should fail")
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsConflict), "overwriting a digest with a different digest should fail")
 	err = store.AddDigest(ref5.(reference.Canonical), testImageID3, true)
-	assert.Check(t, is.ErrorType(err, errdefs.IsConflict), "overwriting a digest cannot be forced")
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsConflict), "overwriting a digest cannot be forced")
 
 	// Attempt to overwrite with force == false
 	err = store.AddTag(ref4, testImageID3, false)
-	assert.Check(t, is.ErrorType(err, errdefs.IsConflict), "did not get expected error on overwrite attempt")
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsConflict), "did not get expected error on overwrite attempt")
 	// Repeat to overwrite with force == true
 	if err = store.AddTag(ref4, testImageID3, true); err != nil {
 		t.Fatalf("failed to force tag overwrite: %v", err)
@@ -228,7 +229,7 @@ func TestAddDeleteGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not parse reference: %v", err)
 	}
-	if _, err = store.Get(nonExistRepo); err != ErrDoesNotExist {
+	if _, err = store.Get(nonExistRepo); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Get")
 	}
 
@@ -237,7 +238,7 @@ func TestAddDeleteGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not parse reference: %v", err)
 	}
-	if _, err = store.Get(nonExistTag); err != ErrDoesNotExist {
+	if _, err = store.Get(nonExistTag); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Get")
 	}
 
@@ -289,12 +290,12 @@ func TestAddDeleteGet(t *testing.T) {
 	}
 
 	// Delete should return ErrDoesNotExist for a nonexistent repo
-	if _, err = store.Delete(nonExistRepo); err != ErrDoesNotExist {
+	if _, err = store.Delete(nonExistRepo); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Delete")
 	}
 
 	// Delete should return ErrDoesNotExist for a nonexistent tag
-	if _, err = store.Delete(nonExistTag); err != ErrDoesNotExist {
+	if _, err = store.Delete(nonExistTag); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Delete")
 	}
 
@@ -302,19 +303,19 @@ func TestAddDeleteGet(t *testing.T) {
 	if deleted, err := store.Delete(ref1); err != nil || !deleted {
 		t.Fatal("Delete failed")
 	}
-	if _, err := store.Get(ref1); err != ErrDoesNotExist {
+	if _, err := store.Get(ref1); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Get")
 	}
 	if deleted, err := store.Delete(ref5); err != nil || !deleted {
 		t.Fatal("Delete failed")
 	}
-	if _, err := store.Get(ref5); err != ErrDoesNotExist {
+	if _, err := store.Get(ref5); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Get")
 	}
 	if deleted, err := store.Delete(nameOnly); err != nil || !deleted {
 		t.Fatal("Delete failed")
 	}
-	if _, err := store.Get(nameOnly); err != ErrDoesNotExist {
+	if _, err := store.Get(nameOnly); !errors.Is(err, ErrDoesNotExist) {
 		t.Fatal("Expected ErrDoesNotExist from Get")
 	}
 }
@@ -328,12 +329,12 @@ func TestInvalidTags(t *testing.T) {
 	ref, err := reference.ParseNormalizedNamed("sha256:abc")
 	assert.NilError(t, err)
 	err = store.AddTag(ref, id, true)
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 
 	// setting digest as a tag
 	ref, err = reference.ParseNormalizedNamed("registry@sha256:367eb40fd0330a7e464777121e39d2f5b3e8e23a1e159342e53ab05c9e4d94e6")
 	assert.NilError(t, err)
 
 	err = store.AddTag(ref, id, true)
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }

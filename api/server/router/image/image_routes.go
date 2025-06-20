@@ -1,4 +1,4 @@
-package image // import "github.com/docker/docker/api/server/router/image"
+package image
 
 import (
 	"context"
@@ -110,7 +110,7 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 			return errdefs.InvalidParameter(err)
 		}
 
-		if len(comment) == 0 {
+		if comment == "" {
 			comment = "Imported from " + src
 		}
 
@@ -323,7 +323,20 @@ func (ir *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, 
 	force := httputils.BoolValue(r, "force")
 	prune := !httputils.BoolValue(r, "noprune")
 
-	list, err := ir.backend.ImageDelete(ctx, name, force, prune)
+	var platforms []ocispec.Platform
+	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.50") {
+		p, err := httputils.DecodePlatforms(r.Form["platforms"])
+		if err != nil {
+			return err
+		}
+		platforms = p
+	}
+
+	list, err := ir.backend.ImageDelete(ctx, name, imagetypes.RemoveOptions{
+		Force:         force,
+		PruneChildren: prune,
+		Platforms:     platforms,
+	})
 	if err != nil {
 		return err
 	}
@@ -354,12 +367,20 @@ func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWrite
 		return errdefs.InvalidParameter(errors.New("conflicting options: manifests and platform options cannot both be set"))
 	}
 
-	imageInspect, err := ir.backend.ImageInspect(ctx, vars["name"], backend.ImageInspectOpts{
+	resp, err := ir.backend.ImageInspect(ctx, vars["name"], backend.ImageInspectOpts{
 		Manifests: manifests,
 		Platform:  platform,
 	})
 	if err != nil {
 		return err
+	}
+
+	// inspectResponse preserves fields in the response that have an
+	// "omitempty" in the OCI spec, but didn't omit such fields in
+	// legacy responses before API v1.50.
+	imageInspect := &inspectCompatResponse{
+		InspectResponse: resp,
+		legacyConfig:    legacyConfigFields["current"],
 	}
 
 	// Make sure we output empty arrays instead of nil. While Go nil slice is functionally equivalent to an empty slice,
@@ -388,6 +409,10 @@ func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWrite
 	if versions.LessThan(version, "1.48") {
 		imageInspect.Descriptor = nil
 	}
+	if versions.LessThan(version, "1.50") {
+		imageInspect.legacyConfig = legacyConfigFields["v1.49"]
+	}
+
 	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
 }
 
@@ -434,6 +459,7 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 	useNone := versions.LessThan(version, "1.43")
 	withVirtualSize := versions.LessThan(version, "1.44")
 	noDescriptor := versions.LessThan(version, "1.48")
+	noContainers := versions.LessThan(version, "1.51")
 	for _, img := range images {
 		if useNone {
 			if len(img.RepoTags) == 0 && len(img.RepoDigests) == 0 {
@@ -453,6 +479,9 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		}
 		if noDescriptor {
 			img.Descriptor = nil
+		}
+		if noContainers {
+			img.Containers = -1
 		}
 	}
 

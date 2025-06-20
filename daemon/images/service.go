@@ -1,4 +1,4 @@
-package images // import "github.com/docker/docker/daemon/images"
+package images
 
 import (
 	"context"
@@ -198,9 +198,9 @@ func (i *ImageService) ReleaseLayer(rwlayer container.RWLayer) error {
 	return nil
 }
 
-// LayerDiskUsage returns the number of bytes used by layer stores
+// ImageDiskUsage returns the number of bytes used by content and layer stores
 // called from disk_usage.go
-func (i *ImageService) LayerDiskUsage(ctx context.Context) (int64, error) {
+func (i *ImageService) ImageDiskUsage(ctx context.Context) (int64, error) {
 	var allLayersSize int64
 	layerRefs := i.getLayerRefs()
 	allLayers := i.layerStore.Map()

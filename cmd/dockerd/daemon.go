@@ -244,6 +244,18 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 
 	pluginStore := plugin.NewStore()
 
+	// Register the CDI driver before the daemon starts, as it might try to restore containers that depend on the CDI driver.
+	// Note that CDI is not inherently linux-specific, there are some linux-specific assumptions / implementations in the code that
+	// queries the properties of device on the host as well as performs the injection of device nodes and their access permissions into the OCI spec.
+	//
+	// In order to lift this restriction the following would have to be addressed:
+	// - Support needs to be added to the cdi package for injecting Windows devices: https://tags.cncf.io/container-device-interface/issues/28
+	// - The DeviceRequests API must be extended to non-linux platforms.
+	var cdiCache *cdi.Cache
+	if cdiEnabled(cli.Config) {
+		cdiCache = daemon.RegisterCDIDriver(cli.Config.CDISpecDirs...)
+	}
+
 	var apiServer apiserver.Server
 	cli.authzMiddleware, err = initMiddlewares(ctx, &apiServer, cli.Config, pluginStore)
 	if err != nil {
@@ -262,16 +274,6 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 		return errors.Wrap(err, "failed to validate authorization plugin")
 	}
 
-	// Note that CDI is not inherently linux-specific, there are some linux-specific assumptions / implementations in the code that
-	// queries the properties of device on the host as well as performs the injection of device nodes and their access permissions into the OCI spec.
-	//
-	// In order to lift this restriction the following would have to be addressed:
-	// - Support needs to be added to the cdi package for injecting Windows devices: https://tags.cncf.io/container-device-interface/issues/28
-	// - The DeviceRequests API must be extended to non-linux platforms.
-	if runtime.GOOS == "linux" && cli.Config.Features["cdi"] {
-		daemon.RegisterCDIDriver(cli.Config.CDISpecDirs...)
-	}
-
 	cli.d = d
 
 	if err := startMetricsServer(cli.Config.MetricsAddress); err != nil {
@@ -288,9 +290,15 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 	// initialized the cluster.
 	d.RestartSwarmContainers()
 
-	b, shutdownBuildKit, err := initBuildkit(ctx, d)
+	b, shutdownBuildKit, err := initBuildkit(ctx, d, cdiCache)
 	if err != nil {
 		return fmt.Errorf("error initializing buildkit: %w", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		if enabled, ok := d.Features()["buildkit"]; ok && enabled {
+			log.G(ctx).Warn("Buildkit feature is enabled in the daemon.json configuration file. Support for BuildKit on Windows is experimental, and enabling this feature may not work. Use at your own risk!")
+		}
 	}
 
 	routers := buildRouters(routerOptions{
@@ -383,7 +391,7 @@ func setOTLPProtoDefault() {
 	}
 }
 
-func initBuildkit(ctx context.Context, d *daemon.Daemon) (_ builderOptions, closeFn func(), _ error) {
+func initBuildkit(ctx context.Context, d *daemon.Daemon, cdiCache *cdi.Cache) (_ builderOptions, closeFn func(), _ error) {
 	log.G(ctx).Info("Initializing buildkit")
 	closeFn = func() {}
 
@@ -397,12 +405,8 @@ func initBuildkit(ctx context.Context, d *daemon.Daemon) (_ builderOptions, clos
 		return builderOptions{}, closeFn, err
 	}
 
-	var cdiSpecDirs []string
-	if d.Features()["cdi"] {
-		cdiSpecDirs = d.Config().CDISpecDirs
-	}
-
 	cfg := d.Config()
+
 	bk, err := buildkit.New(ctx, buildkit.Opt{
 		SessionManager:      sm,
 		Root:                filepath.Join(cfg.Root, "buildkit"),
@@ -425,7 +429,7 @@ func initBuildkit(ctx context.Context, d *daemon.Daemon) (_ builderOptions, clos
 			Exported: d.ImageExportedByBuildkit,
 			Named:    d.ImageNamedByBuildkit,
 		},
-		CDISpecDirs: cdiSpecDirs,
+		CDICache: cdiCache,
 	})
 	if err != nil {
 		return builderOptions{}, closeFn, errors.Wrap(err, "error creating buildkit instance")
@@ -652,8 +656,9 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 		// If CDISpecDirs is set to an empty string, we clear it to ensure that CDI is disabled.
 		conf.CDISpecDirs = nil
 	}
-	if !conf.Features["cdi"] {
-		// If the CDI feature is not enabled, we clear the CDISpecDirs to ensure that CDI is disabled.
+	// Only clear CDISpecDirs if CDI is explicitly disabled
+	if val, exists := conf.Features["cdi"]; exists && !val {
+		// If the CDI feature is explicitly disabled, we clear the CDISpecDirs to ensure that CDI is disabled.
 		conf.CDISpecDirs = nil
 	}
 
@@ -713,7 +718,6 @@ func buildRouters(opts routerOptions) []router.Router {
 		image.NewRouter(
 			opts.daemon.ImageService(),
 			opts.daemon.RegistryService(),
-			opts.daemon.ReferenceStore,
 		),
 		systemrouter.NewRouter(opts.daemon, opts.cluster, opts.builder.buildkit, opts.daemon.Features),
 		volume.NewRouter(opts.daemon.VolumesService(), opts.cluster),
@@ -1050,4 +1054,17 @@ func (cli *daemonCLI) initializeContainerd(ctx context.Context) (func(time.Durat
 
 	// Try to wait for containerd to shutdown
 	return r.WaitTimeout, nil
+}
+
+// cdiEnabled returns true if CDI feature wasn't explicitly disabled via
+// features.
+func cdiEnabled(conf *config.Config) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	val, ok := conf.Features["cdi"]
+	if !ok {
+		return true
+	}
+	return val
 }

@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	dconfig "github.com/docker/docker/daemon/config"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
 	"github.com/docker/docker/pkg/stringid"
@@ -361,8 +361,8 @@ func (s *DockerAPISuite) TestContainerAPIPause(c *testing.T) {
 	// Problematic on Windows as Windows does not support pause
 	testRequires(c, DaemonIsLinux)
 
-	getPaused := func(c *testing.T) []string {
-		return strings.Fields(cli.DockerCmd(c, "ps", "-f", "status=paused", "-q", "-a").Combined())
+	getPaused := func(t *testing.T) []string {
+		return strings.Fields(cli.DockerCmd(t, "ps", "-f", "status=paused", "-q", "-a").Combined())
 	}
 
 	out := cli.DockerCmd(c, "run", "-d", "busybox", "sleep", "30").Combined()
@@ -564,7 +564,7 @@ func (s *DockerAPISuite) TestContainerAPICreateOtherNetworkModes(c *testing.T) {
 	UtilCreateNetworkMode(c, "container:web1")
 }
 
-func UtilCreateNetworkMode(c *testing.T, networkMode container.NetworkMode) {
+func UtilCreateNetworkMode(t *testing.T, networkMode container.NetworkMode) {
 	config := container.Config{
 		Image: "busybox",
 	}
@@ -574,16 +574,16 @@ func UtilCreateNetworkMode(c *testing.T, networkMode container.NetworkMode) {
 	}
 
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
-	assert.NilError(c, err)
+	assert.NilError(t, err)
 	defer apiClient.Close()
 
-	ctr, err := apiClient.ContainerCreate(testutil.GetContext(c), &config, &hostConfig, &network.NetworkingConfig{}, nil, "")
-	assert.NilError(c, err)
+	ctr, err := apiClient.ContainerCreate(testutil.GetContext(t), &config, &hostConfig, &network.NetworkingConfig{}, nil, "")
+	assert.NilError(t, err)
 
-	containerJSON, err := apiClient.ContainerInspect(testutil.GetContext(c), ctr.ID)
-	assert.NilError(c, err)
+	containerJSON, err := apiClient.ContainerInspect(testutil.GetContext(t), ctr.ID)
+	assert.NilError(t, err)
 
-	assert.Equal(c, containerJSON.HostConfig.NetworkMode, networkMode, "Mismatched NetworkMode")
+	assert.Equal(t, containerJSON.HostConfig.NetworkMode, networkMode, "Mismatched NetworkMode")
 }
 
 func (s *DockerAPISuite) TestContainerAPICreateWithCpuSharesCpuset(c *testing.T) {
@@ -1391,7 +1391,7 @@ func (s *DockerAPISuite) TestContainerAPIDeleteWithEmptyName(c *testing.T) {
 	defer apiClient.Close()
 
 	err = apiClient.ContainerRemove(testutil.GetContext(c), "", container.RemoveOptions{})
-	assert.Check(c, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(c, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	assert.Check(c, is.ErrorContains(err, "value is empty"))
 }
 
@@ -1748,7 +1748,7 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsValidation(c *testing.T) {
 	for i, tc := range tests {
 		c.Run(fmt.Sprintf("case %d", i), func(c *testing.T) {
 			_, err = apiClient.ContainerCreate(testutil.GetContext(c), &tc.config, &tc.hostConfig, &network.NetworkingConfig{}, nil, "")
-			if len(tc.msg) > 0 {
+			if tc.msg != "" {
 				assert.ErrorContains(c, err, tc.msg, "%v", tests[i].config)
 			} else {
 				assert.NilError(c, err)
@@ -1958,7 +1958,7 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsCreate(c *testing.T) {
 
 			switch {
 			// Named volumes still exist after the container is removed
-			case tc.spec.Type == "volume" && len(tc.spec.Source) > 0:
+			case tc.spec.Type == "volume" && tc.spec.Source != "":
 				_, err := apiclient.VolumeInspect(ctx, mountPoint.Name)
 				assert.NilError(c, err)
 
@@ -1968,7 +1968,7 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsCreate(c *testing.T) {
 			// anonymous volumes are removed
 			default:
 				_, err := apiclient.VolumeInspect(ctx, mountPoint.Name)
-				assert.Check(c, is.ErrorType(err, errdefs.IsNotFound))
+				assert.Check(c, is.ErrorType(err, cerrdefs.IsNotFound))
 			}
 		})
 	}
@@ -1981,8 +1981,10 @@ func containerExit(ctx context.Context, apiclient client.APIClient, name string)
 			return poll.Error(err)
 		}
 		switch ctr.State.Status {
-		case "created", "running":
+		case container.StateCreated, container.StateRunning:
 			return poll.Continue("container %s is %s, waiting for exit", name, ctr.State.Status)
+		case container.StatePaused, container.StateRestarting, container.StateRemoving, container.StateExited, container.StateDead:
+			// done
 		}
 		return poll.Success()
 	}

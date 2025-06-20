@@ -1,4 +1,4 @@
-package events // import "github.com/docker/docker/daemon/events"
+package events
 
 import (
 	"sync"
@@ -94,12 +94,12 @@ func (e *Events) Log(action eventtypes.Action, eventType eventtypes.Type, actor 
 	// fill deprecated fields for container and images
 	switch eventType {
 	case eventtypes.ContainerEventType:
-		jm.ID = actor.ID
-		jm.Status = string(action)
-		jm.From = actor.Attributes["image"]
+		jm.ID = actor.ID                    //nolint:staticcheck // ignore SA1019: field is deprecated but set for backward compatibility.
+		jm.Status = string(action)          //nolint:staticcheck // ignore SA1019: field is deprecated but set for backward compatibility.
+		jm.From = actor.Attributes["image"] //nolint:staticcheck // ignore SA1019: field is deprecated but set for backward compatibility.
 	case eventtypes.ImageEventType:
-		jm.ID = actor.ID
-		jm.Status = string(action)
+		jm.ID = actor.ID           //nolint:staticcheck // ignore SA1019: field is deprecated but set for backward compatibility.
+		jm.Status = string(action) //nolint:staticcheck // ignore SA1019: field is deprecated but set for backward compatibility.
 	default:
 		// TODO(thaJeztah): make switch exhaustive
 	}

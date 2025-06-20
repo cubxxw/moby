@@ -6,7 +6,7 @@
 //
 // In implementing the various functions of the daemon, there is often
 // a method-specific struct for configuring the runtime behavior.
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/dialer"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	dist "github.com/docker/distribution"
@@ -36,7 +37,7 @@ import (
 	networktypes "github.com/docker/docker/api/types/network"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/volume"
+	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/container"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
@@ -52,7 +53,6 @@ import (
 	"github.com/docker/docker/distribution"
 	dmetadata "github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/dockerversion"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/internal/metrics"
 	"github.com/docker/docker/layer"
@@ -78,7 +78,7 @@ import (
 	"github.com/moby/sys/user"
 	"github.com/moby/sys/userns"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/semaphore"
@@ -86,6 +86,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"resenje.org/singleflight"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 type configStore struct {
@@ -131,9 +132,9 @@ type Daemon struct {
 	seccompProfile     []byte
 	seccompProfilePath string
 
-	usageContainers singleflight.Group[struct{}, []*containertypes.Summary]
+	usageContainers singleflight.Group[struct{}, *containertypes.DiskUsage]
 	usageImages     singleflight.Group[struct{}, []*imagetypes.Summary]
-	usageVolumes    singleflight.Group[struct{}, []*volume.Volume]
+	usageVolumes    singleflight.Group[struct{}, *volumetypes.DiskUsage]
 	usageLayer      singleflight.Group[struct{}, int64]
 
 	pruneRunning atomic.Bool
@@ -146,9 +147,11 @@ type Daemon struct {
 	// This is used for Windows which doesn't currently support running on containerd
 	// It stores metadata for the content store (used for manifest caching)
 	// This needs to be closed on daemon exit
-	mdDB *bbolt.DB
+	mdDB *bolt.DB
 
 	usesSnapshotter bool
+
+	CDICache *cdi.Cache
 }
 
 // ID returns the daemon id
@@ -335,10 +338,11 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 				// deprecated in v20.10 in favor of 'fluentd-async', and
 				// removed in v28.0.
 				// TODO(aker): remove this migration once the next LTS version of MCR is released.
-				if _, ok := c.HostConfig.LogConfig.Config["fluentd-async-connect"]; ok {
+				if v, ok := c.HostConfig.LogConfig.Config["fluentd-async-connect"]; ok {
 					if _, ok := c.HostConfig.LogConfig.Config["fluentd-async"]; !ok {
-						c.HostConfig.LogConfig.Config["fluentd-async"] = c.HostConfig.LogConfig.Config["fluentd-async-connect"]
+						c.HostConfig.LogConfig.Config["fluentd-async"] = v
 					}
+					delete(c.HostConfig.LogConfig.Config, "fluentd-async-connect")
 				}
 			}
 
@@ -360,7 +364,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 
 			var es *containerd.ExitStatus
 
-			if err := c.RestoreTask(context.Background(), daemon.containerd); err != nil && !errdefs.IsNotFound(err) {
+			if err := c.RestoreTask(context.Background(), daemon.containerd); err != nil && !cerrdefs.IsNotFound(err) {
 				logger(c).WithError(err).Error("failed to restore container with containerd")
 				return
 			}
@@ -377,13 +381,13 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 					if !alive {
 						logger(c).Debug("cleaning up dead container process")
 						es, err = tsk.Delete(context.Background())
-						if err != nil && !errdefs.IsNotFound(err) {
+						if err != nil && !cerrdefs.IsNotFound(err) {
 							logger(c).WithError(err).Error("failed to delete task from containerd")
 							return
 						}
 					} else if !cfg.LiveRestoreEnabled {
 						logger(c).Debug("shutting down container considered alive by containerd")
-						if err := daemon.shutdownContainer(c); err != nil && !errdefs.IsNotFound(err) {
+						if err := daemon.shutdownContainer(c); err != nil && !cerrdefs.IsNotFound(err) {
 							baseLogger.WithError(err).Error("error shutting down container")
 							return
 						}
@@ -495,6 +499,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 			}
 
 			c.Lock()
+			// TODO(thaJeztah): we no longer persist RemovalInProgress on disk, so this code is likely redundant; see https://github.com/moby/moby/pull/49968
 			if c.RemovalInProgress {
 				// We probably crashed in the middle of a removal, reset
 				// the flag.
@@ -697,7 +702,7 @@ func (daemon *Daemon) restartSwarmContainers(ctx context.Context, cfg *configSto
 func (daemon *Daemon) registerLink(parent, child *container.Container, alias string) error {
 	fullName := path.Join(parent.Name, alias)
 	if err := daemon.containersReplica.ReserveName(fullName, child.ID); err != nil {
-		if errdefs.IsConflict(err) {
+		if cerrdefs.IsConflict(err) {
 			log.G(context.TODO()).Warnf("error registering link for %s, to %s, as alias %s, ignoring: %v", parent.ID, child.ID, alias, err)
 			return nil
 		}
@@ -760,7 +765,7 @@ func (daemon *Daemon) IsSwarmCompatible() error {
 
 // NewDaemon sets up everything for the daemon to be able to service
 // requests from the webserver.
-func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store, authzMiddleware *authorization.Middleware) (daemon *Daemon, err error) {
+func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.Store, authzMiddleware *authorization.Middleware) (_ *Daemon, retErr error) {
 	// Verify platform-specific requirements.
 	// TODO(thaJeztah): this should be called before we try to create the daemon; perhaps together with the config validation.
 	if err := checkSystem(); err != nil {
@@ -841,7 +846,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// Ensure the daemon is properly shutdown if there is a failure during
 	// initialization
 	defer func() {
-		if err != nil {
+		if retErr != nil {
 			// Use a fresh context here. Passed context could be cancelled.
 			if err := d.Shutdown(context.Background()); err != nil {
 				log.G(ctx).Error(err)
@@ -1224,7 +1229,7 @@ func (daemon *Daemon) shutdownContainer(c *container.Container) error {
 
 	// Wait without timeout for the container to exit.
 	// Ignore the result.
-	<-c.Wait(ctx, container.WaitConditionNotRunning)
+	<-c.Wait(ctx, containertypes.WaitConditionNotRunning)
 	return nil
 }
 

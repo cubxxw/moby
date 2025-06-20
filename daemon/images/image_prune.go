@@ -1,4 +1,4 @@
-package images // import "github.com/docker/docker/daemon/images"
+package images
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/events"
@@ -114,7 +115,9 @@ deleteImagesLoop:
 
 			if shouldDelete {
 				for _, ref := range refs {
-					imgDel, err := i.ImageDelete(ctx, ref.String(), false, true)
+					imgDel, err := i.ImageDelete(ctx, ref.String(), imagetypes.RemoveOptions{
+						PruneChildren: true,
+					})
 					if imageDeleteFailed(ref.String(), err) {
 						continue
 					}
@@ -123,7 +126,9 @@ deleteImagesLoop:
 			}
 		} else {
 			hex := id.Digest().Encoded()
-			imgDel, err := i.ImageDelete(ctx, hex, false, true)
+			imgDel, err := i.ImageDelete(ctx, hex, imagetypes.RemoveOptions{
+				PruneChildren: true,
+			})
 			if imageDeleteFailed(hex, err) {
 				continue
 			}
@@ -158,7 +163,7 @@ func imageDeleteFailed(ref string, err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case errdefs.IsConflict(err), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case cerrdefs.IsConflict(err), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return true
 	default:
 		log.G(context.TODO()).Warnf("failed to prune image %s: %v", ref, err)

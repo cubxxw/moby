@@ -457,7 +457,7 @@ func getSvcRecords(t *testing.T, n *Network, key string) (addrs []netip.Addr, fo
 	sr, ok := n.ctrlr.svcRecords[n.id]
 	assert.Assert(t, ok)
 
-	lookup := func(svcMap *setmatrix.SetMatrix[svcMapEntry]) bool {
+	lookup := func(svcMap *setmatrix.SetMatrix[string, svcMapEntry]) bool {
 		mapEntryList, ok := svcMap.Get(key)
 		if !ok {
 			return false
@@ -821,14 +821,6 @@ func (b *badDriver) Type() string {
 
 func (b *badDriver) IsBuiltIn() bool {
 	return false
-}
-
-func (b *badDriver) ProgramExternalConnectivity(_ context.Context, nid, eid string, options map[string]interface{}) error {
-	return nil
-}
-
-func (b *badDriver) RevokeExternalConnectivity(nid, eid string) error {
-	return nil
 }
 
 func (b *badDriver) NetworkAllocate(id string, option map[string]string, ipV4Data, ipV6Data []driverapi.IPAMData) (map[string]string, error) {
