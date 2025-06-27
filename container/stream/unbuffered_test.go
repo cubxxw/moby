@@ -12,7 +12,7 @@ type dummyWriter struct {
 	failOnWrite bool
 }
 
-func (dw *dummyWriter) Write(p []byte) (n int, err error) {
+func (dw *dummyWriter) Write(p []byte) (int, error) {
 	if dw.failOnWrite {
 		return 0, errors.New("Fake fail")
 	}
@@ -120,7 +120,10 @@ func TestRaceUnbuffered(t *testing.T) {
 		writer.Add(devNullCloser(0))
 		c <- true
 	}()
-	writer.Write([]byte("hello"))
+	_, err := writer.Write([]byte("hello"))
+	if err != nil {
+		t.Error(err)
+	}
 	<-c
 }
 

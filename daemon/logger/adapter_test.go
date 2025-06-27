@@ -1,8 +1,9 @@
-package logger // import "github.com/docker/docker/daemon/logger"
+package logger
 
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -69,7 +70,7 @@ func (l *mockLoggingPlugin) StopLogging(file string) error {
 	return nil
 }
 
-func (l *mockLoggingPlugin) Capabilities() (cap Capability, err error) {
+func (l *mockLoggingPlugin) Capabilities() (Capability, error) {
 	return Capability{ReadLogs: true}, nil
 }
 
@@ -118,7 +119,7 @@ func (l *mockLoggingPlugin) waitLen(i int) {
 }
 
 func (l *mockLoggingPlugin) check(t *testing.T) {
-	if l.err != nil && l.err != io.EOF {
+	if l.err != nil && !errors.Is(l.err, io.EOF) {
 		t.Fatal(l.err)
 	}
 }

@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"bufio"
@@ -11,11 +11,11 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	testContainer "github.com/docker/docker/integration/internal/container"
 	net "github.com/docker/docker/integration/internal/network"
 	"github.com/docker/docker/oci"
@@ -66,7 +66,7 @@ func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 				"",
 			)
 			assert.Check(t, is.ErrorContains(err, tc.expectedError))
-			assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 		})
 	}
 }
@@ -79,8 +79,13 @@ func TestCreateByImageID(t *testing.T) {
 	assert.NilError(t, err)
 
 	imgIDWithAlgorithm := img.ID
-	imgID, _ := strings.CutPrefix(imgIDWithAlgorithm, "sha256:")
-	imgShortID := stringid.TruncateID(imgID)
+	assert.Assert(t, imgIDWithAlgorithm != "")
+
+	imgID, _ := strings.CutPrefix(img.ID, "sha256:")
+	assert.Assert(t, imgID != "")
+
+	imgShortID := stringid.TruncateID(img.ID)
+	assert.Assert(t, imgShortID != "")
 
 	testCases := []struct {
 		doc             string
@@ -104,13 +109,13 @@ func TestCreateByImageID(t *testing.T) {
 		{
 			doc:             "image with ID and algorithm as tag",
 			image:           "busybox:" + imgIDWithAlgorithm,
-			expectedErrType: errdefs.IsInvalidParameter,
+			expectedErrType: cerrdefs.IsInvalidArgument,
 			expectedErr:     "Error response from daemon: invalid reference format",
 		},
 		{
 			doc:             "image with ID as tag",
 			image:           "busybox:" + imgID,
-			expectedErrType: errdefs.IsNotFound,
+			expectedErrType: cerrdefs.IsNotFound,
 			expectedErr:     "Error response from daemon: No such image: busybox:" + imgID,
 		},
 	}
@@ -131,8 +136,8 @@ func TestCreateByImageID(t *testing.T) {
 				assert.Check(t, is.Error(err, tc.expectedErr))
 				assert.Check(t, is.ErrorType(err, tc.expectedErrType))
 			} else {
-				assert.Check(t, resp.ID != "")
 				assert.NilError(t, err)
+				assert.Check(t, resp.ID != "")
 			}
 			// cleanup the container if one was created.
 			_ = apiClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
@@ -160,7 +165,7 @@ func TestCreateLinkToNonExistingContainer(t *testing.T) {
 		"",
 	)
 	assert.Check(t, is.ErrorContains(err, "could not get container for no-such-container"))
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }
 
 func TestCreateWithInvalidEnv(t *testing.T) {
@@ -200,7 +205,7 @@ func TestCreateWithInvalidEnv(t *testing.T) {
 				"",
 			)
 			assert.Check(t, is.ErrorContains(err, tc.expectedError))
-			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 		})
 	}
 }
@@ -247,7 +252,7 @@ func TestCreateTmpfsMountsTarget(t *testing.T) {
 			"",
 		)
 		assert.Check(t, is.ErrorContains(err, tc.expectedError))
-		assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	}
 }
 
@@ -339,7 +344,7 @@ func TestCreateWithCustomMaskedPaths(t *testing.T) {
 		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
 		assert.NilError(t, err)
 
-		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, "exited"))
+		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, container.StateExited))
 
 		checkInspect(t, ctx, name, tc.expected)
 	}
@@ -417,7 +422,7 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
 		assert.NilError(t, err)
 
-		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, "exited"))
+		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, container.StateExited))
 
 		checkInspect(t, ctx, name, tc.expected)
 	}
@@ -502,7 +507,7 @@ func TestCreateWithInvalidHealthcheckParams(t *testing.T) {
 
 			resp, err := apiClient.ContainerCreate(ctx, &cfg, &container.HostConfig{}, nil, nil, "")
 			assert.Check(t, is.Equal(len(resp.Warnings), 0))
-			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 			assert.ErrorContains(t, err, tc.expectedErr)
 		})
 	}
@@ -572,7 +577,7 @@ func TestCreateDifferentPlatform(t *testing.T) {
 			Variant:      img.Variant,
 		}
 		_, err := apiClient.ContainerCreate(ctx, &container.Config{Image: "busybox:latest"}, &container.HostConfig{}, nil, &p, "")
-		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	})
 	t.Run("different cpu arch", func(t *testing.T) {
 		ctx := testutil.StartSpan(ctx, t)
@@ -582,7 +587,7 @@ func TestCreateDifferentPlatform(t *testing.T) {
 			Variant:      img.Variant,
 		}
 		_, err := apiClient.ContainerCreate(ctx, &container.Config{Image: "busybox:latest"}, &container.HostConfig{}, nil, &p, "")
-		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	})
 }
 
@@ -598,7 +603,7 @@ func TestCreateVolumesFromNonExistingContainer(t *testing.T) {
 		nil,
 		"",
 	)
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }
 
 // Test that we can create a container from an image that is for a different platform even if a platform was not specified
@@ -673,7 +678,7 @@ func TestCreateInvalidHostConfig(t *testing.T) {
 			}
 			resp, err := apiClient.ContainerCreate(ctx, &cfg, &tc.hc, nil, nil, "")
 			assert.Check(t, is.Equal(len(resp.Warnings), 0))
-			assert.Check(t, errdefs.IsInvalidParameter(err), "got: %T", err)
+			assert.Check(t, cerrdefs.IsInvalidArgument(err), "got: %T", err)
 			assert.Error(t, err, tc.expectedErr)
 		})
 	}

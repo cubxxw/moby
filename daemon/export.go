@@ -1,7 +1,8 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -22,7 +23,7 @@ func (daemon *Daemon) ContainerExport(ctx context.Context, name string, out io.W
 	}
 
 	if isWindows && ctr.ImagePlatform.OS == "windows" {
-		return fmt.Errorf("the daemon on this operating system does not support exporting Windows containers")
+		return errors.New("the daemon on this operating system does not support exporting Windows containers")
 	}
 
 	if ctr.IsDead() {

@@ -98,7 +98,7 @@ type Resolver struct {
 func NewResolver(address string, proxyDNS bool, backend DNSBackend) *Resolver {
 	r := &Resolver{
 		backend:     backend,
-		err:         fmt.Errorf("setup not done yet"),
+		err:         errors.New("setup not done yet"),
 		startCh:     make(chan struct{}, 1),
 		fwdSem:      semaphore.NewWeighted(maxConcurrent),
 		logInterval: rate.Sometimes{Interval: logInterval},
@@ -180,8 +180,8 @@ func (r *Resolver) Start() error {
 		return r.err
 	}
 
-	if err := r.setupIPTable(); err != nil {
-		return fmt.Errorf("setting up IP table rules failed: %v", err)
+	if err := r.setupNAT(context.TODO()); err != nil {
+		return fmt.Errorf("setting up DNAT/SNAT rules failed: %v", err)
 	}
 
 	s := &dns.Server{Handler: dns.HandlerFunc(r.serveDNS), PacketConn: r.conn}
@@ -216,7 +216,7 @@ func (r *Resolver) Stop() {
 	}
 	r.conn = nil
 	r.tcpServer = nil
-	r.err = fmt.Errorf("setup not done yet")
+	r.err = errors.New("setup not done yet")
 	r.fwdSem = semaphore.NewWeighted(maxConcurrent)
 }
 

@@ -1,18 +1,19 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/errdefs"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -22,7 +23,7 @@ func TestImageSearchAnyError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
 	_, err := client.ImageSearch(context.Background(), "some-image", registry.SearchOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInternal))
 }
 
 func TestImageSearchStatusUnauthorizedError(t *testing.T) {
@@ -30,7 +31,7 @@ func TestImageSearchStatusUnauthorizedError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusUnauthorized, "Unauthorized error")),
 	}
 	_, err := client.ImageSearch(context.Background(), "some-image", registry.SearchOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsUnauthorized))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsUnauthorized))
 }
 
 func TestImageSearchWithUnauthorizedErrorAndPrivilegeFuncError(t *testing.T) {
@@ -38,14 +39,12 @@ func TestImageSearchWithUnauthorizedErrorAndPrivilegeFuncError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusUnauthorized, "Unauthorized error")),
 	}
 	privilegeFunc := func(_ context.Context) (string, error) {
-		return "", fmt.Errorf("Error requesting privilege")
+		return "", errors.New("Error requesting privilege")
 	}
 	_, err := client.ImageSearch(context.Background(), "some-image", registry.SearchOptions{
 		PrivilegeFunc: privilegeFunc,
 	})
-	if err == nil || err.Error() != "Error requesting privilege" {
-		t.Fatalf("expected an error requesting privilege, got %v", err)
-	}
+	assert.Check(t, is.Error(err, "Error requesting privilege"))
 }
 
 func TestImageSearchWithUnauthorizedErrorAndAnotherUnauthorizedError(t *testing.T) {
@@ -58,7 +57,7 @@ func TestImageSearchWithUnauthorizedErrorAndAnotherUnauthorizedError(t *testing.
 	_, err := client.ImageSearch(context.Background(), "some-image", registry.SearchOptions{
 		PrivilegeFunc: privilegeFunc,
 	})
-	assert.Check(t, is.ErrorType(err, errdefs.IsUnauthorized))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsUnauthorized))
 }
 
 func TestImageSearchWithPrivilegedFuncNoError(t *testing.T) {
@@ -104,12 +103,8 @@ func TestImageSearchWithPrivilegedFuncNoError(t *testing.T) {
 		RegistryAuth:  "NotValid",
 		PrivilegeFunc: privilegeFunc,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %v", results)
-	}
+	assert.NilError(t, err)
+	assert.Check(t, is.Len(results, 1))
 }
 
 func TestImageSearchWithoutErrors(t *testing.T) {
@@ -150,10 +145,6 @@ func TestImageSearchWithoutErrors(t *testing.T) {
 			filters.Arg("stars", "3"),
 		),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected a result, got %v", results)
-	}
+	assert.NilError(t, err)
+	assert.Check(t, is.Len(results, 1))
 }

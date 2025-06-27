@@ -1,4 +1,4 @@
-package xfer // import "github.com/docker/docker/distribution/xfer"
+package xfer
 
 import (
 	"context"
@@ -52,9 +52,9 @@ type DownloadOption func(*LayerDownloadManager)
 
 // WithMaxDownloadAttempts configures the maximum number of download
 // attempts for a download manager.
-func WithMaxDownloadAttempts(max int) DownloadOption {
+func WithMaxDownloadAttempts(maxDownloadAttempts int) DownloadOption {
 	return func(dlm *LayerDownloadManager) {
-		dlm.maxDownloadAttempts = max
+		dlm.maxDownloadAttempts = maxDownloadAttempts
 	}
 }
 
@@ -266,7 +266,7 @@ func (ldm *LayerDownloadManager) makeDownloadFunc(descriptor DownloadDescriptor,
 				downloadReader io.ReadCloser
 				size           int64
 				err            error
-				attempt        int = 1
+				attempt        = 1
 			)
 
 			defer descriptor.Close()

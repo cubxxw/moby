@@ -1,9 +1,8 @@
-package cluster // import "github.com/docker/docker/daemon/cluster"
+package cluster
 
 import (
 	"context"
 
-	apitypes "github.com/docker/docker/api/types"
 	types "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/daemon/cluster/convert"
 	"github.com/docker/docker/errdefs"
@@ -12,7 +11,7 @@ import (
 )
 
 // GetNodes returns a list of all nodes known to a cluster.
-func (c *Cluster) GetNodes(options apitypes.NodeListOptions) ([]types.Node, error) {
+func (c *Cluster) GetNodes(options types.NodeListOptions) ([]types.Node, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 

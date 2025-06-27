@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package daemon // import "github.com/docker/docker/testutil/daemon"
+package daemon
 
 import (
 	"bufio"
@@ -153,7 +153,7 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		op(d)
 	}
 
-	if len(d.resolvConfContent) > 0 {
+	if d.resolvConfContent != "" {
 		path := filepath.Join(d.Folder, "resolv.conf")
 		if err := os.WriteFile(path, []byte(d.resolvConfContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write docker resolv.conf to %q: %v", path, err)
@@ -233,6 +233,10 @@ func New(t testing.TB, ops ...Option) *Daemon {
 		ops = append(ops, WithRootlessUser("unprivilegeduser"))
 	}
 	ops = append(ops, WithOOMScoreAdjust(-500))
+
+	if val, ok := os.LookupEnv("DOCKER_FIREWALL_BACKEND"); ok {
+		ops = append(ops, WithEnvVars("DOCKER_FIREWALL_BACKEND="+val))
+	}
 
 	d, err := NewDaemon(dest, ops...)
 	assert.NilError(t, err, "could not create daemon at %q", dest)
@@ -478,6 +482,8 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 	}
 
 	d.args = append(d.args,
+		// Make sure we don't use the environment-provided global config file.
+		"--config-file", "/dev/null",
 		"--data-root", d.Root,
 		"--exec-root", d.execRoot,
 		"--pidfile", d.pidFile,
@@ -502,7 +508,7 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 	if d.init {
 		d.args = append(d.args, "--init")
 	}
-	if !(d.UseDefaultHost || d.UseDefaultTLSHost) {
+	if !d.UseDefaultHost && !d.UseDefaultTLSHost {
 		d.args = append(d.args, "--host", d.Sock())
 	}
 	if root := os.Getenv("DOCKER_REMAP_ROOT"); root != "" {
@@ -566,7 +572,7 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 		Transport: clientConfig.transport,
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "/_ping", nil)
+	req, err := http.NewRequest(http.MethodGet, "/_ping", http.NoBody)
 	if err != nil {
 		return errors.Wrapf(err, "[%s] could not create new request", d.id)
 	}
@@ -687,7 +693,7 @@ func (d *Daemon) Stop(t testing.TB) {
 	t.Helper()
 	err := d.StopWithError()
 	if err != nil {
-		if err != errDaemonNotStarted {
+		if !errors.Is(err, errDaemonNotStarted) {
 			t.Fatalf("[%s] error while stopping the daemon: %v", d.id, err)
 		} else {
 			t.Logf("[%s] daemon is not started", d.id)
@@ -699,13 +705,13 @@ func (d *Daemon) Stop(t testing.TB) {
 // If it timeouts, a SIGKILL is sent.
 // Stop will not delete the daemon directory. If a purged daemon is needed,
 // instantiate a new one with NewDaemon.
-func (d *Daemon) StopWithError() (err error) {
+func (d *Daemon) StopWithError() (retErr error) {
 	if d.cmd == nil || d.Wait == nil {
 		return errDaemonNotStarted
 	}
 	defer func() {
-		if err != nil {
-			d.log.Logf("[%s] error while stopping daemon: %v", d.id, err)
+		if retErr != nil {
+			d.log.Logf("[%s] error while stopping daemon: %v", d.id, retErr)
 		} else {
 			d.log.Logf("[%s] daemon stopped", d.id)
 			if d.pidFile != "" {
@@ -941,7 +947,7 @@ func (d *Daemon) queryRootDir() (string, error) {
 		Transport: clientConfig.transport,
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "/info", nil)
+	req, err := http.NewRequest(http.MethodGet, "/info", http.NoBody)
 	if err != nil {
 		return "", err
 	}

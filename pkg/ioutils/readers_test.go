@@ -1,4 +1,4 @@
-package ioutils // import "github.com/docker/docker/pkg/ioutils"
+package ioutils
 
 import (
 	"context"
@@ -32,7 +32,7 @@ func TestReadCloserWrapperClose(t *testing.T) {
 
 type perpetualReader struct{}
 
-func (p *perpetualReader) Read(buf []byte) (n int, err error) {
+func (p *perpetualReader) Read(buf []byte) (int, error) {
 	for i := 0; i != len(buf); i++ {
 		buf[i] = 'a'
 	}
@@ -46,7 +46,7 @@ func TestCancelReadCloser(t *testing.T) {
 	for {
 		var buf [128]byte
 		_, err := crc.Read(buf[:])
-		if err == context.DeadlineExceeded {
+		if errors.Is(err, context.DeadlineExceeded) {
 			break
 		} else if err != nil {
 			t.Fatalf("got unexpected error: %v", err)

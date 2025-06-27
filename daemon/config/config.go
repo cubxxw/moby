@@ -1,4 +1,4 @@
-package config // import "github.com/docker/docker/daemon/config"
+package config
 
 import (
 	"bytes"
@@ -744,6 +744,12 @@ func Validate(config *Config) error {
 
 	for _, h := range config.Hosts {
 		if _, err := opts.ValidateHost(h); err != nil {
+			return err
+		}
+	}
+
+	for _, mirror := range config.ServiceOptions.Mirrors {
+		if _, err := registry.ValidateMirror(mirror); err != nil {
 			return err
 		}
 	}

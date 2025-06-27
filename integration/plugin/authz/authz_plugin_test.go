@@ -1,9 +1,10 @@
 //go:build !windows
 
-package authz // import "github.com/docker/docker/integration/plugin/authz"
+package authz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -190,7 +191,7 @@ func TestAuthZPluginAPIDenyResponse(t *testing.T) {
 	socketClient, err := socketHTTPClient(daemonURL)
 	assert.NilError(t, err)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", http.NoBody)
 	assert.NilError(t, err)
 	req.URL.Scheme = "http"
 	req.URL.Host = client.DummyHost
@@ -255,7 +256,7 @@ func TestAuthZPluginAllowEventStream(t *testing.T) {
 				}
 			}
 		case err := <-errs:
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				t.Fatal("premature end of event stream")
 			}
 			assert.NilError(t, err)
@@ -486,7 +487,7 @@ func TestAuthZPluginHeader(t *testing.T) {
 	socketClient, err := socketHTTPClient(daemonURL)
 	assert.NilError(t, err)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/version", http.NoBody)
 	assert.NilError(t, err)
 	req.URL.Scheme = "http"
 	req.URL.Host = client.DummyHost

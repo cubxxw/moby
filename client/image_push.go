@@ -1,4 +1,4 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"context"
@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"net/url"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/errdefs"
 )
 
 // ImagePush requests the docker host to push an image to a remote registry.
@@ -51,13 +51,9 @@ func (cli *Client) ImagePush(ctx context.Context, image string, options image.Pu
 		query.Set("platform", string(pJson))
 	}
 
-	resp, err := cli.tryImagePush(ctx, ref.Name(), query, options.RegistryAuth)
-	if errdefs.IsUnauthorized(err) && options.PrivilegeFunc != nil {
-		newAuthHeader, privilegeErr := options.PrivilegeFunc(ctx)
-		if privilegeErr != nil {
-			return nil, privilegeErr
-		}
-		resp, err = cli.tryImagePush(ctx, ref.Name(), query, newAuthHeader)
+	resp, err := cli.tryImagePush(ctx, ref.Name(), query, staticAuth(options.RegistryAuth))
+	if cerrdefs.IsUnauthorized(err) && options.PrivilegeFunc != nil {
+		resp, err = cli.tryImagePush(ctx, ref.Name(), query, options.PrivilegeFunc)
 	}
 	if err != nil {
 		return nil, err
@@ -65,8 +61,16 @@ func (cli *Client) ImagePush(ctx context.Context, image string, options image.Pu
 	return resp.Body, nil
 }
 
-func (cli *Client) tryImagePush(ctx context.Context, imageID string, query url.Values, registryAuth string) (*http.Response, error) {
-	return cli.post(ctx, "/images/"+imageID+"/push", query, nil, http.Header{
-		registry.AuthHeader: {registryAuth},
-	})
+func (cli *Client) tryImagePush(ctx context.Context, imageID string, query url.Values, resolveAuth registry.RequestAuthConfig) (*http.Response, error) {
+	hdr := http.Header{}
+	if resolveAuth != nil {
+		registryAuth, err := resolveAuth(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if registryAuth != "" {
+			hdr.Set(registry.AuthHeader, registryAuth)
+		}
+	}
+	return cli.post(ctx, "/images/"+imageID+"/push", query, nil, hdr)
 }

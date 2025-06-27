@@ -1,6 +1,6 @@
 // Package splunk provides the log driver for forwarding server logs to
 // Splunk HTTP Event Collector endpoint.
-package splunk // import "github.com/docker/docker/daemon/logger/splunk"
+package splunk
 
 import (
 	"bytes"
@@ -603,7 +603,7 @@ func parseURL(info logger.Info) (*url.URL, error) {
 }
 
 func verifySplunkConnection(l *splunkLogger) error {
-	req, err := http.NewRequest(http.MethodOptions, l.url, nil)
+	req, err := http.NewRequest(http.MethodOptions, l.url, http.NoBody)
 	if err != nil {
 		return err
 	}

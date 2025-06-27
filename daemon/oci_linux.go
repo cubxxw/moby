@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -476,7 +476,7 @@ func inSlice(slice []string, s string) bool {
 
 // withMounts sets the container's mounts
 func withMounts(daemon *Daemon, daemonCfg *configStore, c *container.Container, mounts []container.Mount) coci.SpecOpts {
-	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) (err error) {
+	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
 		sortMounts(mounts)
 
 		userMounts := make(map[string]struct{})
@@ -715,7 +715,7 @@ func withCommonOptions(daemon *Daemon, daemonCfg *dconfig.Config, c *container.C
 			return err
 		}
 		cwd := c.Config.WorkingDir
-		if len(cwd) == 0 {
+		if cwd == "" {
 			cwd = "/"
 		}
 		if s.Process == nil {
@@ -1003,7 +1003,7 @@ func WithUser(c *container.Container) coci.SpecOpts {
 	}
 }
 
-func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container, mounts []container.Mount) (retSpec *specs.Spec, err error) {
+func (daemon *Daemon) createSpec(ctx context.Context, daemonCfg *configStore, c *container.Container, mounts []container.Mount) (retSpec *specs.Spec, _ error) {
 	var (
 		opts []coci.SpecOpts
 		s    = oci.DefaultSpec()

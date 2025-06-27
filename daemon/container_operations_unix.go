@@ -1,6 +1,6 @@
 //go:build linux || freebsd
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -236,7 +236,7 @@ func (daemon *Daemon) setupIPCDirs(ctr *container.Container) error {
 
 	case ipcMode.IsHost():
 		if _, err := os.Stat("/dev/shm"); err != nil {
-			return fmt.Errorf("/dev/shm is not mounted, but must be for --ipc=host")
+			return errors.New("/dev/shm is not mounted, but must be for --ipc=host")
 		}
 		ctr.ShmPath = "/dev/shm"
 
@@ -294,7 +294,7 @@ func (daemon *Daemon) setupSecretDir(ctr *container.Container) (setupErr error) 
 	}()
 
 	if ctr.DependencyStore == nil {
-		return fmt.Errorf("secret store is not initialized")
+		return errors.New("secret store is not initialized")
 	}
 
 	// retrieve possible remapped range start for root UID, GID
@@ -462,7 +462,7 @@ func killProcessDirectly(ctr *container.Container) error {
 	}
 
 	if err := unix.Kill(pid, syscall.SIGKILL); err != nil {
-		if err != unix.ESRCH {
+		if !errors.Is(err, unix.ESRCH) {
 			return errdefs.System(err)
 		}
 		err = errNoSuchProcess{pid, syscall.SIGKILL}

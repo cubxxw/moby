@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/container"
+package container
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/google/uuid"
 	"gotest.tools/v3/assert"
@@ -87,7 +87,7 @@ func TestNames(t *testing.T) {
 	assert.Check(t, db.ReserveName("name2", "containerid2"))
 
 	err = db.ReserveName("name2", "containerid3")
-	assert.Check(t, is.ErrorType(err, errdefs.IsConflict))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsConflict))
 	assert.Check(t, is.Error(err, "name is reserved"))
 
 	// Releasing a name allows the name to point to something else later.
@@ -105,7 +105,7 @@ func TestNames(t *testing.T) {
 	assert.Check(t, is.Equal("containerid3", id))
 
 	_, err = view.GetID("notreserved")
-	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	assert.Check(t, is.Error(err, "name is not reserved"))
 
 	// Releasing and re-reserving a name doesn't affect the snapshot.
@@ -148,13 +148,13 @@ func TestViewWithHealthCheck(t *testing.T) {
 
 	one.Health = &Health{
 		Health: container.Health{
-			Status: "starting",
+			Status: container.Starting,
 		},
 	}
 	assert.NilError(t, one.CheckpointTo(context.Background(), db))
 	s, err := db.Snapshot().Get(one.ID)
 	assert.NilError(t, err)
-	assert.Equal(t, s.Health, "starting")
+	assert.Equal(t, s.Health, container.Starting)
 }
 
 func TestTruncIndex(t *testing.T) {
@@ -163,7 +163,7 @@ func TestTruncIndex(t *testing.T) {
 
 	// Get on an empty index
 	_, err = db.GetByPrefix("foobar")
-	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 
 	// Add an id
 	const id = "99b36c2c326ccc11e726eee6ee78a0baf166ef96"

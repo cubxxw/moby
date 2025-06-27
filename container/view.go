@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package container // import "github.com/docker/docker/container"
+package container
 
 import (
 	"bytes"
@@ -45,7 +45,7 @@ type Snapshot struct {
 	Managed      bool
 	ExposedPorts nat.PortSet
 	PortBindings nat.PortSet
-	Health       string
+	Health       container.HealthStatus
 	HostConfig   struct {
 		Isolation string
 	}
@@ -447,7 +447,7 @@ func (e *containerByIDIndexer) FromObject(obj any) (bool, []byte, error) {
 // FromArgs implements the memdb.Indexer interface
 func (e *containerByIDIndexer) FromArgs(args ...any) ([]byte, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("must provide only a single argument")
+		return nil, errors.New("must provide only a single argument")
 	}
 	arg, ok := args[0].(string)
 	if !ok {
@@ -482,7 +482,7 @@ func (e *namesByNameIndexer) FromObject(obj any) (bool, []byte, error) {
 
 func (e *namesByNameIndexer) FromArgs(args ...any) ([]byte, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("must provide only a single argument")
+		return nil, errors.New("must provide only a single argument")
 	}
 	arg, ok := args[0].(string)
 	if !ok {
@@ -507,7 +507,7 @@ func (e *namesByContainerIDIndexer) FromObject(obj any) (bool, []byte, error) {
 
 func (e *namesByContainerIDIndexer) FromArgs(args ...any) ([]byte, error) {
 	if len(args) != 1 {
-		return nil, fmt.Errorf("must provide only a single argument")
+		return nil, errors.New("must provide only a single argument")
 	}
 	arg, ok := args[0].(string)
 	if !ok {

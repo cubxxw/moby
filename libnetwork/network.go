@@ -57,9 +57,9 @@ type svcMapEntry struct {
 }
 
 type svcInfo struct {
-	svcMap     setmatrix.SetMatrix[svcMapEntry]
-	svcIPv6Map setmatrix.SetMatrix[svcMapEntry]
-	ipMap      setmatrix.SetMatrix[ipInfo]
+	svcMap     setmatrix.SetMatrix[string, svcMapEntry]
+	svcIPv6Map setmatrix.SetMatrix[string, svcMapEntry]
+	ipMap      setmatrix.SetMatrix[string, ipInfo]
 	service    map[string][]servicePorts
 }
 
@@ -99,7 +99,7 @@ type IpamConf struct {
 
 // Validate checks whether the configuration is valid
 func (c *IpamConf) Validate() error {
-	if c.Gateway != "" && nil == net.ParseIP(c.Gateway) {
+	if c.Gateway != "" && net.ParseIP(c.Gateway) == nil {
 		return types.InvalidParameterErrorf("invalid gateway address %s in Ipam configuration", c.Gateway)
 	}
 	return nil
@@ -421,7 +421,7 @@ func (n *Network) applyConfigurationTo(to *Network) error {
 			}
 		}
 	}
-	if len(n.ipamType) != 0 {
+	if n.ipamType != "" {
 		to.ipamType = n.ipamType
 	}
 	if len(n.ipamOptions) > 0 {
@@ -571,8 +571,8 @@ func (n *Network) advertiseAddrInterval() (time.Duration, bool) {
 	return *v, true
 }
 
-// TODO : Can be made much more generic with the help of reflection (but has some golang limitations)
 func (n *Network) MarshalJSON() ([]byte, error) {
+	// TODO: Can be made much more generic with the help of reflection (but has some golang limitations)
 	netMap := make(map[string]any)
 	netMap["name"] = n.name
 	netMap["id"] = n.id
@@ -630,8 +630,8 @@ func (n *Network) MarshalJSON() ([]byte, error) {
 	return json.Marshal(netMap)
 }
 
-// TODO : Can be made much more generic with the help of reflection (but has some golang limitations)
 func (n *Network) UnmarshalJSON(b []byte) (err error) {
+	// TODO: Can be made much more generic with the help of reflection (but has some golang limitations)
 	var netMap map[string]any
 	if err := json.Unmarshal(b, &netMap); err != nil {
 		return err
@@ -674,9 +674,9 @@ func (n *Network) UnmarshalJSON(b []byte) (err error) {
 	if v, ok := netMap["generic"]; ok {
 		n.generic = v.(map[string]any)
 		// Restore opts in their map[string]string form
-		if v, ok := n.generic[netlabel.GenericData]; ok {
+		if gv, ok := n.generic[netlabel.GenericData]; ok {
 			var lmap map[string]string
-			ba, err := json.Marshal(v)
+			ba, err := json.Marshal(gv)
 			if err != nil {
 				return err
 			}
@@ -1048,9 +1048,11 @@ func (n *Network) delete(force bool, rmLBEndpoint bool) error {
 	eps := c.findEndpoints(filterEndpointByNetworkId(n.id))
 	if !force && len(eps) > emptyCount {
 		return &ActiveEndpointsError{
-			name:      n.name,
-			id:        n.id,
-			endpoints: sliceutil.Map(eps, func(ep *Endpoint) string { return ep.name }),
+			name: n.name,
+			id:   n.id,
+			endpoints: sliceutil.Map(eps, func(ep *Endpoint) string {
+				return fmt.Sprintf(`name:%q id:%q`, ep.name, stringid.TruncateID(ep.id))
+			}),
 		}
 	}
 
@@ -1368,7 +1370,7 @@ func (n *Network) updateSvcRecord(ctx context.Context, ep *Endpoint, isAdd bool)
 	}
 }
 
-func addIPToName(ipMap *setmatrix.SetMatrix[ipInfo], name, serviceID string, ip net.IP) {
+func addIPToName(ipMap *setmatrix.SetMatrix[string, ipInfo], name, serviceID string, ip net.IP) {
 	reverseIP := netutils.ReverseIP(ip.String())
 	ipMap.Insert(reverseIP, ipInfo{
 		name:      name,
@@ -1376,7 +1378,7 @@ func addIPToName(ipMap *setmatrix.SetMatrix[ipInfo], name, serviceID string, ip 
 	})
 }
 
-func delIPToName(ipMap *setmatrix.SetMatrix[ipInfo], name, serviceID string, ip net.IP) {
+func delIPToName(ipMap *setmatrix.SetMatrix[string, ipInfo], name, serviceID string, ip net.IP) {
 	reverseIP := netutils.ReverseIP(ip.String())
 	ipMap.Remove(reverseIP, ipInfo{
 		name:      name,
@@ -1384,7 +1386,7 @@ func delIPToName(ipMap *setmatrix.SetMatrix[ipInfo], name, serviceID string, ip 
 	})
 }
 
-func addNameToIP(svcMap *setmatrix.SetMatrix[svcMapEntry], name, serviceID string, epIP net.IP) {
+func addNameToIP(svcMap *setmatrix.SetMatrix[string, svcMapEntry], name, serviceID string, epIP net.IP) {
 	// Since DNS name resolution is case-insensitive, Use the lower-case form
 	// of the name as the key into svcMap
 	lowerCaseName := strings.ToLower(name)
@@ -1394,7 +1396,7 @@ func addNameToIP(svcMap *setmatrix.SetMatrix[svcMapEntry], name, serviceID strin
 	})
 }
 
-func delNameToIP(svcMap *setmatrix.SetMatrix[svcMapEntry], name, serviceID string, epIP net.IP) {
+func delNameToIP(svcMap *setmatrix.SetMatrix[string, svcMapEntry], name, serviceID string, epIP net.IP) {
 	lowerCaseName := strings.ToLower(name)
 	svcMap.Remove(lowerCaseName, svcMapEntry{
 		ip:        epIP.String(),
@@ -1617,7 +1619,7 @@ func (n *Network) ipamAllocateVersion(ipVer int, ipam ipamapi.Ipam) error {
 					return types.ForbiddenErrorf("auxiliary address: (%s:%s) must belong to the master pool: %s", k, v, d.Pool)
 				}
 				// Attempt reservation in the container addressable pool, silent the error if address does not belong to that pool
-				if d.IPAMData.AuxAddresses[k], _, err = ipam.RequestAddress(d.PoolID, ip, nil); err != nil && err != ipamapi.ErrIPOutOfRange {
+				if d.IPAMData.AuxAddresses[k], _, err = ipam.RequestAddress(d.PoolID, ip, nil); err != nil && !errors.Is(err, ipamapi.ErrIPOutOfRange) {
 					return types.InternalErrorf("failed to allocate secondary ip address (%s:%s): %v", k, v, err)
 				}
 			}
@@ -1671,7 +1673,7 @@ func (n *Network) ipamReleaseVersion(ipVer int, ipam ipamapi.Ipam) {
 		if d.IPAMData.AuxAddresses != nil {
 			for k, nw := range d.IPAMData.AuxAddresses {
 				if d.Pool.Contains(nw.IP) {
-					if err := ipam.ReleaseAddress(d.PoolID, nw.IP); err != nil && err != ipamapi.ErrIPOutOfRange {
+					if err := ipam.ReleaseAddress(d.PoolID, nw.IP); err != nil && !errors.Is(err, ipamapi.ErrIPOutOfRange) {
 						log.G(context.TODO()).Warnf("Failed to release secondary ip address %s (%v) on delete of network %s (%s): %v", k, nw.IP, n.Name(), n.ID(), err)
 					}
 				}

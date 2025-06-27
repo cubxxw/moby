@@ -4,11 +4,14 @@ package overlay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/internal/netiputil"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
 )
@@ -20,7 +23,7 @@ type endpoint struct {
 	nid    string
 	ifName string
 	mac    net.HardwareAddr
-	addr   *net.IPNet
+	addr   netip.Prefix
 }
 
 func (n *network) endpoint(eid string) *endpoint {
@@ -61,13 +64,14 @@ func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo drive
 	}
 
 	ep := &endpoint{
-		id:   eid,
-		nid:  n.id,
-		addr: ifInfo.Address(),
-		mac:  ifInfo.MacAddress(),
+		id:  eid,
+		nid: n.id,
+		mac: ifInfo.MacAddress(),
 	}
-	if ep.addr == nil {
-		return fmt.Errorf("create endpoint was not passed interface IP address")
+	var ok bool
+	ep.addr, ok = netiputil.ToPrefix(ifInfo.Address())
+	if !ok {
+		return errors.New("create endpoint was not passed interface IP address")
 	}
 
 	if s := n.getSubnetforIP(ep.addr); s == nil {
@@ -75,7 +79,7 @@ func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo drive
 	}
 
 	if ep.mac == nil {
-		ep.mac = netutils.GenerateMACFromIP(ep.addr.IP)
+		ep.mac = netutils.GenerateMACFromIP(ep.addr.Addr().AsSlice())
 		if err := ifInfo.SetMacAddress(ep.mac); err != nil {
 			return err
 		}

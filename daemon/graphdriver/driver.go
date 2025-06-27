@@ -1,4 +1,4 @@
-package graphdriver // import "github.com/docker/docker/daemon/graphdriver"
+package graphdriver
 
 import (
 	"context"
@@ -141,7 +141,7 @@ func getDriver(name string, config Options) (Driver, error) {
 
 	// TODO(thaJeztah): remove in next release.
 	if os.Getenv("DOCKERD_DEPRECATED_GRAPHDRIVER_PLUGINS") != "" {
-		return nil, fmt.Errorf("DEPRECATED: Support for experimental graphdriver plugins has been removed. See https://docs.docker.com/go/deprecated/")
+		return nil, errors.New("DEPRECATED: Support for experimental graphdriver plugins has been removed. See https://docs.docker.com/go/deprecated/")
 	}
 
 	return nil, ErrNotSupported
@@ -269,7 +269,7 @@ func isEmptyDir(name string) bool {
 	}
 	defer f.Close()
 
-	if _, err = f.Readdirnames(1); err == io.EOF {
+	if _, err = f.Readdirnames(1); errors.Is(err, io.EOF) {
 		return true
 	}
 	return false

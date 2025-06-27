@@ -1,4 +1,4 @@
-package xfer // import "github.com/docker/docker/distribution/xfer"
+package xfer
 
 import (
 	"bytes"
@@ -33,7 +33,7 @@ func (ml *mockLayer) TarStream() (io.ReadCloser, error) {
 }
 
 func (ml *mockLayer) TarStreamFrom(layer.ChainID) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New("not implemented")
 }
 
 func (ml *mockLayer) ChainID() layer.ChainID {
@@ -351,7 +351,7 @@ func TestCancelledDownload(t *testing.T) {
 
 	descriptors := downloadDescriptors(nil)
 	_, _, err := ldm.Download(ctx, *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		close(progressChan)
 		t.Fatal("expected download to be cancelled")
 	}

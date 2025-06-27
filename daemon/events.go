@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -27,7 +27,7 @@ func (daemon *Daemon) LogContainerEventWithAttributes(container *container.Conta
 	if container.Config.Image != "" {
 		attributes["image"] = container.Config.Image
 	}
-	attributes["name"] = strings.TrimLeft(container.Name, "/")
+	attributes["name"] = strings.TrimPrefix(container.Name, "/")
 	daemon.EventsService.Log(action, events.ContainerEventType, events.Actor{
 		ID:         container.ID,
 		Attributes: attributes,

@@ -1,6 +1,7 @@
 package usergroup
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -81,7 +82,7 @@ func addUser(name string) error {
 	case "useradd":
 		args = []string{"-r", "-s", "/bin/false", name}
 	default:
-		return fmt.Errorf("cannot add user; no useradd/adduser binary found")
+		return errors.New("cannot add user; no useradd/adduser binary found")
 	}
 
 	if out, err := exec.Command(userCommand, args...).CombinedOutput(); err != nil {
@@ -164,8 +165,8 @@ func findNextRangeStart(rangeList []user.SubID) (int, error) {
 }
 
 func wouldOverlap(arange user.SubID, ID int64) bool {
-	var low int64 = ID
-	var high int64 = ID + defaultRangeLen
+	low := ID
+	high := low + defaultRangeLen
 	if (low >= arange.SubID && low <= arange.SubID+arange.Count) ||
 		(high <= arange.SubID+arange.Count && high >= arange.SubID) {
 		return true

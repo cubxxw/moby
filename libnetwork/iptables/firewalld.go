@@ -52,7 +52,7 @@ func UsingFirewalld() (bool, error) {
 	// But, if running rootless, the init function is not called because
 	// firewalld will be running in the host's netns, not in rootlesskit's.
 	if !firewalldInitCalled && !rootless.RunningWithRootlessKit() {
-		return false, fmt.Errorf("iptables.firewalld is not initialised")
+		return false, errors.New("iptables.firewalld is not initialised")
 	}
 	return firewalldRunning, nil
 }
@@ -150,9 +150,9 @@ func dbusConnectionChanged(args []interface{}) {
 		return
 	}
 
-	if len(newOwner) > 0 {
+	if newOwner != "" {
 		connectionEstablished()
-	} else if len(oldOwner) > 0 {
+	} else if oldOwner != "" {
 		connectionLost()
 	}
 }

@@ -1,4 +1,4 @@
-package listeners // import "github.com/docker/docker/daemon/listeners"
+package listeners
 
 import (
 	"crypto/tls"
@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	winio "github.com/Microsoft/go-winio"
+	"github.com/Microsoft/go-winio"
 	"github.com/docker/go-connections/sockets"
 )
 
