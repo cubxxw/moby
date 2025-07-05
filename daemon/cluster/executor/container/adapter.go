@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/daemon/cluster/executor/container"
+package container
 
 import (
 	"context"
@@ -18,7 +18,6 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon"
 	"github.com/docker/docker/daemon/cluster/convert"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
@@ -167,7 +166,7 @@ func (c *containerAdapter) waitNodeAttachments(ctx context.Context) error {
 	// we'll wait and try again.
 	attachmentStore := c.backend.GetAttachmentStore()
 	if attachmentStore == nil {
-		return fmt.Errorf("error getting attachment store")
+		return errors.New("error getting attachment store")
 	}
 
 	// essentially, we're long-polling here. this is really sub-optimal, but a
@@ -200,7 +199,7 @@ func (c *containerAdapter) waitNodeAttachments(ctx context.Context) error {
 		// otherwise, try polling again, or wait for context canceled.
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("node is missing network attachments, ip addresses may be exhausted")
+			return errors.New("node is missing network attachments, ip addresses may be exhausted")
 		case <-poll.C:
 		}
 	}
@@ -416,8 +415,8 @@ func (c *containerAdapter) events(ctx context.Context) <-chan events.Message {
 	return eventsq
 }
 
-func (c *containerAdapter) wait(ctx context.Context) (<-chan container.StateStatus, error) {
-	return c.backend.ContainerWait(ctx, c.container.nameOrID(), container.WaitConditionNotRunning)
+func (c *containerAdapter) wait(ctx context.Context) (<-chan containertypes.StateStatus, error) {
+	return c.backend.ContainerWait(ctx, c.container.nameOrID(), containertypes.WaitConditionNotRunning)
 }
 
 func (c *containerAdapter) shutdown(ctx context.Context) error {

@@ -1,4 +1,5 @@
-//go:build linux
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.23 && linux
 
 package overlay
 
@@ -6,7 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +19,8 @@ import (
 	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/drivers/overlay/overlayutils"
+	"github.com/docker/docker/libnetwork/internal/countmap"
+	"github.com/docker/docker/libnetwork/internal/netiputil"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/osl"
@@ -42,8 +45,8 @@ type subnet struct {
 	brName    string
 	vni       uint32
 	initErr   error
-	subnetIP  *net.IPNet
-	gwIP      *net.IPNet
+	subnetIP  netip.Prefix
+	gwIP      netip.Prefix
 }
 
 type network struct {
@@ -52,6 +55,8 @@ type network struct {
 	endpoints endpointTable
 	driver    *driver
 	joinCnt   int
+	// Ref count of VXLAN Forwarding Database entries programmed into the kernel
+	fdbCnt    countmap.Map[ipmac]
 	sboxInit  bool
 	initEpoch int
 	initErr   error
@@ -81,7 +86,7 @@ func (d *driver) NetworkFree(id string) error {
 
 func (d *driver) CreateNetwork(ctx context.Context, id string, option map[string]interface{}, nInfo driverapi.NetworkInfo, ipV4Data, ipV6Data []driverapi.IPAMData) error {
 	if id == "" {
-		return fmt.Errorf("invalid network id")
+		return errors.New("invalid network id")
 	}
 	if len(ipV4Data) == 0 || ipV4Data[0].Pool.String() == "0.0.0.0/0" {
 		return types.InvalidParameterErrorf("ipv4 pool is empty")
@@ -98,6 +103,7 @@ func (d *driver) CreateNetwork(ctx context.Context, id string, option map[string
 		driver:    d,
 		endpoints: endpointTable{},
 		subnets:   []*subnet{},
+		fdbCnt:    countmap.Map[ipmac]{},
 	}
 
 	vnis := make([]uint32, 0, len(ipV4Data))
@@ -138,11 +144,9 @@ func (d *driver) CreateNetwork(ctx context.Context, id string, option map[string
 	}
 
 	for i, ipd := range ipV4Data {
-		s := &subnet{
-			subnetIP: ipd.Pool,
-			gwIP:     ipd.Gateway,
-			vni:      vnis[i],
-		}
+		s := &subnet{vni: vnis[i]}
+		s.subnetIP, _ = netiputil.ToPrefix(ipd.Pool)
+		s.gwIP, _ = netiputil.ToPrefix(ipd.Gateway)
 
 		n.subnets = append(n.subnets, s)
 	}
@@ -175,7 +179,7 @@ func (d *driver) CreateNetwork(ctx context.Context, id string, option map[string
 
 func (d *driver) DeleteNetwork(nid string) error {
 	if nid == "" {
-		return fmt.Errorf("invalid network id")
+		return errors.New("invalid network id")
 	}
 
 	// Make sure driver resources are initialized before proceeding
@@ -233,14 +237,6 @@ func (d *driver) DeleteNetwork(nid string) error {
 		}
 	}
 
-	return nil
-}
-
-func (d *driver) ProgramExternalConnectivity(_ context.Context, nid, eid string, options map[string]interface{}) error {
-	return nil
-}
-
-func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
 	return nil
 }
 
@@ -427,7 +423,7 @@ func (n *network) setupSubnetSandbox(s *subnet, brName, vxlanName string) error 
 	// create a bridge and vxlan device for this subnet and move it to the sandbox
 	sbox := n.sbox
 
-	if err := sbox.AddInterface(context.TODO(), brName, "br", "", osl.WithIPv4Address(s.gwIP), osl.WithIsBridge(true)); err != nil {
+	if err := sbox.AddInterface(context.TODO(), brName, "br", "", osl.WithIPv4Address(netiputil.ToIPNet(s.gwIP)), osl.WithIsBridge(true)); err != nil {
 		return fmt.Errorf("bridge creation in sandbox failed for subnet %q: %v", s.subnetIP.String(), err)
 	}
 
@@ -595,6 +591,7 @@ func (n *network) initSandbox() error {
 
 	// this is needed to let the peerAdd configure the sandbox
 	n.sbox = sbox
+	n.fdbCnt = countmap.Map[ipmac]{}
 
 	return nil
 }
@@ -614,15 +611,13 @@ func (n *network) sandbox() *osl.Namespace {
 }
 
 // getSubnetforIP returns the subnet to which the given IP belongs
-func (n *network) getSubnetforIP(ip *net.IPNet) *subnet {
+func (n *network) getSubnetforIP(ip netip.Prefix) *subnet {
 	for _, s := range n.subnets {
 		// first check if the mask lengths are the same
-		i, _ := s.subnetIP.Mask.Size()
-		j, _ := ip.Mask.Size()
-		if i != j {
+		if s.subnetIP.Bits() != ip.Bits() {
 			continue
 		}
-		if s.subnetIP.Contains(ip.IP) {
+		if s.subnetIP.Contains(ip.Addr()) {
 			return s
 		}
 	}

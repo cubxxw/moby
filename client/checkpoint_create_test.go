@@ -1,17 +1,18 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/checkpoint"
-	"github.com/docker/docker/errdefs"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -25,14 +26,14 @@ func TestCheckpointCreateError(t *testing.T) {
 		Exit:         true,
 	})
 
-	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInternal))
 
 	err = client.CheckpointCreate(context.Background(), "", checkpoint.CreateOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	assert.Check(t, is.ErrorContains(err, "value is empty"))
 
 	err = client.CheckpointCreate(context.Background(), "    ", checkpoint.CreateOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	assert.Check(t, is.ErrorContains(err, "value is empty"))
 }
 
@@ -61,7 +62,7 @@ func TestCheckpointCreate(t *testing.T) {
 			}
 
 			if !createOptions.Exit {
-				return nil, fmt.Errorf("expected Exit to be true")
+				return nil, errors.New("expected Exit to be true")
 			}
 
 			return &http.Response{
@@ -75,7 +76,5 @@ func TestCheckpointCreate(t *testing.T) {
 		CheckpointID: expectedCheckpointID,
 		Exit:         true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NilError(t, err)
 }

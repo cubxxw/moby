@@ -11,7 +11,7 @@ import (
 	imagetype "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/builder"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	"github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
@@ -29,7 +29,7 @@ type ImageService interface {
 	PullImage(ctx context.Context, ref reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
 	PushImage(ctx context.Context, ref reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
 	CreateImage(ctx context.Context, config []byte, parent string, contentStoreDigest digest.Digest) (builder.Image, error)
-	ImageDelete(ctx context.Context, imageRef string, force, prune bool) ([]imagetype.DeleteResponse, error)
+	ImageDelete(ctx context.Context, imageRef string, options imagetype.RemoveOptions) ([]imagetype.DeleteResponse, error)
 	ExportImage(ctx context.Context, names []string, platform *ocispec.Platform, outStream io.Writer) error
 	LoadImage(ctx context.Context, inTar io.ReadCloser, platform *ocispec.Platform, outStream io.Writer, quiet bool) error
 	Images(ctx context.Context, opts imagetype.ListOptions) ([]*imagetype.Summary, error)
@@ -43,6 +43,7 @@ type ImageService interface {
 	CommitImage(ctx context.Context, c backend.CommitConfig) (image.ID, error)
 	SquashImage(id, parent string) (string, error)
 	ImageInspect(ctx context.Context, refOrID string, opts backend.ImageInspectOpts) (*imagetype.InspectResponse, error)
+	ImageDiskUsage(ctx context.Context) (int64, error)
 
 	// Layers
 
@@ -53,7 +54,6 @@ type ImageService interface {
 	LayerStoreStatus() [][2]string
 	GetLayerMountID(cid string) (string, error)
 	ReleaseLayer(rwlayer container.RWLayer) error
-	LayerDiskUsage(ctx context.Context) (int64, error)
 	GetContainerLayerSize(ctx context.Context, containerID string) (int64, int64, error)
 	Changes(ctx context.Context, container *container.Container) ([]archive.Change, error)
 

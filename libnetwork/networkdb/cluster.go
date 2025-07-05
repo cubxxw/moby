@@ -71,8 +71,8 @@ func (nDB *NetworkDB) SetKey(key []byte) {
 // been added apriori through SetKey
 func (nDB *NetworkDB) SetPrimaryKey(key []byte) {
 	log.G(context.TODO()).Debugf("Primary Key %.5s", hex.EncodeToString(key))
-	nDB.RLock()
-	defer nDB.RUnlock()
+	nDB.Lock()
+	defer nDB.Unlock()
 	for _, dbKey := range nDB.config.Keys {
 		if bytes.Equal(key, dbKey) {
 			if nDB.keyring != nil {
@@ -112,6 +112,7 @@ func (nDB *NetworkDB) clusterInit() error {
 
 	if nDB.config.BindPort != 0 {
 		config.BindPort = nDB.config.BindPort
+		config.AdvertisePort = nDB.config.BindPort
 	}
 
 	config.ProtocolVersion = memberlist.ProtocolVersion2Compatible
@@ -223,11 +224,11 @@ func (nDB *NetworkDB) clusterLeave() error {
 	mlist := nDB.memberlist
 
 	if err := nDB.sendNodeEvent(NodeEventTypeLeave); err != nil {
-		log.G(context.TODO()).Errorf("failed to send node leave: %v", err)
+		log.G(context.TODO()).WithError(err).Error("failed to send node leave event")
 	}
 
 	if err := mlist.Leave(time.Second); err != nil {
-		return err
+		log.G(context.TODO()).WithError(err).Error("failed to broadcast memberlist leave message")
 	}
 
 	// cancel the context
@@ -368,6 +369,15 @@ func (nDB *NetworkDB) reapState() {
 
 func (nDB *NetworkDB) reapNetworks() {
 	nDB.Lock()
+	for id, n := range nDB.thisNodeNetworks {
+		if n.leaving {
+			if n.reapTime <= 0 {
+				delete(nDB.thisNodeNetworks, id)
+				continue
+			}
+			n.reapTime -= reapPeriod
+		}
+	}
 	for _, nn := range nDB.networks {
 		for id, n := range nn {
 			if n.leaving {
@@ -386,7 +396,7 @@ func (nDB *NetworkDB) reapTableEntries() {
 	var nodeNetworks []string
 	// This is best effort, if the list of network changes will be picked up in the next cycle
 	nDB.RLock()
-	for nid := range nDB.networks[nDB.config.NodeID] {
+	for nid := range nDB.thisNodeNetworks {
 		nodeNetworks = append(nodeNetworks, nid)
 	}
 	nDB.RUnlock()
@@ -411,16 +421,13 @@ func (nDB *NetworkDB) reapTableEntries() {
 			}
 
 			params := strings.Split(string(path[1:]), "/")
-			nid := params[0]
-			tname := params[1]
-			key := params[2]
-
-			okTable, okNetwork := nDB.deleteEntry(nid, tname, key)
+			nwID, tName, key := params[0], params[1], params[2]
+			okTable, okNetwork := nDB.deleteEntry(nwID, tName, key)
 			if !okTable {
-				log.G(context.TODO()).Errorf("Table tree delete failed, entry with key:%s does not exist in the table:%s network:%s", key, tname, nid)
+				log.G(context.TODO()).Errorf("Table tree delete failed, entry with key:%s does not exist in the table:%s network:%s", key, tName, nwID)
 			}
 			if !okNetwork {
-				log.G(context.TODO()).Errorf("Network tree delete failed, entry with key:%s does not exist in the network:%s table:%s", key, nid, tname)
+				log.G(context.TODO()).Errorf("Network tree delete failed, entry with key:%s does not exist in the network:%s table:%s", key, nwID, tName)
 			}
 
 			return false
@@ -432,8 +439,7 @@ func (nDB *NetworkDB) reapTableEntries() {
 func (nDB *NetworkDB) gossip() {
 	networkNodes := make(map[string][]string)
 	nDB.RLock()
-	thisNodeNetworks := nDB.networks[nDB.config.NodeID]
-	for nid := range thisNodeNetworks {
+	for nid := range nDB.thisNodeNetworks {
 		networkNodes[nid] = nDB.networkNodes[nid]
 	}
 	printStats := time.Since(nDB.lastStatsTimestamp) >= nDB.config.StatsPrintPeriod
@@ -453,7 +459,7 @@ func (nDB *NetworkDB) gossip() {
 		bytesAvail := nDB.config.PacketBufferSize - compoundHeaderOverhead
 
 		nDB.RLock()
-		network, ok := thisNodeNetworks[nid]
+		network, ok := nDB.thisNodeNetworks[nid]
 		nDB.RUnlock()
 		if !ok || network == nil {
 			// It is normal for the network to be removed
@@ -463,21 +469,15 @@ func (nDB *NetworkDB) gossip() {
 			continue
 		}
 
-		broadcastQ := network.tableBroadcasts
-
-		if broadcastQ == nil {
-			log.G(context.TODO()).Errorf("Invalid broadcastQ encountered while gossiping for network %s", nid)
-			continue
-		}
-
-		msgs := broadcastQ.GetBroadcasts(compoundOverhead, bytesAvail)
+		msgs := getBroadcasts(compoundOverhead, bytesAvail, network.tableBroadcasts, network.tableRebroadcasts)
 		// Collect stats and print the queue info, note this code is here also to have a view of the queues empty
 		network.qMessagesSent.Add(int64(len(msgs)))
 		if printStats {
 			msent := network.qMessagesSent.Swap(0)
-			log.G(context.TODO()).Infof("NetworkDB stats %v(%v) - netID:%s leaving:%t netPeers:%d entries:%d Queue qLen:%d netMsg/s:%d",
+			log.G(context.TODO()).Infof("NetworkDB stats %v(%v) - netID:%s leaving:%t netPeers:%d entries:%d Queue qLen:%d+%d netMsg/s:%d",
 				nDB.config.Hostname, nDB.config.NodeID,
-				nid, network.leaving, broadcastQ.NumNodes(), network.entriesNumber.Load(), broadcastQ.NumQueued(),
+				nid, network.leaving, network.tableBroadcasts.NumNodes(), network.entriesNumber.Load(),
+				network.tableBroadcasts.NumQueued(), network.tableRebroadcasts.NumQueued(),
 				msent/int64((nDB.config.StatsPrintPeriod/time.Second)))
 		}
 
@@ -512,7 +512,7 @@ func (nDB *NetworkDB) gossip() {
 func (nDB *NetworkDB) bulkSyncTables() {
 	var networks []string
 	nDB.RLock()
-	for nid, network := range nDB.networks[nDB.config.NodeID] {
+	for nid, network := range nDB.thisNodeNetworks {
 		if network.leaving {
 			continue
 		}
@@ -520,11 +520,7 @@ func (nDB *NetworkDB) bulkSyncTables() {
 	}
 	nDB.RUnlock()
 
-	for {
-		if len(networks) == 0 {
-			break
-		}
-
+	for len(networks) != 0 {
 		nid := networks[0]
 		networks = networks[1:]
 

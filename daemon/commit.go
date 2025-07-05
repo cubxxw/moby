@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/builder/dockerfile"
+	"github.com/docker/docker/daemon/internal/metrics"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/internal/metrics"
 	"github.com/pkg/errors"
 )
 

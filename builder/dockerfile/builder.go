@@ -1,4 +1,4 @@
-package dockerfile // import "github.com/docker/docker/builder/dockerfile"
+package dockerfile
 
 import (
 	"bytes"
@@ -10,13 +10,12 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/builder/remotecontext"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
@@ -99,7 +98,7 @@ func (bm *BuildManager) Build(ctx context.Context, config backend.BuildConfig) (
 
 // builderOptions are the dependencies required by the builder
 type builderOptions struct {
-	Options        *types.ImageBuildOptions
+	Options        *build.ImageBuildOptions
 	Backend        builder.Backend
 	ProgressWriter backend.ProgressWriter
 	PathCache      pathCache
@@ -109,11 +108,11 @@ type builderOptions struct {
 // Builder is a Dockerfile builder
 // It implements the builder.Backend interface.
 type Builder struct {
-	options *types.ImageBuildOptions
+	options *build.ImageBuildOptions
 
 	Stdout io.Writer
 	Stderr io.Writer
-	Aux    *streamformatter.AuxFormatter
+	Aux    backend.AuxEmitter
 	Output io.Writer
 
 	docker builder.Backend
@@ -131,7 +130,7 @@ type Builder struct {
 func newBuilder(ctx context.Context, options builderOptions) (*Builder, error) {
 	config := options.Options
 	if config == nil {
-		config = new(types.ImageBuildOptions)
+		config = new(build.ImageBuildOptions)
 	}
 
 	imgProber, err := newImageProber(ctx, options.Backend, config.CacheFrom, config.NoCache)
@@ -218,11 +217,11 @@ func (b *Builder) build(ctx context.Context, source builder.Source, dockerfile *
 	return &builder.Result{ImageID: state.imageID, FromImage: state.baseImage}, nil
 }
 
-func emitImageID(aux *streamformatter.AuxFormatter, state *dispatchState) error {
+func emitImageID(aux backend.AuxEmitter, state *dispatchState) error {
 	if aux == nil || state.imageID == "" {
 		return nil
 	}
-	return aux.Emit("", types.BuildResult{ID: state.imageID})
+	return aux.Emit("", build.Result{ID: state.imageID})
 }
 
 func processMetaArg(meta instructions.ArgCommand, shlex *shell.Lex, args *BuildArgs) error {
@@ -330,32 +329,29 @@ func BuildFromConfig(ctx context.Context, config *container.Config, changes []st
 		return nil, errdefs.InvalidParameter(err)
 	}
 
-	b, err := newBuilder(ctx, builderOptions{
-		Options: &types.ImageBuildOptions{NoCache: true},
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	// ensure that the commands are valid
+	var commands []instructions.Command
 	for _, n := range dockerfile.AST.Children {
 		if !validCommitCommands[strings.ToLower(n.Value)] {
 			return nil, errdefs.InvalidParameter(errors.Errorf("%s is not a valid change command", n.Value))
 		}
-	}
-
-	b.Stdout = io.Discard
-	b.Stderr = io.Discard
-	b.disableCommit = true
-
-	var commands []instructions.Command
-	for _, n := range dockerfile.AST.Children {
 		cmd, err := instructions.ParseCommand(n)
 		if err != nil {
 			return nil, errdefs.InvalidParameter(err)
 		}
 		commands = append(commands, cmd)
 	}
+
+	b, err := newBuilder(ctx, builderOptions{
+		Options: &build.ImageBuildOptions{NoCache: true},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	b.Stdout = io.Discard
+	b.Stderr = io.Discard
+	b.disableCommit = true
 
 	req := newDispatchRequest(b, dockerfile.EscapeToken, nil, NewBuildArgs(b.options.BuildArgs), newStagesBuildResults())
 	// We make mutations to the configuration, ensure we have a copy

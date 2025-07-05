@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"syscall"
@@ -89,8 +91,13 @@ func (s *spi) String() string {
 	return fmt.Sprintf("SPI(FWD: 0x%x, REV: 0x%x)", uint32(s.forward), uint32(s.reverse))
 }
 
+type encrNode struct {
+	spi   []spi
+	count int
+}
+
 type encrMap struct {
-	nodes map[string][]*spi
+	nodes map[netip.Addr]encrNode
 	sync.Mutex
 }
 
@@ -100,10 +107,10 @@ func (e *encrMap) String() string {
 	b := new(bytes.Buffer)
 	for k, v := range e.nodes {
 		b.WriteString("\n")
-		b.WriteString(k)
+		b.WriteString(k.String())
 		b.WriteString(":")
 		b.WriteString("[")
-		for _, s := range v {
+		for _, s := range v.spi {
 			b.WriteString(s.String())
 			b.WriteString(",")
 		}
@@ -112,72 +119,27 @@ func (e *encrMap) String() string {
 	return b.String()
 }
 
-func (d *driver) checkEncryption(nid string, rIP net.IP, isLocal, add bool) error {
-	log.G(context.TODO()).Debugf("checkEncryption(%.7s, %v, %t)", nid, rIP, isLocal)
-
-	n := d.network(nid)
-	if n == nil || !n.secure {
-		return nil
-	}
-
-	if len(d.keys) == 0 {
-		return types.ForbiddenErrorf("encryption key is not present")
-	}
-
-	lIP := d.bindAddress
-	aIP := d.advertiseAddress
-	nodes := map[string]net.IP{}
-
-	switch {
-	case isLocal:
-		if err := d.peerDbNetworkWalk(nid, func(pKey *peerKey, pEntry *peerEntry) bool {
-			if !aIP.Equal(pEntry.vtep) {
-				nodes[pEntry.vtep.String()] = pEntry.vtep
-			}
-			return false
-		}); err != nil {
-			log.G(context.TODO()).Warnf("Failed to retrieve list of participating nodes in overlay network %.5s: %v", nid, err)
-		}
-	default:
-		if len(d.network(nid).endpoints) > 0 {
-			nodes[rIP.String()] = rIP
-		}
-	}
-
-	log.G(context.TODO()).Debugf("List of nodes: %s", nodes)
-
-	if add {
-		for _, rIP := range nodes {
-			if err := setupEncryption(lIP, aIP, rIP, d.secMap, d.keys); err != nil {
-				log.G(context.TODO()).Warnf("Failed to program network encryption between %s and %s: %v", lIP, rIP, err)
-			}
-		}
-	} else {
-		if len(nodes) == 0 {
-			if err := removeEncryption(lIP, rIP, d.secMap); err != nil {
-				log.G(context.TODO()).Warnf("Failed to remove network encryption between %s and %s: %v", lIP, rIP, err)
-			}
-		}
-	}
-
-	return nil
-}
-
 // setupEncryption programs the encryption parameters for secure communication
 // between the local node and a remote node.
-func setupEncryption(localIP, advIP, remoteIP net.IP, em *encrMap, keys []*key) error {
-	log.G(context.TODO()).Debugf("Programming encryption between %s and %s", localIP, remoteIP)
-	rIPs := remoteIP.String()
+func (d *driver) setupEncryption(remoteIP netip.Addr) error {
+	log.G(context.TODO()).Debugf("setupEncryption(%s)", remoteIP)
 
-	indices := make([]*spi, 0, len(keys))
+	localIP, advIP := d.bindAddress, d.advertiseAddress
+	keys := d.keys // FIXME: data race
+	if len(keys) == 0 {
+		return types.ForbiddenErrorf("encryption key is not present")
+	}
+	log.G(context.TODO()).Debugf("Programming encryption between %s and %s", localIP, remoteIP)
+
+	indices := make([]spi, 0, len(keys))
 
 	for i, k := range keys {
-		spis := &spi{buildSPI(advIP, remoteIP, k.tag), buildSPI(remoteIP, advIP, k.tag)}
+		spis := spi{buildSPI(advIP.AsSlice(), remoteIP.AsSlice(), k.tag), buildSPI(remoteIP.AsSlice(), advIP.AsSlice(), k.tag)}
 		dir := reverse
 		if i == 0 {
 			dir = bidir
 		}
-		fSA, rSA, err := programSA(localIP, remoteIP, spis, k, dir, true)
+		fSA, rSA, err := programSA(localIP.AsSlice(), remoteIP.AsSlice(), spis, k, dir, true)
 		if err != nil {
 			log.G(context.TODO()).Warn(err)
 		}
@@ -191,26 +153,38 @@ func setupEncryption(localIP, advIP, remoteIP net.IP, em *encrMap, keys []*key) 
 		}
 	}
 
-	em.Lock()
-	em.nodes[rIPs] = indices
-	em.Unlock()
+	d.secMap.Lock()
+	node := d.secMap.nodes[remoteIP]
+	node.spi = indices
+	node.count++
+	d.secMap.nodes[remoteIP] = node
+	d.secMap.Unlock()
 
 	return nil
 }
 
-func removeEncryption(localIP, remoteIP net.IP, em *encrMap) error {
-	em.Lock()
-	indices, ok := em.nodes[remoteIP.String()]
-	em.Unlock()
-	if !ok {
+func (d *driver) removeEncryption(remoteIP netip.Addr) error {
+	log.G(context.TODO()).Debugf("removeEncryption(%s)", remoteIP)
+
+	spi := func() []spi {
+		d.secMap.Lock()
+		defer d.secMap.Unlock()
+		node := d.secMap.nodes[remoteIP]
+		if node.count == 1 {
+			delete(d.secMap.nodes, remoteIP)
+			return node.spi
+		}
+		node.count--
+		d.secMap.nodes[remoteIP] = node
 		return nil
-	}
-	for i, idxs := range indices {
+	}()
+
+	for i, idxs := range spi {
 		dir := reverse
 		if i == 0 {
 			dir = bidir
 		}
-		fSA, rSA, err := programSA(localIP, remoteIP, idxs, nil, dir, false)
+		fSA, rSA, err := programSA(d.bindAddress.AsSlice(), remoteIP.AsSlice(), idxs, nil, dir, false)
 		if err != nil {
 			log.G(context.TODO()).Warn(err)
 		}
@@ -304,7 +278,7 @@ func (d *driver) programInput(vni uint32, add bool) error {
 	return nil
 }
 
-func programSA(localIP, remoteIP net.IP, spi *spi, k *key, dir int, add bool) (fSA *netlink.XfrmState, rSA *netlink.XfrmState, lastErr error) {
+func programSA(localIP, remoteIP net.IP, spi spi, k *key, dir int, add bool) (fSA *netlink.XfrmState, rSA *netlink.XfrmState, lastErr error) {
 	var (
 		action      = "Removing"
 		xfrmProgram = ns.NlHandle().XfrmStateDel
@@ -431,10 +405,10 @@ func programSP(fSA *netlink.XfrmState, rSA *netlink.XfrmState, add bool) error {
 
 func saExists(sa *netlink.XfrmState) (bool, error) {
 	_, err := ns.NlHandle().XfrmStateGet(sa)
-	switch err {
-	case nil:
+	switch {
+	case err == nil:
 		return true, nil
-	case syscall.ESRCH:
+	case errors.Is(err, syscall.ESRCH):
 		return false, nil
 	default:
 		err = fmt.Errorf("Error while checking for SA existence: %v", err)
@@ -445,10 +419,10 @@ func saExists(sa *netlink.XfrmState) (bool, error) {
 
 func spExists(sp *netlink.XfrmPolicy) (bool, error) {
 	_, err := ns.NlHandle().XfrmPolicyGet(sp)
-	switch err {
-	case nil:
+	switch {
+	case err == nil:
 		return true, nil
-	case syscall.ENOENT:
+	case errors.Is(err, syscall.ENOENT):
 		return false, nil
 	default:
 		err = fmt.Errorf("Error while checking for SP existence: %v", err)
@@ -477,12 +451,12 @@ func buildAeadAlgo(k *key, s int) *netlink.XfrmStateAlgo {
 	}
 }
 
-func (d *driver) secMapWalk(f func(string, []*spi) ([]*spi, bool)) error {
+func (d *driver) secMapWalk(f func(netip.Addr, []spi) ([]spi, bool)) error {
 	d.secMap.Lock()
-	for node, indices := range d.secMap.nodes {
-		idxs, stop := f(node, indices)
+	for rIP, node := range d.secMap.nodes {
+		idxs, stop := f(rIP, node.spi)
 		if idxs != nil {
-			d.secMap.nodes[node] = idxs
+			d.secMap.nodes[rIP] = encrNode{idxs, node.count}
 		}
 		if stop {
 			break
@@ -498,7 +472,7 @@ func (d *driver) setKeys(keys []*key) error {
 	// Accept the encryption keys and clear any stale encryption map
 	d.Lock()
 	d.keys = keys
-	d.secMap = &encrMap{nodes: map[string][]*spi{}}
+	d.secMap = &encrMap{nodes: map[netip.Addr]encrNode{}}
 	d.Unlock()
 	log.G(context.TODO()).Debugf("Initial encryption keys: %v", keys)
 	return nil
@@ -547,9 +521,8 @@ func (d *driver) updateKeys(newKey, primary, pruneKey *key) error {
 		return types.InvalidParameterErrorf("attempting to both make a key (index %d) primary and delete it", priIdx)
 	}
 
-	d.secMapWalk(func(rIPs string, spis []*spi) ([]*spi, bool) {
-		rIP := net.ParseIP(rIPs)
-		return updateNodeKey(lIP, aIP, rIP, spis, d.keys, newIdx, priIdx, delIdx), false
+	d.secMapWalk(func(rIP netip.Addr, spis []spi) ([]spi, bool) {
+		return updateNodeKey(lIP.AsSlice(), aIP.AsSlice(), rIP.AsSlice(), spis, d.keys, newIdx, priIdx, delIdx), false
 	})
 
 	// swap primary
@@ -576,7 +549,7 @@ func (d *driver) updateKeys(newKey, primary, pruneKey *key) error {
  *********************************************************/
 
 // Spis and keys are sorted in such away the one in position 0 is the primary
-func updateNodeKey(lIP, aIP, rIP net.IP, idxs []*spi, curKeys []*key, newIdx, priIdx, delIdx int) []*spi {
+func updateNodeKey(lIP, aIP, rIP net.IP, idxs []spi, curKeys []*key, newIdx, priIdx, delIdx int) []spi {
 	log.G(context.TODO()).Debugf("Updating keys for node: %s (%d,%d,%d)", rIP, newIdx, priIdx, delIdx)
 
 	spis := idxs
@@ -584,7 +557,7 @@ func updateNodeKey(lIP, aIP, rIP net.IP, idxs []*spi, curKeys []*key, newIdx, pr
 
 	// add new
 	if newIdx != -1 {
-		spis = append(spis, &spi{
+		spis = append(spis, spi{
 			forward: buildSPI(aIP, rIP, curKeys[newIdx].tag),
 			reverse: buildSPI(rIP, aIP, curKeys[newIdx].tag),
 		})

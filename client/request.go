@@ -1,4 +1,4 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
@@ -14,8 +14,6 @@ import (
 	"strings"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/errdefs"
 	"github.com/pkg/errors"
 )
 
@@ -116,10 +114,8 @@ func (cli *Client) sendRequest(ctx context.Context, method, path string, query u
 
 	resp, err := cli.doRequest(req)
 	switch {
-	case errors.Is(err, context.Canceled):
-		return nil, errdefs.Cancelled(err)
-	case errors.Is(err, context.DeadlineExceeded):
-		return nil, errdefs.Deadline(err)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return nil, err
 	case err == nil:
 		return resp, cli.checkResponseErr(resp)
 	default:
@@ -195,11 +191,11 @@ func (cli *Client) checkResponseErr(serverResp *http.Response) (retErr error) {
 	if serverResp == nil {
 		return nil
 	}
-	if serverResp.StatusCode >= 200 && serverResp.StatusCode < 400 {
+	if serverResp.StatusCode >= http.StatusOK && serverResp.StatusCode < http.StatusBadRequest {
 		return nil
 	}
 	defer func() {
-		retErr = errdefs.FromStatusCode(retErr, serverResp.StatusCode)
+		retErr = httpErrorFromStatusCode(retErr, serverResp.StatusCode)
 	}()
 
 	var body []byte
@@ -280,9 +276,6 @@ func (cli *Client) addHeaders(req *http.Request, headers http.Header) *http.Requ
 	// Add CLI Config's HTTP Headers BEFORE we set the Docker headers
 	// then the user can't change OUR headers
 	for k, v := range cli.customHTTPHeaders {
-		if versions.LessThan(cli.version, "1.25") && http.CanonicalHeaderKey(k) == "User-Agent" {
-			continue
-		}
 		req.Header.Set(k, v)
 	}
 

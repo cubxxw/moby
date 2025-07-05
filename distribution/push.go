@@ -1,16 +1,16 @@
-package distribution // import "github.com/docker/docker/distribution"
+package distribution
 
 import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/progress"
 )
 
@@ -72,7 +72,7 @@ func Push(ctx context.Context, ref reference.Named, config *ImagePushConfig) err
 			}
 
 			// FIXME(thaJeztah): cleanup error and context handling in this package, as it's really messy.
-			if errdefs.IsContext(err) {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				log.G(ctx).WithError(err).Info("Not continuing with push after error")
 			} else {
 				log.G(ctx).WithError(err).Error("Not continuing with push after error")

@@ -85,7 +85,7 @@ func (c cacheAdaptor) Get(id image.ID) (*image.Image, error) {
 
 			var config container.Config
 			if err := readJSON(ctx, c.is.content, configDesc, &config); err != nil {
-				if !errdefs.IsNotFound(err) {
+				if !cerrdefs.IsNotFound(err) {
 					log.G(ctx).WithFields(log.Fields{
 						"configDigest": dgst,
 						"error":        err,
@@ -102,7 +102,7 @@ func (c cacheAdaptor) Get(id image.ID) (*image.Image, error) {
 		}
 		return nil
 	})
-	if err != nil && err != errFound {
+	if err != nil && !errors.Is(err, errFound) {
 		return nil, err
 	}
 
@@ -159,7 +159,7 @@ func (c cacheAdaptor) Create(parent *image.Image, target image.Image, extraLayer
 
 	var layerDigest digest.Digest
 	if extraLayer != "" {
-		info, err := findContentByUncompressedDigest(ctx, c.is.client.ContentStore(), digest.Digest(extraLayer))
+		info, err := findContentByUncompressedDigest(ctx, c.is.client.ContentStore(), extraLayer)
 		if err != nil {
 			return "", fmt.Errorf("failed to find content for diff ID %q: %w", extraLayer, err)
 		}
@@ -217,7 +217,7 @@ func findContentByUncompressedDigest(ctx context.Context, cs content.Manager, un
 		return errStopWalk
 	}, `labels."containerd.io/uncompressed"==`+uncompressed.String())
 
-	if err != nil && err != errStopWalk {
+	if err != nil && !errors.Is(err, errStopWalk) {
 		return out, err
 	}
 	if out.Digest == "" {

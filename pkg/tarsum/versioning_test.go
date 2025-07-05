@@ -1,7 +1,8 @@
-package tarsum // import "github.com/docker/docker/pkg/tarsum"
+package tarsum
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func TestGetVersion(t *testing.T) {
 	// test one that does not exist, to ensure it errors
 	str := "weak+md5:abcdeabcde"
 	_, err := GetVersionFromTarsum(str)
-	if err != ErrNotVersion {
+	if !errors.Is(err, ErrNotVersion) {
 		t.Fatalf("%q : %s", err, str)
 	}
 }

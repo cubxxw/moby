@@ -1,12 +1,12 @@
 //go:build linux || freebsd
 
-package images // import "github.com/docker/docker/daemon/images"
+package images
 
 import (
 	"context"
 
 	"github.com/containerd/log"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	"github.com/docker/docker/image"
 )
 

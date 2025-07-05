@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 )
 
 // ContainerPause pauses a container

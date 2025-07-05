@@ -1,9 +1,9 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
-	"fmt"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/errdefs"
@@ -55,7 +55,7 @@ func (daemon *Daemon) update(name string, hostConfig *container.HostConfig) erro
 
 	if ctr.RemovalInProgress || ctr.Dead {
 		ctr.Unlock()
-		return errCannotUpdate(ctr.ID, fmt.Errorf(`container is marked for removal and cannot be "update"`))
+		return errCannotUpdate(ctr.ID, errors.New(`container is marked for removal and cannot be "update"`))
 	}
 
 	if err := ctr.UpdateContainer(hostConfig); err != nil {
@@ -86,7 +86,7 @@ func (daemon *Daemon) update(name string, hostConfig *container.HostConfig) erro
 	isRestarting := ctr.Restarting
 	tsk, err := ctr.GetRunningTask()
 	ctr.Unlock()
-	if errdefs.IsConflict(err) || isRestarting {
+	if cerrdefs.IsConflict(err) || isRestarting {
 		return nil
 	}
 	if err != nil {

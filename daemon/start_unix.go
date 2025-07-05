@@ -1,11 +1,11 @@
 //go:build !windows
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
 
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 )
 
 // getLibcontainerdCreateOptions callers must hold a lock on the container

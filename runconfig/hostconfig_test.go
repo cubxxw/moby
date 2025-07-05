@@ -1,12 +1,12 @@
 //go:build !windows
 
-package runconfig // import "github.com/docker/docker/runconfig"
+package runconfig
 
 import (
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/sysinfo"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -77,7 +77,7 @@ func TestValidateResources(t *testing.T) {
 
 			err := validateResources(&hc, &si)
 			if tc.expectedError != "" {
-				assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+				assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 				assert.Check(t, is.Error(err, tc.expectedError))
 			} else {
 				assert.NilError(t, err)

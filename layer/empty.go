@@ -1,15 +1,15 @@
-package layer // import "github.com/docker/docker/layer"
+package layer
 
 import (
 	"archive/tar"
 	"bytes"
-	"fmt"
+	"errors"
 	"io"
 )
 
 // DigestSHA256EmptyTar is the canonical sha256 digest of empty tar file -
 // (1024 NULL bytes)
-const DigestSHA256EmptyTar = DiffID("sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef")
+const DigestSHA256EmptyTar DiffID = "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
 
 type emptyLayer struct{}
 
@@ -19,7 +19,7 @@ var EmptyLayer = &emptyLayer{}
 func (el *emptyLayer) TarStream() (io.ReadCloser, error) {
 	buf := new(bytes.Buffer)
 	tarWriter := tar.NewWriter(buf)
-	tarWriter.Close()
+	_ = tarWriter.Close()
 	return io.NopCloser(buf), nil
 }
 
@@ -27,11 +27,11 @@ func (el *emptyLayer) TarStreamFrom(p ChainID) (io.ReadCloser, error) {
 	if p == "" {
 		return el.TarStream()
 	}
-	return nil, fmt.Errorf("can't get parent tar stream of an empty layer")
+	return nil, errors.New("can't get parent tar stream of an empty layer")
 }
 
 func (el *emptyLayer) ChainID() ChainID {
-	return ChainID(DigestSHA256EmptyTar)
+	return DigestSHA256EmptyTar
 }
 
 func (el *emptyLayer) DiffID() DiffID {

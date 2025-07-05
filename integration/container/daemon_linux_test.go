@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	realcontainer "github.com/docker/docker/container"
+	realcontainer "github.com/docker/docker/daemon/container"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
@@ -269,7 +269,7 @@ func TestHardRestartWhenContainerIsRunning(t *testing.T) {
 		defer cancel()
 		inspect, err := apiClient.ContainerInspect(ctx, noPolicy)
 		assert.NilError(t, err)
-		assert.Check(t, is.Equal(inspect.State.Status, "exited"))
+		assert.Check(t, is.Equal(inspect.State.Status, containertypes.StateExited))
 		assert.Check(t, is.Equal(inspect.State.ExitCode, 255))
 		finishedAt, err := time.Parse(time.RFC3339Nano, inspect.State.FinishedAt)
 		if assert.Check(t, err) {
@@ -283,7 +283,7 @@ func TestHardRestartWhenContainerIsRunning(t *testing.T) {
 		defer cancel()
 		inspect, err := apiClient.ContainerInspect(ctx, onFailure)
 		assert.NilError(t, err)
-		assert.Check(t, is.Equal(inspect.State.Status, "running"))
+		assert.Check(t, is.Equal(inspect.State.Status, containertypes.StateRunning))
 		assert.Check(t, is.Equal(inspect.State.ExitCode, 0))
 		finishedAt, err := time.Parse(time.RFC3339Nano, inspect.State.FinishedAt)
 		if assert.Check(t, err) {

@@ -1,15 +1,19 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.23
+
 package mobyexporter
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/log"
-	distref "github.com/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/moby/buildkit/exporter"
@@ -27,7 +31,7 @@ type Differ interface {
 }
 
 type ImageTagger interface {
-	TagImage(ctx context.Context, imageID image.ID, newTag distref.Named) error
+	TagImage(ctx context.Context, imageID image.ID, newTag reference.Named) error
 }
 
 // Opt defines a struct for creating new exporter
@@ -60,7 +64,7 @@ func (e *imageExporter) Resolve(ctx context.Context, id int, attrs map[string]st
 		switch exptypes.ImageExporterOptKey(k) {
 		case exptypes.OptKeyName:
 			for _, v := range strings.Split(v, ",") {
-				ref, err := distref.ParseNormalizedNamed(v)
+				ref, err := reference.ParseNormalizedNamed(v)
 				if err != nil {
 					return nil, err
 				}
@@ -79,7 +83,7 @@ func (e *imageExporter) Resolve(ctx context.Context, id int, attrs map[string]st
 type imageExporterInstance struct {
 	*imageExporter
 	id          int
-	targetNames []distref.Named
+	targetNames []reference.Named
 	meta        map[string][]byte
 	attrs       map[string]string
 }
@@ -106,12 +110,12 @@ func (e *imageExporterInstance) Attrs() map[string]string {
 
 func (e *imageExporterInstance) Export(ctx context.Context, inp *exporter.Source, inlineCache exptypes.InlineCache, sessionID string) (map[string]string, exporter.DescriptorReference, error) {
 	if len(inp.Refs) > 1 {
-		return nil, nil, fmt.Errorf("exporting multiple references to image store is currently unsupported")
+		return nil, nil, errors.New("exporting multiple references to image store is currently unsupported")
 	}
 
 	ref := inp.Ref
 	if ref != nil && len(inp.Refs) == 1 {
-		return nil, nil, fmt.Errorf("invalid exporter input: Ref and Refs are mutually exclusive")
+		return nil, nil, errors.New("invalid exporter input: Ref and Refs are mutually exclusive")
 	}
 
 	// only one loop
@@ -151,10 +155,7 @@ func (e *imageExporterInstance) Export(ctx context.Context, inp *exporter.Source
 			return nil, nil, layersDone(err)
 		}
 
-		diffs = make([]digest.Digest, len(diffIDs))
-		for i := range diffIDs {
-			diffs[i] = digest.Digest(diffIDs[i])
-		}
+		diffs = slices.Clone(diffIDs)
 
 		_ = layersDone(nil)
 	}

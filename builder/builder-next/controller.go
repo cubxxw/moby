@@ -16,7 +16,7 @@ import (
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/builder/builder-next/adapters/containerimage"
 	"github.com/docker/docker/builder/builder-next/adapters/localinlinecache"
@@ -57,10 +57,8 @@ import (
 	"github.com/moby/buildkit/worker/containerd"
 	"github.com/moby/buildkit/worker/label"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
 	bolt "go.etcd.io/bbolt"
 	"go.opentelemetry.io/otel/sdk/trace"
-	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 func newController(ctx context.Context, rt http.RoundTripper, opt Opt) (*control.Controller, error) {
@@ -112,7 +110,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 
 	dns := getDNSConfig(opt.DNSConfig)
 
-	cdiManager, err := getCDIManager(opt.CDISpecDirs)
+	cdiManager, err := getCDIManager(opt)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +150,18 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 	wo.RegistryHosts = opt.RegistryHosts
 	wo.Labels = getLabels(opt, wo.Labels)
 
-	exec, err := newExecutor(opt.Root, opt.DefaultCgroupParent, opt.NetworkController, dns, opt.Rootless, opt.IdentityMapping, opt.ApparmorProfile, cdiManager)
+	exec, err := newExecutor(
+		opt.Root,
+		opt.DefaultCgroupParent,
+		opt.NetworkController,
+		dns,
+		opt.Rootless,
+		opt.IdentityMapping,
+		opt.ApparmorProfile,
+		cdiManager,
+		opt.ContainerdAddress,
+		opt.ContainerdNamespace,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +217,7 @@ func newSnapshotterController(ctx context.Context, rt http.RoundTripper, opt Opt
 }
 
 func openHistoryDB(root string, fn string, cfg *config.BuilderHistoryConfig) (*bolt.DB, *bkconfig.HistoryConfig, error) {
-	db, err := bbolt.Open(filepath.Join(root, fn), 0o600, nil)
+	db, err := bolt.Open(filepath.Join(root, fn), 0o600, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -327,12 +336,23 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 
 	dns := getDNSConfig(opt.DNSConfig)
 
-	cdiManager, err := getCDIManager(opt.CDISpecDirs)
+	cdiManager, err := getCDIManager(opt)
 	if err != nil {
 		return nil, err
 	}
 
-	exec, err := newExecutor(root, opt.DefaultCgroupParent, opt.NetworkController, dns, opt.Rootless, opt.IdentityMapping, opt.ApparmorProfile, cdiManager)
+	exec, err := newExecutorGD(
+		root,
+		opt.DefaultCgroupParent,
+		opt.NetworkController,
+		dns,
+		opt.Rootless,
+		opt.IdentityMapping,
+		opt.ApparmorProfile,
+		cdiManager,
+		opt.ContainerdAddress,
+		opt.ContainerdNamespace,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +465,7 @@ func newGraphDriverController(ctx context.Context, rt http.RoundTripper, opt Opt
 
 func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, error) {
 	var gcPolicy []client.PruneInfo
-	if conf.GC.Enabled {
+	if conf.GC.IsEnabled() {
 		if conf.GC.Policy == nil {
 			reservedSpace, maxUsedSpace, minFreeSpace, err := parseGCPolicy(config.BuilderGCRule{
 				ReservedSpace: conf.GC.DefaultReservedSpace,
@@ -464,7 +484,7 @@ func getGCPolicy(conf config.BuilderConfig, root string) ([]client.PruneInfo, er
 					return nil, err
 				}
 
-				gcPolicy[i], err = toBuildkitPruneInfo(types.BuildCachePruneOptions{
+				gcPolicy[i], err = toBuildkitPruneInfo(build.CachePruneOptions{
 					All:           p.All,
 					ReservedSpace: reservedSpace,
 					MaxUsedSpace:  maxUsedSpace,
@@ -545,30 +565,10 @@ func getLabels(opt Opt, labels map[string]string) map[string]string {
 	return labels
 }
 
-func getCDIManager(specDirs []string) (*cdidevices.Manager, error) {
-	if len(specDirs) == 0 {
+func getCDIManager(opt Opt) (*cdidevices.Manager, error) {
+	if opt.CDICache == nil {
 		return nil, nil
 	}
-	cdiCache, err := func() (*cdi.Cache, error) {
-		cdiCache, err := cdi.NewCache(cdi.WithSpecDirs(specDirs...))
-		if err != nil {
-			return nil, err
-		}
-		if err := cdiCache.Refresh(); err != nil {
-			return nil, err
-		}
-		if errs := cdiCache.GetErrors(); len(errs) > 0 {
-			for dir, errs := range errs {
-				for _, err := range errs {
-					log.L.Warnf("CDI setup error %v: %+v", dir, err)
-				}
-			}
-		}
-		return cdiCache, nil
-	}()
-	if err != nil {
-		return nil, errors.Wrapf(err, "CDI registry initialization failure")
-	}
 	// TODO: add support for auto-allowed devices from config
-	return cdidevices.NewManager(cdiCache, nil), nil
+	return cdidevices.NewManager(opt.CDICache, nil), nil
 }

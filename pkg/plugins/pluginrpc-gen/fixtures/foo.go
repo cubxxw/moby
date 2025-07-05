@@ -1,4 +1,4 @@
-package foo // import "github.com/docker/docker/pkg/plugins/pluginrpc-gen/fixtures"
+package foo
 
 import (
 	aliasedio "io"
@@ -80,4 +80,15 @@ type Fooer11 interface {
 // Fooer12 is an interface used for tests.
 type Fooer12 interface {
 	Foo(a aliasedio.Reader)
+}
+
+type FooerWithTimeout interface {
+	// pluginrpc-gen:timeout-type=long
+	WithTimeout() (err error)
+}
+
+type FooerWithMultilineAnnotation interface {
+	// Foo is a method that does something
+	// pluginrpc-gen:timeout-type=long
+	WithMultilineAnnotation() (err error)
 }

@@ -1,4 +1,4 @@
-package tarexport // import "github.com/docker/docker/image/tarexport"
+package tarexport
 
 import (
 	"context"
@@ -284,7 +284,7 @@ func (s *saveSession) save(ctx context.Context, outStream io.Writer) error {
 			if _, ok := reposLegacy[familiarName]; !ok {
 				reposLegacy[familiarName] = make(map[string]string)
 			}
-			reposLegacy[familiarName][ref.Tag()] = digest.Digest(imageDescr.layers[len(imageDescr.layers)-1]).Encoded()
+			reposLegacy[familiarName][ref.Tag()] = imageDescr.layers[len(imageDescr.layers)-1].Encoded()
 			repoTags = append(repoTags, reference.FamiliarString(ref))
 
 			taggedManifest := untaggedMfstDesc
@@ -300,10 +300,9 @@ func (s *saveSession) save(ctx context.Context, outStream io.Writer) error {
 			manifestDescriptors = append(manifestDescriptors, untaggedMfstDesc)
 		}
 
-		for _, l := range imageDescr.layers {
+		for _, lDgst := range imageDescr.layers {
 			// IMPORTANT: We use path, not filepath here to ensure the layers
 			// in the manifest use Unix-style forward-slashes.
-			lDgst := digest.Digest(l)
 			layers = append(layers, path.Join(ocispec.ImageBlobsDir, lDgst.Algorithm().String(), lDgst.Encoded()))
 		}
 
@@ -419,7 +418,7 @@ func (s *saveSession) saveImage(ctx context.Context, id image.ID) (_ map[layer.D
 
 	img := s.images[id].image
 	if len(img.RootFS.DiffIDs) == 0 {
-		return nil, fmt.Errorf("empty export - not implemented")
+		return nil, errors.New("empty export - not implemented")
 	}
 
 	ts := time.Unix(0, 0)
@@ -530,11 +529,11 @@ func (s *saveSession) saveConfigAndLayer(ctx context.Context, id layer.ChainID, 
 	}
 
 	lDiffID := l.DiffID()
-	lDgst := digest.Digest(lDiffID)
+	lDgst := lDiffID
 	if _, ok := s.savedLayers[lDiffID]; ok {
 		return s.savedLayers[lDiffID], nil
 	}
-	layerPath := filepath.Join(outDir, lDgst.Algorithm().String(), lDgst.Encoded())
+	layerPath := filepath.Join(outDir, lDiffID.Algorithm().String(), lDiffID.Encoded())
 	defer layer.ReleaseAndLog(s.lss, l)
 
 	if _, err = os.Stat(layerPath); err == nil {

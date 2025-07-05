@@ -6,8 +6,9 @@ package overlay
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/containerd/log"
@@ -28,16 +29,15 @@ const (
 var _ discoverapi.Discover = (*driver)(nil)
 
 type driver struct {
-	bindAddress, advertiseAddress net.IP
+	bindAddress, advertiseAddress netip.Addr
 
-	config        map[string]interface{}
-	peerDb        peerNetworkMap
-	secMap        *encrMap
-	networks      networkTable
-	initOS        sync.Once
-	localJoinOnce sync.Once
-	keys          []*key
-	peerOpMu      sync.Mutex
+	config   map[string]interface{}
+	peerDb   peerNetworkMap
+	secMap   *encrMap
+	networks networkTable
+	initOS   sync.Once
+	keys     []*key
+	peerOpMu sync.Mutex
 	sync.Mutex
 }
 
@@ -48,7 +48,7 @@ func Register(r driverapi.Registerer, config map[string]interface{}) error {
 		peerDb: peerNetworkMap{
 			mp: map[string]*peerMap{},
 		},
-		secMap: &encrMap{nodes: map[string][]*spi{}},
+		secMap: &encrMap{nodes: map[netip.Addr]encrNode{}},
 		config: config,
 	}
 	return r.RegisterDriver(NetworkType, d, driverapi.Capability{
@@ -78,28 +78,23 @@ func (d *driver) isIPv6Transport() (bool, error) {
 	// from the address family of our own advertise address. This is a
 	// reasonable inference to make as Linux VXLAN links do not support
 	// mixed-address-family remote peers.
-	if d.advertiseAddress == nil {
-		return false, fmt.Errorf("overlay: cannot determine address family of transport: the local data-plane address is not currently known")
+	if !d.advertiseAddress.IsValid() {
+		return false, errors.New("overlay: cannot determine address family of transport: the local data-plane address is not currently known")
 	}
-	return d.advertiseAddress.To4() == nil, nil
+	return d.advertiseAddress.Is6(), nil
 }
 
 func (d *driver) nodeJoin(data discoverapi.NodeDiscoveryData) error {
 	if data.Self {
-		advAddr, bindAddr := net.ParseIP(data.Address), net.ParseIP(data.BindAddress)
-		if advAddr == nil {
-			return fmt.Errorf("invalid discovery data")
+		advAddr, _ := netip.ParseAddr(data.Address)
+		bindAddr, _ := netip.ParseAddr(data.BindAddress)
+		if !advAddr.IsValid() {
+			return errors.New("invalid discovery data")
 		}
 		d.Lock()
 		d.advertiseAddress = advAddr
 		d.bindAddress = bindAddr
 		d.Unlock()
-
-		// If containers are already running on this network update the
-		// advertise address in the peerDB
-		d.localJoinOnce.Do(func() {
-			d.peerDBUpdateSelf()
-		})
 	}
 	return nil
 }
@@ -116,7 +111,7 @@ func (d *driver) DiscoverNew(dType discoverapi.DiscoveryType, data interface{}) 
 	case discoverapi.EncryptionKeysConfig:
 		encrData, ok := data.(discoverapi.DriverEncryptionConfig)
 		if !ok {
-			return fmt.Errorf("invalid encryption key notification data")
+			return errors.New("invalid encryption key notification data")
 		}
 		keys := make([]*key, 0, len(encrData.Keys))
 		for i := 0; i < len(encrData.Keys); i++ {
@@ -133,7 +128,7 @@ func (d *driver) DiscoverNew(dType discoverapi.DiscoveryType, data interface{}) 
 		var newKey, delKey, priKey *key
 		encrData, ok := data.(discoverapi.DriverEncryptionUpdate)
 		if !ok {
-			return fmt.Errorf("invalid encryption key notification data")
+			return errors.New("invalid encryption key notification data")
 		}
 		if encrData.Key != nil {
 			newKey = &key{

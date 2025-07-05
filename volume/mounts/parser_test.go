@@ -1,4 +1,4 @@
-package mounts // import "github.com/docker/docker/volume/mounts"
+package mounts
 
 import (
 	"os"
@@ -12,7 +12,7 @@ import (
 
 type mockFiProvider struct{}
 
-func (mockFiProvider) fileInfo(path string) (exists, isDir bool, err error) {
+func (mockFiProvider) fileInfo(path string) (exists, isDir bool, _ error) {
 	dirs := map[string]struct{}{
 		`c:\`:                    {},
 		`c:\windows\`:            {},
@@ -43,11 +43,7 @@ func (m mockFiProviderWithError) fileInfo(path string) (bool, bool, error) {
 }
 
 func TestParseMountSpec(t *testing.T) {
-	testDir, err := os.MkdirTemp("", "test-mount-config")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(testDir)
+	testDir := t.TempDir()
 	parser := NewParser()
 	tests := []struct {
 		input    mount.Mount

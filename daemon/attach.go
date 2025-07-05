@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -7,9 +7,10 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/backend"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/container"
-	"github.com/docker/docker/container/stream"
+	"github.com/docker/docker/daemon/container"
+	"github.com/docker/docker/daemon/internal/stream"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -191,7 +192,7 @@ func (daemon *Daemon) containerAttach(ctr *container.Container, cfg *stream.Atta
 
 	if ctr.Config.StdinOnce && !ctr.Config.Tty {
 		// Wait for the container to stop before returning.
-		waitChan := ctr.Wait(context.Background(), container.WaitConditionNotRunning)
+		waitChan := ctr.Wait(context.Background(), containertypes.WaitConditionNotRunning)
 		defer func() {
 			<-waitChan // Ignore returned exit code.
 		}()

@@ -47,7 +47,7 @@ type Bitmap struct {
 	noCopy noCopy
 }
 
-// NewHandle returns a new Bitmap of ordinals in the interval [0, n).
+// New returns a new Bitmap of ordinals in the interval [0, n).
 func New(n uint64) *Bitmap {
 	return &Bitmap{
 		bits:       n,
@@ -232,7 +232,7 @@ func (h *Bitmap) IsSet(ordinal uint64) bool {
 }
 
 // set/reset the bit
-func (h *Bitmap) set(ordinal, start, end uint64, any bool, release bool, serial bool) (uint64, error) {
+func (h *Bitmap) set(ordinal, start, end uint64, isAvailable bool, release bool, serial bool) (uint64, error) {
 	var (
 		bitPos  uint64
 		bytePos uint64
@@ -248,7 +248,7 @@ func (h *Bitmap) set(ordinal, start, end uint64, any bool, release bool, serial 
 	if release {
 		bytePos, bitPos = ordinalToPos(ordinal)
 	} else {
-		if any {
+		if isAvailable {
 			bytePos, bitPos, err = getAvailableFromCurrent(h.head, start, curr, end)
 			ret = posToOrdinal(bytePos, bitPos)
 			if err == nil {
@@ -518,7 +518,8 @@ func pushReservation(bytePos, bitPos uint64, head *sequence, release bool) (_ *s
 	newSequence := &sequence{block: newBlock, count: 1}
 
 	// Insert the new sequence in the list based on block position
-	if precBlocks == 0 { // First in sequence (A)
+	switch precBlocks {
+	case 0: // First in sequence (A)
 		newSequence.next = current
 		if current == head {
 			newHead = newSequence
@@ -528,11 +529,11 @@ func pushReservation(bytePos, bitPos uint64, head *sequence, release bool) (_ *s
 		}
 		removeCurrentIfEmpty(&newHead, newSequence, current)
 		mergeSequences(previous)
-	} else if precBlocks == current.count { // Last in sequence (B)
+	case current.count: // Last in sequence (B)
 		newSequence.next = current.next
 		current.next = newSequence
 		mergeSequences(current)
-	} else { // In between the sequence (C)
+	default: // In between the sequence (C)
 		currPre := &sequence{block: current.block, count: precBlocks, next: newSequence}
 		currPost := current
 		currPost.count -= precBlocks

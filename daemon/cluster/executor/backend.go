@@ -1,4 +1,4 @@
-package executor // import "github.com/docker/docker/daemon/cluster/executor"
+package executor
 
 import (
 	"context"
@@ -16,14 +16,13 @@ import (
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
-	containerpkg "github.com/docker/docker/container"
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
 	networkSettings "github.com/docker/docker/daemon/network"
+	"github.com/docker/docker/daemon/pkg/plugin"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/libnetwork"
 	"github.com/docker/docker/libnetwork/cluster"
 	networktypes "github.com/docker/docker/libnetwork/types"
-	"github.com/docker/docker/plugin"
 	volumeopts "github.com/docker/docker/volume/service/opts"
 	"github.com/moby/swarmkit/v2/agent/exec"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -45,7 +44,7 @@ type Backend interface {
 	DeactivateContainerServiceBinding(containerName string) error
 	UpdateContainerServiceConfig(containerName string, serviceConfig *clustertypes.ServiceConfig) error
 	ContainerInspect(ctx context.Context, name string, options backend.ContainerInspectOptions) (*container.InspectResponse, error)
-	ContainerWait(ctx context.Context, name string, condition containerpkg.WaitCondition) (<-chan containerpkg.StateStatus, error)
+	ContainerWait(ctx context.Context, name string, condition container.WaitCondition) (<-chan container.StateStatus, error)
 	ContainerRm(name string, config *backend.ContainerRmConfig) error
 	ContainerKill(name string, sig string) error
 	SetContainerDependencyStore(name string, store exec.DependencyGetter) error

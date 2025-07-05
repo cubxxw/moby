@@ -8,12 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestTLSCloseWriter(t *testing.T) {
@@ -25,28 +26,33 @@ func TestTLSCloseWriter(t *testing.T) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			chErr = make(chan error, 1)
 			defer close(chErr)
-			if err := httputils.ParseForm(req); err != nil {
+
+			if err := req.ParseForm(); err != nil && !strings.HasPrefix(err.Error(), "mime:") {
 				chErr <- fmt.Errorf("error parsing form: %w", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			r, rw, err := httputils.HijackConnection(w)
+
+			conn, _, err := w.(http.Hijacker).Hijack()
 			if err != nil {
 				chErr <- fmt.Errorf("error hijacking connection: %w", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			defer r.Close()
+			defer conn.Close()
 
-			fmt.Fprint(rw, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\n")
+			// Flush the options to make sure the client sets the raw mode
+			_, _ = conn.Write([]byte{})
+
+			fmt.Fprint(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\n")
 
 			buf := make([]byte, 5)
-			_, err = r.Read(buf)
+			_, err = conn.Read(buf)
 			if err != nil {
 				chErr <- fmt.Errorf("error reading from client: %w", err)
 				return
 			}
-			_, err = rw.Write(buf)
+			_, err = conn.Write(buf)
 			if err != nil {
 				chErr <- fmt.Errorf("error writing to client: %w", err)
 				return
@@ -71,7 +77,7 @@ func TestTLSCloseWriter(t *testing.T) {
 
 	defer func() {
 		if chErr != nil {
-			assert.Assert(t, <-chErr)
+			assert.NilError(t, <-chErr)
 		}
 	}()
 
@@ -88,19 +94,18 @@ func TestTLSCloseWriter(t *testing.T) {
 	assert.NilError(t, err)
 	defer resp.Close()
 
-	if _, ok := resp.Conn.(types.CloseWriter); !ok {
-		t.Fatal("tls conn did not implement the CloseWrite interface")
-	}
+	_, ok := resp.Conn.(types.CloseWriter)
+	assert.Check(t, ok, "tls conn did not implement the CloseWrite interface")
 
 	_, err = resp.Conn.Write([]byte("hello"))
 	assert.NilError(t, err)
 
 	b, err := io.ReadAll(resp.Reader)
 	assert.NilError(t, err)
-	assert.Assert(t, string(b) == "hello")
-	assert.Assert(t, resp.CloseWrite())
+	assert.Check(t, is.Equal(string(b), "hello"))
+	assert.NilError(t, resp.CloseWrite())
 
 	// This should error since writes are closed
 	_, err = resp.Conn.Write([]byte("no"))
-	assert.Assert(t, err != nil)
+	assert.Check(t, err != nil)
 }

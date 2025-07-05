@@ -1,4 +1,4 @@
-package plugin // import "github.com/docker/docker/daemon/cluster/controllers/plugin"
+package plugin
 
 import (
 	"context"
@@ -15,8 +15,8 @@ import (
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/swarm/runtime"
-	"github.com/docker/docker/plugin"
-	v2 "github.com/docker/docker/plugin/v2"
+	"github.com/docker/docker/daemon/pkg/plugin"
+	v2 "github.com/docker/docker/daemon/pkg/plugin/v2"
 	"github.com/moby/pubsub"
 	"github.com/sirupsen/logrus"
 )
@@ -117,7 +117,7 @@ func TestWaitCancel(t *testing.T) {
 	cancel()
 	select {
 	case err := <-chErr:
-		if err != context.Canceled {
+		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
 	case <-time.After(10 * time.Second):

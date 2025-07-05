@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/containerd/platforms"
+	slsa02 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v0.2"
+	slsa1 "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v1"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/config"
 	"github.com/moby/buildkit/client/llb/sourceresolver"
@@ -17,6 +19,7 @@ import (
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/frontend"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/solver/llbsolver/ops"
 	"github.com/moby/buildkit/solver/llbsolver/provenance"
 	provenancetypes "github.com/moby/buildkit/solver/llbsolver/provenance/types"
@@ -167,14 +170,18 @@ func (b *provenanceBridge) Solve(ctx context.Context, req frontend.SolveRequest,
 		b.builds = append(b.builds, resultWithBridge{res: res, bridge: b})
 		b.mu.Unlock()
 	} else if req.Frontend != "" {
-		f, ok := b.llbBridge.frontends[req.Frontend]
+		f, ok := b.frontends[req.Frontend]
 		if !ok {
 			return nil, errors.Errorf("invalid frontend: %s", req.Frontend)
 		}
 		wb := &provenanceBridge{llbBridge: b.llbBridge, req: &req}
-		res, err = f.Solve(ctx, wb, b.llbBridge, req.FrontendOpt, req.FrontendInputs, sid, b.llbBridge.sm)
+		res, err = f.Solve(ctx, wb, b.llbBridge, req.FrontendOpt, req.FrontendInputs, sid, b.sm)
 		if err != nil {
-			return nil, err
+			fe := errdefs.Frontend{
+				Name:   req.Frontend,
+				Source: req.FrontendOpt[frontend.KeySource],
+			}
+			return nil, fe.WrapError(err)
 		}
 		wb.builds = append(wb.builds, resultWithBridge{res: res, bridge: wb})
 		b.mu.Lock()
@@ -325,13 +332,14 @@ func captureProvenance(ctx context.Context, res solver.CachedResultWithProvenanc
 }
 
 type ProvenanceCreator struct {
-	pr        *provenancetypes.ProvenancePredicate
-	j         *solver.Job
-	sampler   *resources.SysSampler
-	addLayers func() error
+	pr          *provenancetypes.ProvenancePredicateSLSA02
+	slsaVersion provenancetypes.ProvenanceSLSA
+	j           *solver.Job
+	sampler     *resources.SysSampler
+	addLayers   func(context.Context) error
 }
 
-func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solver.ResultProxy, attrs map[string]string, j *solver.Job, usage *resources.SysSampler) (*ProvenanceCreator, error) {
+func NewProvenanceCreator(ctx context.Context, slsaVersion provenancetypes.ProvenanceSLSA, cp *provenance.Capture, res solver.ResultProxy, attrs map[string]string, j *solver.Job, usage *resources.SysSampler) (*ProvenanceCreator, error) {
 	var reproducible bool
 	if v, ok := attrs["reproducible"]; ok {
 		b, err := strconv.ParseBool(v)
@@ -372,7 +380,7 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 
 	pr.Builder.ID = attrs["builder-id"]
 
-	var addLayers func() error
+	var addLayers func(context.Context) error
 
 	switch mode {
 	case "min":
@@ -403,7 +411,7 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 			return nil, errors.Errorf("invalid worker ref %T", r.Sys())
 		}
 
-		addLayers = func() error {
+		addLayers = func(ctx context.Context) error {
 			e := newCacheExporter()
 
 			if wref.ImmutableRef != nil {
@@ -432,9 +440,8 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 
 			if len(m) != 0 {
 				if pr.Metadata == nil {
-					pr.Metadata = &provenancetypes.ProvenanceMetadata{}
+					pr.Metadata = &provenancetypes.ProvenanceMetadataSLSA02{}
 				}
-
 				pr.Metadata.BuildKitMetadata.Layers = m
 			}
 
@@ -445,9 +452,10 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 	}
 
 	pc := &ProvenanceCreator{
-		pr:        pr,
-		j:         j,
-		addLayers: addLayers,
+		pr:          pr,
+		slsaVersion: slsaVersion,
+		j:           j,
+		addLayers:   addLayers,
 	}
 	if withUsage {
 		pc.sampler = usage
@@ -455,12 +463,19 @@ func NewProvenanceCreator(ctx context.Context, cp *provenance.Capture, res solve
 	return pc, nil
 }
 
-func (p *ProvenanceCreator) Predicate() (*provenancetypes.ProvenancePredicate, error) {
+func (p *ProvenanceCreator) PredicateType() string {
+	if p.slsaVersion == provenancetypes.ProvenanceSLSA1 {
+		return slsa1.PredicateSLSAProvenance
+	}
+	return slsa02.PredicateSLSAProvenance
+}
+
+func (p *ProvenanceCreator) Predicate(ctx context.Context) (any, error) {
 	end := p.j.RegisterCompleteTime()
 	p.pr.Metadata.BuildFinishedOn = &end
 
 	if p.addLayers != nil {
-		if err := p.addLayers(); err != nil {
+		if err := p.addLayers(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -471,6 +486,10 @@ func (p *ProvenanceCreator) Predicate() (*provenancetypes.ProvenancePredicate, e
 			return nil, err
 		}
 		p.pr.Metadata.BuildKitMetadata.SysUsage = sysSamples
+	}
+
+	if p.slsaVersion == provenancetypes.ProvenanceSLSA1 {
+		return provenancetypes.ConvertSLSA02ToSLSA1(p.pr), nil
 	}
 
 	return p.pr, nil
@@ -548,7 +567,7 @@ func resolveRemotes(ctx context.Context, res solver.Result) ([]*solver.Remote, e
 	return remotes, nil
 }
 
-func AddBuildConfig(ctx context.Context, p *provenancetypes.ProvenancePredicate, c *provenance.Capture, rp solver.ResultProxy, withUsage bool) (map[digest.Digest]int, error) {
+func AddBuildConfig(ctx context.Context, p *provenancetypes.ProvenancePredicateSLSA02, c *provenance.Capture, rp solver.ResultProxy, withUsage bool) (map[digest.Digest]int, error) {
 	def := rp.Definition()
 	steps, indexes, err := toBuildSteps(def, c, withUsage)
 	if err != nil {
@@ -590,7 +609,7 @@ func AddBuildConfig(ctx context.Context, p *provenancetypes.ProvenancePredicate,
 			}
 
 			if p.Metadata == nil {
-				p.Metadata = &provenancetypes.ProvenanceMetadata{}
+				p.Metadata = &provenancetypes.ProvenanceMetadataSLSA02{}
 			}
 			p.Metadata.BuildKitMetadata.Source = &provenancetypes.Source{
 				Infos:     sis,

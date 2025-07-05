@@ -1,9 +1,9 @@
-package registry // import "github.com/docker/docker/registry"
+package registry
 
 import (
 	"testing"
 
-	"github.com/docker/docker/errdefs"
+	cerrdefs "github.com/containerd/errdefs"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -78,8 +78,16 @@ func TestValidateMirror(t *testing.T) {
 			expectedErr: `invalid mirror: "!invalid!://%as%" is not a valid URI: parse "!invalid!://%as%": first path segment in URL cannot contain colon`,
 		},
 		{
+			input:       "mirror-1.example.com",
+			expectedErr: `invalid mirror: no scheme specified for "mirror-1.example.com": must use either 'https://' or 'http://'`,
+		},
+		{
+			input:       "mirror-1.example.com:5000",
+			expectedErr: `invalid mirror: no scheme specified for "mirror-1.example.com:5000": must use either 'https://' or 'http://'`,
+		},
+		{
 			input:       "ftp://mirror-1.example.com",
-			expectedErr: `invalid mirror: unsupported scheme "ftp" in "ftp://mirror-1.example.com"`,
+			expectedErr: `invalid mirror: unsupported scheme "ftp" in "ftp://mirror-1.example.com": must use either 'https://' or 'http://'`,
 		},
 		{
 			input:       "http://mirror-1.example.com/?q=foo",
@@ -216,7 +224,7 @@ func TestLoadInsecureRegistries(t *testing.T) {
 				t.Fatalf("expect error '%s', got no error", testCase.err)
 			}
 			assert.ErrorContains(t, err, testCase.err)
-			assert.Check(t, errdefs.IsInvalidParameter(err))
+			assert.Check(t, cerrdefs.IsInvalidArgument(err))
 		}
 	}
 }
@@ -235,7 +243,7 @@ func TestNewServiceConfig(t *testing.T) {
 			opts: ServiceOptions{
 				Mirrors: []string{"example.com:5000"},
 			},
-			errStr: `invalid mirror: unsupported scheme "example.com" in "example.com:5000"`,
+			errStr: `invalid mirror: no scheme specified for "example.com:5000": must use either 'https://' or 'http://'`,
 		},
 		{
 			doc: "valid mirror",
@@ -263,7 +271,7 @@ func TestNewServiceConfig(t *testing.T) {
 			_, err := newServiceConfig(tc.opts)
 			if tc.errStr != "" {
 				assert.Check(t, is.Error(err, tc.errStr))
-				assert.Check(t, errdefs.IsInvalidParameter(err))
+				assert.Check(t, cerrdefs.IsInvalidArgument(err))
 			} else {
 				assert.Check(t, err)
 			}
@@ -327,6 +335,6 @@ func TestValidateIndexNameWithError(t *testing.T) {
 	for _, testCase := range invalid {
 		_, err := ValidateIndexName(testCase.index)
 		assert.Check(t, is.Error(err, testCase.err))
-		assert.Check(t, errdefs.IsInvalidParameter(err))
+		assert.Check(t, cerrdefs.IsInvalidArgument(err))
 	}
 }
