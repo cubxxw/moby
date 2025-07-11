@@ -1,6 +1,6 @@
 //go:build !windows
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/events"
 	mounttypes "github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	"github.com/docker/docker/internal/cleanups"
 	"github.com/docker/docker/pkg/idtools"
 	volumemounts "github.com/docker/docker/volume/mounts"

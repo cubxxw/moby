@@ -1,4 +1,4 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"context"
@@ -6,9 +6,9 @@ import (
 	"net/url"
 	"strings"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/errdefs"
 )
 
 // ImagePull requests the docker host to pull an image from a remote registry.
@@ -34,13 +34,9 @@ func (cli *Client) ImagePull(ctx context.Context, refStr string, options image.P
 		query.Set("platform", strings.ToLower(options.Platform))
 	}
 
-	resp, err := cli.tryImageCreate(ctx, query, options.RegistryAuth)
-	if errdefs.IsUnauthorized(err) && options.PrivilegeFunc != nil {
-		newAuthHeader, privilegeErr := options.PrivilegeFunc(ctx)
-		if privilegeErr != nil {
-			return nil, privilegeErr
-		}
-		resp, err = cli.tryImageCreate(ctx, query, newAuthHeader)
+	resp, err := cli.tryImageCreate(ctx, query, staticAuth(options.RegistryAuth))
+	if cerrdefs.IsUnauthorized(err) && options.PrivilegeFunc != nil {
+		resp, err = cli.tryImageCreate(ctx, query, options.PrivilegeFunc)
 	}
 	if err != nil {
 		return nil, err

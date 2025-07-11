@@ -1,4 +1,4 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
@@ -15,7 +15,6 @@ import (
 	"github.com/docker/docker/api/types"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
-	"gotest.tools/v3/env"
 	"gotest.tools/v3/skip"
 )
 
@@ -86,15 +85,16 @@ func TestNewClientWithOpsFromEnv(t *testing.T) {
 		},
 	}
 
-	env.PatchAll(t, nil)
 	for _, tc := range testcases {
 		t.Run(tc.doc, func(t *testing.T) {
-			env.PatchAll(t, tc.envs)
+			for key, value := range tc.envs {
+				t.Setenv(key, value)
+			}
 			client, err := NewClientWithOpts(FromEnv)
 			if tc.expectedError != "" {
 				assert.Check(t, is.Error(err, tc.expectedError))
 			} else {
-				assert.Check(t, err)
+				assert.NilError(t, err)
 				assert.Check(t, is.Equal(client.ClientVersion(), tc.expectedVersion))
 			}
 
@@ -228,25 +228,19 @@ func TestParseHostURL(t *testing.T) {
 }
 
 func TestNewClientWithOpsFromEnvSetsDefaultVersion(t *testing.T) {
-	env.PatchAll(t, map[string]string{
-		"DOCKER_HOST":        "",
-		"DOCKER_API_VERSION": "",
-		"DOCKER_TLS_VERIFY":  "",
-		"DOCKER_CERT_PATH":   "",
-	})
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_API_VERSION", "")
+	t.Setenv("DOCKER_TLS_VERIFY", "")
+	t.Setenv("DOCKER_CERT_PATH", "")
 
 	client, err := NewClientWithOpts(FromEnv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NilError(t, err)
 	assert.Check(t, is.Equal(client.ClientVersion(), api.DefaultVersion))
 
 	const expected = "1.22"
 	t.Setenv("DOCKER_API_VERSION", expected)
 	client, err = NewClientWithOpts(FromEnv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NilError(t, err)
 	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
@@ -268,7 +262,7 @@ func TestNegotiateAPIVersionEmpty(t *testing.T) {
 
 	// test downgrade
 	client.NegotiateAPIVersionPing(types.Ping{})
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
 // TestNegotiateAPIVersion asserts that client.Client can
@@ -333,7 +327,7 @@ func TestNegotiateAPIVersion(t *testing.T) {
 			client, err := NewClientWithOpts(opts...)
 			assert.NilError(t, err)
 			client.NegotiateAPIVersionPing(types.Ping{APIVersion: tc.pingVersion})
-			assert.Equal(t, tc.expectedVersion, client.ClientVersion())
+			assert.Check(t, is.Equal(tc.expectedVersion, client.ClientVersion()))
 		})
 	}
 }
@@ -349,7 +343,7 @@ func TestNegotiateAPIVersionOverride(t *testing.T) {
 
 	// test that we honored the env var
 	client.NegotiateAPIVersionPing(types.Ping{APIVersion: "1.24"})
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
 // TestNegotiateAPIVersionConnectionFailure asserts that we do not modify the
@@ -362,7 +356,7 @@ func TestNegotiateAPIVersionConnectionFailure(t *testing.T) {
 
 	client.version = expected
 	client.NegotiateAPIVersion(context.Background())
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
 func TestNegotiateAPIVersionAutomatic(t *testing.T) {
@@ -383,19 +377,19 @@ func TestNegotiateAPIVersionAutomatic(t *testing.T) {
 
 	// Client defaults to use api.DefaultVersion before version-negotiation.
 	expected := api.DefaultVersion
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 
 	// First request should trigger negotiation
 	pingVersion = "1.35"
 	expected = "1.35"
 	_, _ = client.Info(ctx)
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 
 	// Once successfully negotiated, subsequent requests should not re-negotiate
 	pingVersion = "1.25"
 	expected = "1.35"
 	_, _ = client.Info(ctx)
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
 // TestNegotiateAPIVersionWithEmptyVersion asserts that initializing a client
@@ -406,7 +400,7 @@ func TestNegotiateAPIVersionWithEmptyVersion(t *testing.T) {
 
 	const expected = "1.35"
 	client.NegotiateAPIVersionPing(types.Ping{APIVersion: expected})
-	assert.Equal(t, client.ClientVersion(), expected)
+	assert.Check(t, is.Equal(client.ClientVersion(), expected))
 }
 
 // TestNegotiateAPIVersionWithFixedVersion asserts that initializing a client
@@ -417,7 +411,7 @@ func TestNegotiateAPIVersionWithFixedVersion(t *testing.T) {
 	assert.NilError(t, err)
 
 	client.NegotiateAPIVersionPing(types.Ping{APIVersion: "1.31"})
-	assert.Equal(t, client.ClientVersion(), customVersion)
+	assert.Check(t, is.Equal(client.ClientVersion(), customVersion))
 }
 
 // TestCustomAPIVersion tests initializing the client with a custom
@@ -462,12 +456,12 @@ func TestCustomAPIVersion(t *testing.T) {
 		t.Run(tc.version, func(t *testing.T) {
 			client, err := NewClientWithOpts(WithVersion(tc.version))
 			assert.NilError(t, err)
-			assert.Equal(t, client.ClientVersion(), tc.expected)
+			assert.Check(t, is.Equal(client.ClientVersion(), tc.expected))
 
 			t.Setenv(EnvOverrideAPIVersion, tc.expected)
 			client, err = NewClientWithOpts(WithVersionFromEnv())
 			assert.NilError(t, err)
-			assert.Equal(t, client.ClientVersion(), tc.expected)
+			assert.Check(t, is.Equal(client.ClientVersion(), tc.expected))
 		})
 	}
 }
@@ -529,16 +523,16 @@ func TestClientRedirect(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.httpMethod, func(t *testing.T) {
-			req, err := http.NewRequest(tc.httpMethod, "/redirectme", nil)
-			assert.Check(t, err)
+			req, err := http.NewRequest(tc.httpMethod, "/redirectme", http.NoBody)
+			assert.NilError(t, err)
 			resp, err := client.Do(req)
 			assert.Check(t, is.Equal(resp.StatusCode, tc.statusCode))
 			if tc.expectedErr == nil {
-				assert.Check(t, err)
+				assert.NilError(t, err)
 			} else {
 				assert.Check(t, is.ErrorType(err, &url.Error{}))
 				var urlError *url.Error
-				assert.Assert(t, errors.As(err, &urlError), "%T is not *url.Error", err)
+				assert.Check(t, errors.As(err, &urlError), "%T is not *url.Error", err)
 				assert.Check(t, is.Equal(*urlError, *tc.expectedErr))
 			}
 		})

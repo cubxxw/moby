@@ -4,11 +4,14 @@ package overlay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/internal/netiputil"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
 )
@@ -20,26 +23,7 @@ type endpoint struct {
 	nid    string
 	ifName string
 	mac    net.HardwareAddr
-	addr   *net.IPNet
-}
-
-func (n *network) endpoint(eid string) *endpoint {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.endpoints[eid]
-}
-
-func (n *network) addEndpoint(ep *endpoint) {
-	n.Lock()
-	n.endpoints[ep.id] = ep
-	n.Unlock()
-}
-
-func (n *network) deleteEndpoint(eid string) {
-	n.Lock()
-	delete(n.endpoints, eid)
-	n.Unlock()
+	addr   netip.Prefix
 }
 
 func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
@@ -55,19 +39,21 @@ func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo drive
 		return err
 	}
 
-	n := d.network(nid)
-	if n == nil {
-		return fmt.Errorf("network id %q not found", nid)
+	n, unlock, err := d.lockNetwork(nid)
+	if err != nil {
+		return err
 	}
+	defer unlock()
 
 	ep := &endpoint{
-		id:   eid,
-		nid:  n.id,
-		addr: ifInfo.Address(),
-		mac:  ifInfo.MacAddress(),
+		id:  eid,
+		nid: n.id,
+		mac: ifInfo.MacAddress(),
 	}
-	if ep.addr == nil {
-		return fmt.Errorf("create endpoint was not passed interface IP address")
+	var ok bool
+	ep.addr, ok = netiputil.ToPrefix(ifInfo.Address())
+	if !ok {
+		return errors.New("create endpoint was not passed interface IP address")
 	}
 
 	if s := n.getSubnetforIP(ep.addr); s == nil {
@@ -75,13 +61,13 @@ func (d *driver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo drive
 	}
 
 	if ep.mac == nil {
-		ep.mac = netutils.GenerateMACFromIP(ep.addr.IP)
+		ep.mac = netutils.GenerateMACFromIP(ep.addr.Addr().AsSlice())
 		if err := ifInfo.SetMacAddress(ep.mac); err != nil {
 			return err
 		}
 	}
 
-	n.addEndpoint(ep)
+	n.endpoints[ep.id] = ep
 
 	return nil
 }
@@ -93,17 +79,18 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 		return err
 	}
 
-	n := d.network(nid)
-	if n == nil {
-		return fmt.Errorf("network id %q not found", nid)
+	n, unlock, err := d.lockNetwork(nid)
+	if err != nil {
+		return err
 	}
+	defer unlock()
 
-	ep := n.endpoint(eid)
+	ep := n.endpoints[eid]
 	if ep == nil {
 		return fmt.Errorf("endpoint id %q not found", eid)
 	}
 
-	n.deleteEndpoint(eid)
+	delete(n.endpoints, eid)
 
 	if ep.ifName == "" {
 		return nil

@@ -50,14 +50,14 @@ func NewHandleAt(ns netns.NsHandle, nlFamilies ...int) (Handle, error) {
 	return Handle{nlh}, nil
 }
 
-func (h Handle) Close() {
-	if h.Handle != nil {
-		h.Handle.Close()
+func (nlh Handle) Close() {
+	if nlh.Handle != nil {
+		nlh.Handle.Close()
 	}
 }
 
 func retryOnIntr(f func() error) {
-	for attempt := 0; attempt < maxAttempts; attempt += 1 {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := f(); !errors.Is(err, netlink.ErrDumpInterrupted) {
 			return
 		}

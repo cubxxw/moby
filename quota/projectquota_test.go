@@ -1,8 +1,9 @@
 //go:build linux
 
-package quota // import "github.com/docker/docker/quota"
+package quota
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func testBiggerThanQuota(t *testing.T, ctrl *Control, homeDir, testDir, testSubD
 	biggerThanQuotaFile := filepath.Join(testSubDir, "bigger-than-quota")
 	err := os.WriteFile(biggerThanQuotaFile, make([]byte, testQuotaSize+1), 0o644)
 	assert.ErrorContains(t, err, "")
-	if err == io.ErrShortWrite {
+	if errors.Is(err, io.ErrShortWrite) {
 		assert.NilError(t, os.Remove(biggerThanQuotaFile))
 	}
 }

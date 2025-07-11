@@ -109,9 +109,7 @@ func (nDB *NetworkDB) handleNetworkEvent(nEvent *NetworkEvent) bool {
 			n.reapTime = nDB.config.reapNetworkInterval
 
 			// The remote node is leaving the network, but not the gossip cluster.
-			// Mark all its entries in deleted state, this will guarantee that
-			// if some node bulk sync with us, the deleted state of
-			// these entries will be propagated.
+			// Delete all the entries for this network owned by the node.
 			nDB.deleteNodeNetworkEntries(nEvent.NetworkID, nEvent.NodeName)
 		}
 
@@ -135,10 +133,7 @@ func (nDB *NetworkDB) handleNetworkEvent(nEvent *NetworkEvent) bool {
 	}
 
 	// This remote network join is being seen the first time.
-	nodeNetworks[nEvent.NetworkID] = &network{
-		id:    nEvent.NetworkID,
-		ltime: nEvent.LTime,
-	}
+	nodeNetworks[nEvent.NetworkID] = &network{ltime: nEvent.LTime}
 
 	nDB.addNetworkNode(nEvent.NetworkID, nEvent.NodeName)
 	return true
@@ -148,10 +143,14 @@ func (nDB *NetworkDB) handleTableEvent(tEvent *TableEvent, isBulkSync bool) bool
 	// Update our local clock if the received messages has newer time.
 	nDB.tableClock.Witness(tEvent.LTime)
 
+	nDB.Lock()
+	// Hold the lock until after we broadcast the event to watchers so that
+	// the new watch receives either the synthesized event or the event we
+	// broadcast, never both.
+	defer nDB.Unlock()
+
 	// Ignore the table events for networks that are in the process of going away
-	nDB.RLock()
-	networks := nDB.networks[nDB.config.NodeID]
-	network, ok := networks[tEvent.NetworkID]
+	network, ok := nDB.thisNodeNetworks[tEvent.NetworkID]
 	// Check if the owner of the event is still part of the network
 	nodes := nDB.networkNodes[tEvent.NetworkID]
 	var nodePresent bool
@@ -161,33 +160,24 @@ func (nDB *NetworkDB) handleTableEvent(tEvent *TableEvent, isBulkSync bool) bool
 			break
 		}
 	}
-	nDB.RUnlock()
 
 	if !ok || network.leaving || !nodePresent {
 		// I'm out of the network OR the event owner is not anymore part of the network so do not propagate
 		return false
 	}
 
-	nDB.Lock()
-	e, err := nDB.getEntry(tEvent.TableName, tEvent.NetworkID, tEvent.Key)
+	var entryPresent bool
+	prev, err := nDB.getEntry(tEvent.TableName, tEvent.NetworkID, tEvent.Key)
 	if err == nil {
+		entryPresent = true
 		// We have the latest state. Ignore the event
 		// since it is stale.
-		if e.ltime >= tEvent.LTime {
-			nDB.Unlock()
+		if prev.ltime >= tEvent.LTime {
 			return false
 		}
-	} else if tEvent.Type == TableEventTypeDelete && !isBulkSync {
-		nDB.Unlock()
-		// We don't know the entry, the entry is being deleted and the message is an async message
-		// In this case the safest approach is to ignore it, it is possible that the queue grew so much to
-		// exceed the garbage collection time (the residual reap time that is in the message is not being
-		// updated, to avoid inserting too many messages in the queue).
-		// Instead the messages coming from TCP bulk sync are safe with the latest value for the garbage collection time
-		return false
 	}
 
-	e = &entry{
+	e := &entry{
 		ltime:    tEvent.LTime,
 		node:     tEvent.NodeName,
 		value:    tEvent.Value,
@@ -204,35 +194,55 @@ func (nDB *NetworkDB) handleTableEvent(tEvent *TableEvent, isBulkSync bool) bool
 		e.reapTime = nDB.config.reapEntryInterval
 	}
 	nDB.createOrUpdateEntry(tEvent.NetworkID, tEvent.TableName, tEvent.Key, e)
-	nDB.Unlock()
 
-	if err != nil && tEvent.Type == TableEventTypeDelete {
-		// Again we don't know the entry but this is coming from a TCP sync so the message body is up to date.
-		// We had saved the state so to speed up convergence and be able to avoid accepting create events.
-		// Now we will rebroadcast the message if 2 conditions are met:
-		// 1) we had already synced this network (during the network join)
-		// 2) the residual reapTime is higher than 1/6 of the total reapTime.
-		// If the residual reapTime is lower or equal to 1/6 of the total reapTime don't bother broadcasting it around
-		// most likely the cluster is already aware of it
-		// This also reduce the possibility that deletion of entries close to their garbage collection ends up circling around
-		// forever
+	if !entryPresent && tEvent.Type == TableEventTypeDelete {
+		// We will rebroadcast the message for an unknown entry if all the conditions are met:
+		// 1) the message was received from a bulk sync
+		// 2) we had already synced this network (during the network join)
+		// 3) the residual reapTime is higher than 1/6 of the total reapTime.
+		//
+		// If the residual reapTime is lower or equal to 1/6 of the total reapTime
+		// don't bother broadcasting it around as most likely the cluster is already aware of it.
+		// This also reduces the possibility that deletion of entries close to their garbage collection
+		// ends up circling around forever.
+		//
+		// The safest approach is to not rebroadcast async messages for unknown entries.
+		// It is possible that the queue grew so much to exceed the garbage collection time
+		// (the residual reap time that is in the message is not being updated, to avoid
+		// inserting too many messages in the queue).
+
 		// log.G(ctx).Infof("exiting on delete not knowing the obj with rebroadcast:%t", network.inSync)
-		return network.inSync && e.reapTime > nDB.config.reapEntryInterval/6
+		return isBulkSync && network.inSync && e.reapTime > nDB.config.reapEntryInterval/6
 	}
 
 	var op opType
+	value := tEvent.Value
 	switch tEvent.Type {
-	case TableEventTypeCreate:
+	case TableEventTypeCreate, TableEventTypeUpdate:
+		// Gossip messages could arrive out-of-order so it is possible
+		// for an entry's UPDATE event to be received before its CREATE
+		// event. The local watchers should not need to care about such
+		// nuances. Broadcast events to watchers based only on what
+		// changed in the local NetworkDB state.
 		op = opCreate
-	case TableEventTypeUpdate:
-		op = opUpdate
+		if entryPresent && !prev.deleting {
+			op = opUpdate
+		}
 	case TableEventTypeDelete:
+		if !entryPresent || prev.deleting {
+			goto SkipBroadcast
+		}
 		op = opDelete
+		// Broadcast the value most recently observed by watchers,
+		// which may be different from the value in the DELETE event
+		// (e.g. if the DELETE event was received out-of-order).
+		value = prev.value
 	default:
 		// TODO(thaJeztah): make switch exhaustive; add networkdb.TableEventTypeInvalid
 	}
 
-	nDB.broadcaster.Write(makeEvent(op, tEvent.TableName, tEvent.NetworkID, tEvent.Key, tEvent.Value))
+	nDB.broadcaster.Write(makeEvent(op, tEvent.TableName, tEvent.NetworkID, tEvent.Key, value))
+SkipBroadcast:
 	return network.inSync
 }
 
@@ -271,20 +281,20 @@ func (nDB *NetworkDB) handleTableMessage(buf []byte, isBulkSync bool) {
 		}
 
 		nDB.RLock()
-		n, ok := nDB.networks[nDB.config.NodeID][tEvent.NetworkID]
+		n, ok := nDB.thisNodeNetworks[tEvent.NetworkID]
 		nDB.RUnlock()
 
-		// if the network is not there anymore, OR we are leaving the network OR the broadcast queue is not present
-		if !ok || n.leaving || n.tableBroadcasts == nil {
+		// if the network is not there anymore, OR we are leaving the network
+		if !ok || n.leaving {
 			return
 		}
 
 		// if the queue is over the threshold, avoid distributing information coming from TCP sync
-		if isBulkSync && n.tableBroadcasts.NumQueued() > maxQueueLenBroadcastOnSync {
+		if isBulkSync && n.tableRebroadcasts.NumQueued() > maxQueueLenBroadcastOnSync {
 			return
 		}
 
-		n.tableBroadcasts.QueueBroadcast(&tableEventMessage{
+		n.tableRebroadcasts.QueueBroadcast(&tableEventMessage{
 			msg:   buf,
 			id:    tEvent.NetworkID,
 			tname: tEvent.TableName,
@@ -407,9 +417,7 @@ func (d *delegate) NotifyMsg(buf []byte) {
 }
 
 func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte {
-	msgs := d.nDB.networkBroadcasts.GetBroadcasts(overhead, limit)
-	msgs = append(msgs, d.nDB.nodeBroadcasts.GetBroadcasts(overhead, limit)...)
-	return msgs
+	return getBroadcasts(overhead, limit, d.nDB.networkBroadcasts, d.nDB.nodeBroadcasts)
 }
 
 func (d *delegate) LocalState(join bool) []byte {
@@ -430,11 +438,19 @@ func (d *delegate) LocalState(join bool) []byte {
 		NodeName: d.nDB.config.NodeID,
 	}
 
+	for nid, n := range d.nDB.thisNodeNetworks {
+		pp.Networks = append(pp.Networks, &NetworkEntry{
+			LTime:     n.ltime,
+			NetworkID: nid,
+			NodeName:  d.nDB.config.NodeID,
+			Leaving:   n.leaving,
+		})
+	}
 	for name, nn := range d.nDB.networks {
-		for _, n := range nn {
+		for nid, n := range nn {
 			pp.Networks = append(pp.Networks, &NetworkEntry{
 				LTime:     n.ltime,
-				NetworkID: n.id,
+				NetworkID: nid,
 				NodeName:  name,
 				Leaving:   n.leaving,
 			})

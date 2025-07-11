@@ -1,4 +1,4 @@
-package image // import "github.com/docker/docker/image"
+package image
 
 import (
 	"context"
@@ -114,7 +114,7 @@ func (s *fs) Set(data []byte) (digest.Digest, error) {
 	defer s.Unlock()
 
 	if len(data) == 0 {
-		return "", fmt.Errorf("invalid empty data")
+		return "", errors.New("invalid empty data")
 	}
 
 	dgst := digest.FromBytes(data)
@@ -144,11 +144,11 @@ func (s *fs) SetMetadata(dgst digest.Digest, key string, data []byte) error {
 		return err
 	}
 
-	baseDir := filepath.Join(s.metadataDir(dgst))
+	baseDir := s.metadataDir(dgst)
 	if err := os.MkdirAll(baseDir, 0o700); err != nil {
 		return err
 	}
-	return atomicwriter.WriteFile(filepath.Join(s.metadataDir(dgst), key), data, 0o600)
+	return atomicwriter.WriteFile(filepath.Join(baseDir, key), data, 0o600)
 }
 
 // GetMetadata returns metadata for a given digest.

@@ -1,9 +1,8 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,11 +10,11 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	testContainer "github.com/docker/docker/integration/internal/container"
 	net "github.com/docker/docker/integration/internal/network"
 	"github.com/docker/docker/oci"
@@ -24,7 +23,6 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
-	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
 )
 
@@ -66,7 +64,7 @@ func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 				"",
 			)
 			assert.Check(t, is.ErrorContains(err, tc.expectedError))
-			assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 		})
 	}
 }
@@ -79,8 +77,13 @@ func TestCreateByImageID(t *testing.T) {
 	assert.NilError(t, err)
 
 	imgIDWithAlgorithm := img.ID
-	imgID, _ := strings.CutPrefix(imgIDWithAlgorithm, "sha256:")
-	imgShortID := stringid.TruncateID(imgID)
+	assert.Assert(t, imgIDWithAlgorithm != "")
+
+	imgID, _ := strings.CutPrefix(img.ID, "sha256:")
+	assert.Assert(t, imgID != "")
+
+	imgShortID := stringid.TruncateID(img.ID)
+	assert.Assert(t, imgShortID != "")
 
 	testCases := []struct {
 		doc             string
@@ -104,13 +107,13 @@ func TestCreateByImageID(t *testing.T) {
 		{
 			doc:             "image with ID and algorithm as tag",
 			image:           "busybox:" + imgIDWithAlgorithm,
-			expectedErrType: errdefs.IsInvalidParameter,
+			expectedErrType: cerrdefs.IsInvalidArgument,
 			expectedErr:     "Error response from daemon: invalid reference format",
 		},
 		{
 			doc:             "image with ID as tag",
 			image:           "busybox:" + imgID,
-			expectedErrType: errdefs.IsNotFound,
+			expectedErrType: cerrdefs.IsNotFound,
 			expectedErr:     "Error response from daemon: No such image: busybox:" + imgID,
 		},
 	}
@@ -131,8 +134,8 @@ func TestCreateByImageID(t *testing.T) {
 				assert.Check(t, is.Error(err, tc.expectedErr))
 				assert.Check(t, is.ErrorType(err, tc.expectedErrType))
 			} else {
-				assert.Check(t, resp.ID != "")
 				assert.NilError(t, err)
+				assert.Check(t, resp.ID != "")
 			}
 			// cleanup the container if one was created.
 			_ = apiClient.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
@@ -160,7 +163,7 @@ func TestCreateLinkToNonExistingContainer(t *testing.T) {
 		"",
 	)
 	assert.Check(t, is.ErrorContains(err, "could not get container for no-such-container"))
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }
 
 func TestCreateWithInvalidEnv(t *testing.T) {
@@ -200,7 +203,7 @@ func TestCreateWithInvalidEnv(t *testing.T) {
 				"",
 			)
 			assert.Check(t, is.ErrorContains(err, tc.expectedError))
-			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 		})
 	}
 }
@@ -247,7 +250,7 @@ func TestCreateTmpfsMountsTarget(t *testing.T) {
 			"",
 		)
 		assert.Check(t, is.ErrorContains(err, tc.expectedError))
-		assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 	}
 }
 
@@ -258,90 +261,71 @@ func TestCreateWithCustomMaskedPaths(t *testing.T) {
 	apiClient := testEnv.APIClient()
 
 	testCases := []struct {
+		doc         string
 		privileged  bool
 		maskedPaths []string
 		expected    []string
 	}{
 		{
-			maskedPaths: []string{},
-			expected:    []string{},
-		},
-		{
+			doc:         "default masked paths",
 			maskedPaths: nil,
 			expected:    oci.DefaultSpec().Linux.MaskedPaths,
 		},
 		{
+			doc:         "no masked paths",
+			maskedPaths: []string{},
+			expected:    []string{},
+		},
+		{
+			doc:         "custom masked paths",
 			maskedPaths: []string{"/proc/kcore", "/proc/keys"},
 			expected:    []string{"/proc/kcore", "/proc/keys"},
 		},
 		{
+			// privileged containers should have no masked paths by default
+			doc:         "privileged",
 			privileged:  true,
 			maskedPaths: nil,
 			expected:    nil,
 		},
 	}
 
-	checkInspect := func(t *testing.T, ctx context.Context, name string, expected []string) {
-		_, b, err := apiClient.ContainerInspectWithRaw(ctx, name, false)
-		assert.NilError(t, err)
-
-		var inspectJSON map[string]interface{}
-		err = json.Unmarshal(b, &inspectJSON)
-		assert.NilError(t, err)
-
-		cfg, ok := inspectJSON["HostConfig"].(map[string]interface{})
-		assert.Check(t, is.Equal(true, ok), name)
-
-		if expected != nil {
-			maskedPaths, ok := cfg["MaskedPaths"].([]interface{})
-			assert.Check(t, is.Equal(true, ok), name)
-
-			mps := make([]string, 0, len(maskedPaths))
-			for _, mp := range maskedPaths {
-				mps = append(mps, mp.(string))
-			}
-
-			assert.DeepEqual(t, expected, mps)
-		} else {
-			_, ok := cfg["MaskedPaths"].([]interface{})
-			assert.Check(t, is.Equal(false, ok), name)
-		}
-	}
-
-	// TODO: This should be using subtests
-
 	for i, tc := range testCases {
-		name := fmt.Sprintf("create-masked-paths-%d", i)
-		config := container.Config{
-			Image: "busybox",
-			Cmd:   []string{"true"},
-		}
-		hc := container.HostConfig{
-			Privileged: tc.privileged,
-		}
-		if tc.maskedPaths != nil {
-			hc.MaskedPaths = tc.maskedPaths
-		}
+		t.Run(tc.doc, func(t *testing.T) {
+			t.Parallel()
 
-		// Create the container.
-		c, err := apiClient.ContainerCreate(ctx,
-			&config,
-			&hc,
-			&network.NetworkingConfig{},
-			nil,
-			name,
-		)
-		assert.NilError(t, err)
+			// Create the container.
+			ctr, err := apiClient.ContainerCreate(ctx,
+				&container.Config{
+					Image: "busybox",
+					Cmd:   []string{"true"},
+				},
+				&container.HostConfig{
+					Privileged:  tc.privileged,
+					MaskedPaths: tc.maskedPaths,
+				},
+				nil,
+				nil,
+				fmt.Sprintf("create-masked-paths-%d", i),
+			)
+			assert.NilError(t, err)
 
-		checkInspect(t, ctx, name, tc.expected)
+			ctrInspect, err := apiClient.ContainerInspect(ctx, ctr.ID)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, ctrInspect.HostConfig.MaskedPaths, tc.expected)
 
-		// Start the container.
-		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
-		assert.NilError(t, err)
+			// Start the container.
+			err = apiClient.ContainerStart(ctx, ctr.ID, container.StartOptions{})
+			assert.NilError(t, err)
 
-		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, "exited"))
+			// It should die down by itself, but stop it to be sure.
+			err = apiClient.ContainerStop(ctx, ctr.ID, container.StopOptions{})
+			assert.NilError(t, err)
 
-		checkInspect(t, ctx, name, tc.expected)
+			ctrInspect, err = apiClient.ContainerInspect(ctx, ctr.ID)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, ctrInspect.HostConfig.MaskedPaths, tc.expected)
+		})
 	}
 }
 
@@ -352,74 +336,69 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 	apiClient := testEnv.APIClient()
 
 	testCases := []struct {
+		doc           string
+		privileged    bool
 		readonlyPaths []string
 		expected      []string
 	}{
 		{
-			readonlyPaths: []string{},
-			expected:      []string{},
-		},
-		{
+			doc:           "default readonly paths",
 			readonlyPaths: nil,
 			expected:      oci.DefaultSpec().Linux.ReadonlyPaths,
 		},
 		{
+			doc:           "empty readonly paths",
+			readonlyPaths: []string{},
+			expected:      []string{},
+		},
+		{
+			doc:           "custom readonly paths",
 			readonlyPaths: []string{"/proc/asound", "/proc/bus"},
 			expected:      []string{"/proc/asound", "/proc/bus"},
 		},
-	}
-
-	checkInspect := func(t *testing.T, ctx context.Context, name string, expected []string) {
-		_, b, err := apiClient.ContainerInspectWithRaw(ctx, name, false)
-		assert.NilError(t, err)
-
-		var inspectJSON map[string]interface{}
-		err = json.Unmarshal(b, &inspectJSON)
-		assert.NilError(t, err)
-
-		cfg, ok := inspectJSON["HostConfig"].(map[string]interface{})
-		assert.Check(t, is.Equal(true, ok), name)
-
-		readonlyPaths, ok := cfg["ReadonlyPaths"].([]interface{})
-		assert.Check(t, is.Equal(true, ok), name)
-
-		rops := make([]string, 0, len(readonlyPaths))
-		for _, rop := range readonlyPaths {
-			rops = append(rops, rop.(string))
-		}
-		assert.DeepEqual(t, expected, rops)
+		{
+			// privileged containers should have no readonly paths by default
+			doc:           "privileged",
+			privileged:    true,
+			readonlyPaths: nil,
+			expected:      nil,
+		},
 	}
 
 	for i, tc := range testCases {
-		name := fmt.Sprintf("create-readonly-paths-%d", i)
-		config := container.Config{
-			Image: "busybox",
-			Cmd:   []string{"true"},
-		}
-		hc := container.HostConfig{}
-		if tc.readonlyPaths != nil {
-			hc.ReadonlyPaths = tc.readonlyPaths
-		}
+		t.Run(tc.doc, func(t *testing.T) {
+			t.Parallel()
+			ctr, err := apiClient.ContainerCreate(ctx,
+				&container.Config{
+					Image: "busybox",
+					Cmd:   []string{"true"},
+				},
+				&container.HostConfig{
+					Privileged:    tc.privileged,
+					ReadonlyPaths: tc.readonlyPaths,
+				},
+				nil,
+				nil,
+				fmt.Sprintf("create-readonly-paths-%d", i),
+			)
+			assert.NilError(t, err)
 
-		// Create the container.
-		c, err := apiClient.ContainerCreate(ctx,
-			&config,
-			&hc,
-			&network.NetworkingConfig{},
-			nil,
-			name,
-		)
-		assert.NilError(t, err)
+			ctrInspect, err := apiClient.ContainerInspect(ctx, ctr.ID)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, ctrInspect.HostConfig.ReadonlyPaths, tc.expected)
 
-		checkInspect(t, ctx, name, tc.expected)
+			// Start the container.
+			err = apiClient.ContainerStart(ctx, ctr.ID, container.StartOptions{})
+			assert.NilError(t, err)
 
-		// Start the container.
-		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
-		assert.NilError(t, err)
+			// It should die down by itself, but stop it to be sure.
+			err = apiClient.ContainerStop(ctx, ctr.ID, container.StopOptions{})
+			assert.NilError(t, err)
 
-		poll.WaitOn(t, testContainer.IsInState(ctx, apiClient, c.ID, "exited"))
-
-		checkInspect(t, ctx, name, tc.expected)
+			ctrInspect, err = apiClient.ContainerInspect(ctx, ctr.ID)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, ctrInspect.HostConfig.ReadonlyPaths, tc.expected)
+		})
 	}
 }
 
@@ -502,7 +481,7 @@ func TestCreateWithInvalidHealthcheckParams(t *testing.T) {
 
 			resp, err := apiClient.ContainerCreate(ctx, &cfg, &container.HostConfig{}, nil, nil, "")
 			assert.Check(t, is.Equal(len(resp.Warnings), 0))
-			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 			assert.ErrorContains(t, err, tc.expectedErr)
 		})
 	}
@@ -572,7 +551,7 @@ func TestCreateDifferentPlatform(t *testing.T) {
 			Variant:      img.Variant,
 		}
 		_, err := apiClient.ContainerCreate(ctx, &container.Config{Image: "busybox:latest"}, &container.HostConfig{}, nil, &p, "")
-		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	})
 	t.Run("different cpu arch", func(t *testing.T) {
 		ctx := testutil.StartSpan(ctx, t)
@@ -582,7 +561,7 @@ func TestCreateDifferentPlatform(t *testing.T) {
 			Variant:      img.Variant,
 		}
 		_, err := apiClient.ContainerCreate(ctx, &container.Config{Image: "busybox:latest"}, &container.HostConfig{}, nil, &p, "")
-		assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
+		assert.Check(t, is.ErrorType(err, cerrdefs.IsNotFound))
 	})
 }
 
@@ -598,7 +577,7 @@ func TestCreateVolumesFromNonExistingContainer(t *testing.T) {
 		nil,
 		"",
 	)
-	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 }
 
 // Test that we can create a container from an image that is for a different platform even if a platform was not specified
@@ -673,7 +652,7 @@ func TestCreateInvalidHostConfig(t *testing.T) {
 			}
 			resp, err := apiClient.ContainerCreate(ctx, &cfg, &tc.hc, nil, nil, "")
 			assert.Check(t, is.Equal(len(resp.Warnings), 0))
-			assert.Check(t, errdefs.IsInvalidParameter(err), "got: %T", err)
+			assert.Check(t, cerrdefs.IsInvalidArgument(err), "got: %T", err)
 			assert.Error(t, err, tc.expectedErr)
 		})
 	}

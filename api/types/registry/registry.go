@@ -1,7 +1,7 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
 //go:build go1.23
 
-package registry // import "github.com/docker/docker/api/types/registry"
+package registry
 
 import (
 	"encoding/json"
@@ -12,9 +12,6 @@ import (
 
 // ServiceConfig stores daemon registry services configuration.
 type ServiceConfig struct {
-	AllowNondistributableArtifactsCIDRs     []*NetIPNet `json:"AllowNondistributableArtifactsCIDRs,omitempty"`     // Deprecated: non-distributable artifacts are deprecated and enabled by default. This field will be removed in the next release.
-	AllowNondistributableArtifactsHostnames []string    `json:"AllowNondistributableArtifactsHostnames,omitempty"` // Deprecated: non-distributable artifacts are deprecated and enabled by default. This field will be removed in the next release.
-
 	InsecureRegistryCIDRs []*NetIPNet           `json:"InsecureRegistryCIDRs"`
 	IndexConfigs          map[string]*IndexInfo `json:"IndexConfigs"`
 	Mirrors               []string

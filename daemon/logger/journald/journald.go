@@ -1,8 +1,9 @@
 //go:build linux
 
-package journald // import "github.com/docker/docker/daemon/logger/journald"
+package journald
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"sync/atomic"
@@ -87,10 +88,11 @@ func sanitizeKeyMod(s string) string {
 		} else if ('Z' < v || v < 'A') && ('9' < v || v < '0') {
 			v = '_'
 		}
-		// If (n == "" && v == '_'), then we will skip as this is the beginning with '_'
-		if !(n == "" && v == '_') {
-			n += string(v)
+		if n == "" && v == '_' {
+			// skip leading underscores
+			continue
 		}
+		n += string(v)
 	}
 	return n
 }
@@ -99,7 +101,7 @@ func sanitizeKeyMod(s string) string {
 // the context.
 func New(info logger.Info) (logger.Logger, error) {
 	if !journal.Enabled() {
-		return nil, fmt.Errorf("journald is not enabled on this host")
+		return nil, errors.New("journald is not enabled on this host")
 	}
 
 	return newJournald(info)

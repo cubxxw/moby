@@ -1,6 +1,6 @@
 //go:build !windows
 
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	"github.com/docker/docker/errdefs"
 	"github.com/moby/go-archive"
 	"github.com/moby/sys/user"

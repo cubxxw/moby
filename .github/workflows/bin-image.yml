@@ -58,20 +58,21 @@ jobs:
           ### versioning strategy
           ## push semver tag v23.0.0
           # moby/moby-bin:23.0.0
+          # moby/moby-bin:23.0
+          # moby/moby-bin:23
           # moby/moby-bin:latest
           ## push semver prerelease tag v23.0.0-beta.1
           # moby/moby-bin:23.0.0-beta.1
           ## push on master
           # moby/moby-bin:master
-          ## push on 23.0 branch
-          # moby/moby-bin:23.0
-          ## any push
-          # moby/moby-bin:sha-ad132f5
+          ## push on 28.x branch
+          # moby/moby-bin:28.x
           tags: |
             type=semver,pattern={{version}}
             type=ref,event=branch
             type=ref,event=pr
-            type=sha
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
       -
         name: Rename meta bake definition file
         # see https://github.com/docker/metadata-action/issues/381#issuecomment-1918607161
@@ -94,7 +95,7 @@ jobs:
 
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120 # guardrails timeout for the whole job
+    timeout-minutes: 20 # guardrails timeout for the whole job
     needs:
       - validate-dco
       - prepare
@@ -170,7 +171,7 @@ jobs:
 
   merge:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120 # guardrails timeout for the whole job
+    timeout-minutes: 40 # guardrails timeout for the whole job
     needs:
       - build
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name != 'pull_request' && github.repository == 'moby/moby'

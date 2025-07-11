@@ -1,4 +1,4 @@
-package tarexport // import "github.com/docker/docker/image/tarexport"
+package tarexport
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 
 const (
 	manifestFileName           = "manifest.json"
-	legacyLayerFileName        = "layer.tar"
-	legacyConfigFileName       = "json"
 	legacyRepositoriesFileName = "repositories"
 )
 

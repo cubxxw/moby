@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"bytes"
@@ -12,8 +12,8 @@ import (
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/container"
-	"github.com/docker/docker/internal/metrics"
+	"github.com/docker/docker/daemon/container"
+	"github.com/docker/docker/daemon/internal/metrics"
 )
 
 const (
@@ -137,7 +137,7 @@ func (p *cmdProbe) run(ctx context.Context, d *Daemon, cntr *container.Container
 		<-execErr
 
 		var msg string
-		if out := output.String(); len(out) > 0 {
+		if out := output.String(); out != "" {
 			msg = fmt.Sprintf("Health check exceeded timeout (%v): %s", probeTimeout, out)
 		} else {
 			msg = fmt.Sprintf("Health check exceeded timeout (%v)", probeTimeout)

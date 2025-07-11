@@ -1,4 +1,4 @@
-package image // import "github.com/docker/docker/integration/image"
+package image
 
 import (
 	"archive/tar"
@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	imagetypes "github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/image"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
 	"gotest.tools/v3/assert"
@@ -71,32 +71,32 @@ func TestImportWithCustomPlatform(t *testing.T) {
 	tests := []struct {
 		name     string
 		platform string
-		expected image.V1Image
+		expected platforms.Platform
 	}{
 		{
 			platform: "",
-			expected: image.V1Image{
+			expected: platforms.Platform{
 				OS:           runtime.GOOS,
 				Architecture: runtime.GOARCH, // this may fail on armhf due to normalization?
 			},
 		},
 		{
 			platform: runtime.GOOS,
-			expected: image.V1Image{
+			expected: platforms.Platform{
 				OS:           runtime.GOOS,
 				Architecture: runtime.GOARCH, // this may fail on armhf due to normalization?
 			},
 		},
 		{
 			platform: strings.ToUpper(runtime.GOOS),
-			expected: image.V1Image{
+			expected: platforms.Platform{
 				OS:           runtime.GOOS,
 				Architecture: runtime.GOARCH, // this may fail on armhf due to normalization?
 			},
 		},
 		{
 			platform: runtime.GOOS + "/sparc64",
-			expected: image.V1Image{
+			expected: platforms.Platform{
 				OS:           runtime.GOOS,
 				Architecture: "sparc64",
 			},
@@ -141,7 +141,6 @@ func TestImportWithCustomPlatformReject(t *testing.T) {
 	tests := []struct {
 		name        string
 		platform    string
-		expected    image.V1Image
 		expectedErr string
 	}{
 		{
@@ -178,7 +177,7 @@ func TestImportWithCustomPlatformReject(t *testing.T) {
 				reference,
 				imagetypes.ImportOptions{Platform: tc.platform})
 
-			assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+			assert.Check(t, is.ErrorType(err, cerrdefs.IsInvalidArgument))
 			assert.Check(t, is.ErrorContains(err, tc.expectedErr))
 		})
 	}

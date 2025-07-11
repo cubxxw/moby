@@ -1,19 +1,19 @@
-package client // import "github.com/docker/docker/client"
+package client
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	cerrdefs "github.com/containerd/errdefs"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"gotest.tools/v3/assert"
@@ -24,8 +24,8 @@ func TestServiceCreateError(t *testing.T) {
 	client := &Client{
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
-	_, err := client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, types.ServiceCreateOptions{})
-	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+	_, err := client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, swarm.ServiceCreateOptions{})
+	assert.Check(t, is.ErrorType(err, cerrdefs.IsInternal))
 }
 
 // TestServiceCreateConnectionError verifies that connection errors occurring
@@ -36,7 +36,7 @@ func TestServiceCreateConnectionError(t *testing.T) {
 	client, err := NewClientWithOpts(WithAPIVersionNegotiation(), WithHost("tcp://no-such-host.invalid"))
 	assert.NilError(t, err)
 
-	_, err = client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, types.ServiceCreateOptions{})
+	_, err = client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, swarm.ServiceCreateOptions{})
 	assert.Check(t, is.ErrorType(err, IsErrConnectionFailed))
 }
 
@@ -63,13 +63,9 @@ func TestServiceCreate(t *testing.T) {
 		}),
 	}
 
-	r, err := client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, types.ServiceCreateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.ID != "service_id" {
-		t.Fatalf("expected `service_id`, got %s", r.ID)
-	}
+	r, err := client.ServiceCreate(context.Background(), swarm.ServiceSpec{}, swarm.ServiceCreateOptions{})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(r.ID, "service_id"))
 }
 
 func TestServiceCreateCompatiblePlatforms(t *testing.T) {
@@ -126,8 +122,8 @@ func TestServiceCreateCompatiblePlatforms(t *testing.T) {
 
 	spec := swarm.ServiceSpec{TaskTemplate: swarm.TaskSpec{ContainerSpec: &swarm.ContainerSpec{Image: "foobar:1.0"}}}
 
-	r, err := client.ServiceCreate(context.Background(), spec, types.ServiceCreateOptions{QueryRegistry: true})
-	assert.Check(t, err)
+	r, err := client.ServiceCreate(context.Background(), spec, swarm.ServiceCreateOptions{QueryRegistry: true})
+	assert.NilError(t, err)
 	assert.Check(t, is.Equal("service_linux_amd64", r.ID))
 }
 
@@ -161,7 +157,7 @@ func TestServiceCreateDigestPinning(t *testing.T) {
 				serviceCreateImage = ""
 				var service swarm.ServiceSpec
 				if err := json.NewDecoder(req.Body).Decode(&service); err != nil {
-					return nil, fmt.Errorf("could not parse service create request")
+					return nil, errors.New("could not parse service create request")
 				}
 				serviceCreateImage = service.TaskTemplate.ContainerSpec.Image
 
@@ -177,7 +173,7 @@ func TestServiceCreateDigestPinning(t *testing.T) {
 				}, nil
 			} else if strings.HasPrefix(req.URL.Path, "/v1.30/distribution/cannotresolve") {
 				// unresolvable image
-				return nil, fmt.Errorf("cannot resolve image")
+				return nil, errors.New("cannot resolve image")
 			} else if strings.HasPrefix(req.URL.Path, "/v1.30/distribution/") {
 				// resolvable images
 				b, err := json.Marshal(registrytypes.DistributionInspect{
@@ -205,17 +201,11 @@ func TestServiceCreateDigestPinning(t *testing.T) {
 					Image: p.img,
 				},
 			},
-		}, types.ServiceCreateOptions{QueryRegistry: true})
-		if err != nil {
-			t.Fatal(err)
-		}
+		}, swarm.ServiceCreateOptions{QueryRegistry: true})
+		assert.NilError(t, err)
 
-		if r.ID != "service_id" {
-			t.Fatalf("expected `service_id`, got %s", r.ID)
-		}
+		assert.Check(t, is.Equal(r.ID, "service_id"))
 
-		if p.expected != serviceCreateImage {
-			t.Fatalf("expected image %s, got %s", p.expected, serviceCreateImage)
-		}
+		assert.Check(t, is.Equal(p.expected, serviceCreateImage))
 	}
 }

@@ -3,6 +3,7 @@ package libnetwork
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -457,7 +458,7 @@ func getSvcRecords(t *testing.T, n *Network, key string) (addrs []netip.Addr, fo
 	sr, ok := n.ctrlr.svcRecords[n.id]
 	assert.Assert(t, ok)
 
-	lookup := func(svcMap *setmatrix.SetMatrix[svcMapEntry]) bool {
+	lookup := func(svcMap *setmatrix.SetMatrix[string, svcMapEntry]) bool {
 		mapEntryList, ok := svcMap.Get(key)
 		if !ok {
 			return false
@@ -786,7 +787,7 @@ func badDriverRegister(reg driverapi.Registerer) error {
 
 func (b *badDriver) CreateNetwork(ctx context.Context, nid string, options map[string]interface{}, nInfo driverapi.NetworkInfo, ipV4Data, ipV6Data []driverapi.IPAMData) error {
 	if b.failNetworkCreation {
-		return fmt.Errorf("I will not create any network")
+		return errors.New("I will not create any network")
 	}
 	return nil
 }
@@ -796,7 +797,7 @@ func (b *badDriver) DeleteNetwork(nid string) error {
 }
 
 func (b *badDriver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, options map[string]interface{}) error {
-	return fmt.Errorf("I will not create any endpoint")
+	return errors.New("I will not create any endpoint")
 }
 
 func (b *badDriver) DeleteEndpoint(nid, eid string) error {
@@ -808,7 +809,7 @@ func (b *badDriver) EndpointOperInfo(nid, eid string) (map[string]interface{}, e
 }
 
 func (b *badDriver) Join(_ context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, _, _ map[string]interface{}) error {
-	return fmt.Errorf("I will not allow any join")
+	return errors.New("I will not allow any join")
 }
 
 func (b *badDriver) Leave(nid, eid string) error {
@@ -821,14 +822,6 @@ func (b *badDriver) Type() string {
 
 func (b *badDriver) IsBuiltIn() bool {
 	return false
-}
-
-func (b *badDriver) ProgramExternalConnectivity(_ context.Context, nid, eid string, options map[string]interface{}) error {
-	return nil
-}
-
-func (b *badDriver) RevokeExternalConnectivity(nid, eid string) error {
-	return nil
 }
 
 func (b *badDriver) NetworkAllocate(id string, option map[string]string, ipV4Data, ipV6Data []driverapi.IPAMData) (map[string]string, error) {

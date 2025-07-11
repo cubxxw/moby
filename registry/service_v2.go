@@ -1,4 +1,4 @@
-package registry // import "github.com/docker/docker/registry"
+package registry
 
 import (
 	"context"
@@ -37,7 +37,6 @@ func (s *Service) lookupV2Endpoints(ctx context.Context, hostname string, includ
 		}
 		endpoints = append(endpoints, APIEndpoint{
 			URL:       DefaultV2Registry,
-			Official:  true,
 			TLSConfig: tlsconfig.ServerDefault(),
 		})
 

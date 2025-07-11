@@ -8,6 +8,7 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/libnetwork/internal/nftables"
 	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/options"
@@ -16,11 +17,10 @@ import (
 
 // FirewallBackend returns the name of the firewall backend for "docker info".
 func (c *Controller) FirewallBackend() *system.FirewallInfo {
-	usingFirewalld, err := iptables.UsingFirewalld()
-	if err != nil {
-		return nil
+	if nftables.Enabled() {
+		return &system.FirewallInfo{Driver: "nftables"}
 	}
-	if usingFirewalld {
+	if iptables.UsingFirewalld() {
 		info := &system.FirewallInfo{Driver: "iptables+firewalld"}
 		reloadedAt := iptables.FirewalldReloadedAt()
 		if !reloadedAt.IsZero() {

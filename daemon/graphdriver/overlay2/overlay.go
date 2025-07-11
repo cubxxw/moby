@@ -1,6 +1,6 @@
 //go:build linux
 
-package overlay2 // import "github.com/docker/docker/daemon/graphdriver/overlay2"
+package overlay2
 
 import (
 	"context"
@@ -325,7 +325,7 @@ func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts
 	}
 
 	if _, ok := opts.StorageOpt["size"]; ok && !projectQuotaSupported {
-		return fmt.Errorf("--storage-opt is supported only for overlay over xfs with 'pquota' mount option")
+		return errors.New("--storage-opt is supported only for overlay over xfs with 'pquota' mount option")
 	}
 
 	return d.create(id, parent, opts)
@@ -336,7 +336,7 @@ func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts
 func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) (retErr error) {
 	if opts != nil && len(opts.StorageOpt) != 0 {
 		if _, ok := opts.StorageOpt["size"]; ok {
-			return fmt.Errorf("--storage-opt size is only supported for ReadWrite Layers")
+			return errors.New("--storage-opt size is only supported for ReadWrite Layers")
 		}
 	}
 	return d.create(id, parent, opts)
@@ -485,7 +485,7 @@ func (d *Driver) getLowerDirs(id string) ([]string, error) {
 // Remove cleans the directories that are created for this id.
 func (d *Driver) Remove(id string) error {
 	if id == "" {
-		return fmt.Errorf("refusing to remove the directories: id is empty")
+		return errors.New("refusing to remove the directories: id is empty")
 	}
 	d.locker.Lock(id)
 	defer d.locker.Unlock(id)
@@ -674,7 +674,7 @@ func (d *Driver) isParent(id, parent string) bool {
 }
 
 // ApplyDiff applies the new layer into a root
-func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64, err error) {
+func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64, _ error) {
 	if useNaiveDiff(d.home) || !d.isParent(id, parent) {
 		return d.naiveDiff.ApplyDiff(id, parent, diff)
 	}
@@ -703,7 +703,7 @@ func (d *Driver) getDiffPath(id string) string {
 // DiffSize calculates the changes between the specified id
 // and its parent and returns the size in bytes of the changes
 // relative to its base filesystem directory.
-func (d *Driver) DiffSize(id, parent string) (size int64, err error) {
+func (d *Driver) DiffSize(id, parent string) (int64, error) {
 	if useNaiveDiff(d.home) || !d.isParent(id, parent) {
 		return d.naiveDiff.DiffSize(id, parent)
 	}

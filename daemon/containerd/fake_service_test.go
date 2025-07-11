@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +16,7 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/defaults"
 	cerrdefs "github.com/containerd/errdefs"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	daemonevents "github.com/docker/docker/daemon/events"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -111,11 +110,11 @@ func (s *blobsDirContentStore) ReaderAt(ctx context.Context, desc ocispec.Descri
 }
 
 func (s *blobsDirContentStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
-	return nil, fmt.Errorf("read-only")
+	return nil, errors.New("read-only")
 }
 
 func (s *blobsDirContentStore) Status(ctx context.Context, _ string) (content.Status, error) {
-	return content.Status{}, fmt.Errorf("not implemented")
+	return content.Status{}, errors.New("not implemented")
 }
 
 func (s *blobsDirContentStore) Delete(ctx context.Context, dgst digest.Digest) error {
@@ -128,7 +127,7 @@ func (s *blobsDirContentStore) ListStatuses(ctx context.Context, filters ...stri
 }
 
 func (s *blobsDirContentStore) Abort(ctx context.Context, ref string) error {
-	return fmt.Errorf("not implemented")
+	return errors.New("not implemented")
 }
 
 func (s *blobsDirContentStore) Walk(ctx context.Context, fn content.WalkFunc, filters ...string) error {
@@ -182,7 +181,7 @@ func (s *blobsDirContentStore) Info(ctx context.Context, dgst digest.Digest) (co
 }
 
 func (s *blobsDirContentStore) Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error) {
-	return content.Info{}, fmt.Errorf("read-only")
+	return content.Info{}, errors.New("read-only")
 }
 
 // delayedStore is a content store wrapper that adds a constant delay to all
@@ -243,49 +242,4 @@ func (s *delayedStore) Info(ctx context.Context, dgst digest.Digest) (content.In
 func (s *delayedStore) Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error) {
 	s.delay()
 	return s.store.Update(ctx, info, fieldpaths...)
-}
-
-type memoryLabelStore struct {
-	mu     sync.Mutex
-	labels map[digest.Digest]map[string]string
-}
-
-// Get returns all the labels for the given digest
-func (s *memoryLabelStore) Get(dgst digest.Digest) (map[string]string, error) {
-	s.mu.Lock()
-	labels := s.labels[dgst]
-	s.mu.Unlock()
-	return labels, nil
-}
-
-// Set sets all the labels for a given digest
-func (s *memoryLabelStore) Set(dgst digest.Digest, labels map[string]string) error {
-	s.mu.Lock()
-	if s.labels == nil {
-		s.labels = make(map[digest.Digest]map[string]string)
-	}
-	s.labels[dgst] = labels
-	s.mu.Unlock()
-	return nil
-}
-
-// Update replaces the given labels for a digest,
-// a key with an empty value removes a label.
-func (s *memoryLabelStore) Update(dgst digest.Digest, update map[string]string) (map[string]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	labels, ok := s.labels[dgst]
-	if !ok {
-		labels = map[string]string{}
-	}
-	for k, v := range update {
-		labels[k] = v
-	}
-	if s.labels == nil {
-		s.labels = map[digest.Digest]map[string]string{}
-	}
-	s.labels[dgst] = labels
-
-	return labels, nil
 }

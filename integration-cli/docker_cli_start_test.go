@@ -17,12 +17,12 @@ type DockerCLIStartSuite struct {
 	ds *DockerSuite
 }
 
-func (s *DockerCLIStartSuite) TearDownTest(ctx context.Context, c *testing.T) {
-	s.ds.TearDownTest(ctx, c)
+func (s *DockerCLIStartSuite) TearDownTest(ctx context.Context, t *testing.T) {
+	s.ds.TearDownTest(ctx, t)
 }
 
-func (s *DockerCLIStartSuite) OnTimeout(c *testing.T) {
-	s.ds.OnTimeout(c)
+func (s *DockerCLIStartSuite) OnTimeout(t *testing.T) {
+	s.ds.OnTimeout(t)
 }
 
 // Regression test for https://github.com/docker/docker/issues/7843
@@ -144,7 +144,7 @@ func (s *DockerCLIStartSuite) TestStartMultipleContainers(c *testing.T) {
 	// err shouldn't be nil because start will fail
 	assert.Assert(c, err != nil, "out: %s", out)
 	// output does not correspond to what was expected
-	if !(strings.Contains(out, expOut) || strings.Contains(err.Error(), expErr)) {
+	if !strings.Contains(out, expOut) && !strings.Contains(err.Error(), expErr) {
 		c.Fatalf("Expected out: %v with err: %v  but got out: %v with err: %v", expOut, expErr, out, err)
 	}
 

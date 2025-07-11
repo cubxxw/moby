@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/integration/daemon"
+package daemon
 
 import (
 	"bytes"
@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/daemon/config"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/integration/internal/process"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -57,6 +57,18 @@ func TestConfigDaemonID(t *testing.T) {
 	d.Start(t, "--iptables=false", "--ip6tables=false")
 	info = d.Info(t)
 	assert.Equal(t, info.ID, engineID)
+	d.Stop(t)
+
+	// Verify that engine-id file is created if it doesn't exist
+	err = os.Remove(idFile)
+	assert.NilError(t, err)
+
+	d.Start(t, "--iptables=false")
+	id, err := os.ReadFile(idFile)
+	assert.NilError(t, err)
+
+	info = d.Info(t)
+	assert.Equal(t, string(id), info.ID)
 	d.Stop(t)
 }
 
@@ -597,7 +609,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 		poll.WaitOn(t, func(t poll.LogT) poll.Result {
 			stat, err := c.ContainerStatPath(ctx, cID, "/foo/test.txt")
 			if err != nil {
-				if errdefs.IsNotFound(err) {
+				if cerrdefs.IsNotFound(err) {
 					return poll.Continue("file doesn't yet exist")
 				}
 				return poll.Error(err)
@@ -670,7 +682,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 		waitFn := func(t poll.LogT) poll.Result {
 			_, err := c.ContainerStatPath(ctx, cID, "/image/hello")
 			if err != nil {
-				if errdefs.IsNotFound(err) {
+				if cerrdefs.IsNotFound(err) {
 					return poll.Continue("file doesn't yet exist")
 				}
 				return poll.Error(err)
@@ -722,6 +734,7 @@ func testLiveRestoreVolumeReferences(t *testing.T) {
 
 func testLiveRestoreUserChainsSetup(t *testing.T) {
 	skip.If(t, testEnv.IsRootless(), "rootless daemon uses it's own network namespace")
+	skip.If(t, testEnv.FirewallBackendDriver() == "nftables", "nftables enabled, skipping iptables test")
 
 	t.Parallel()
 	ctx := testutil.StartSpan(baseContext, t)

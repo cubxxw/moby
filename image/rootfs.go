@@ -1,21 +1,17 @@
-package image // import "github.com/docker/docker/image"
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.23
+
+package image
 
 import (
-	"context"
-	"runtime"
+	"slices"
 
-	"github.com/containerd/log"
 	"github.com/docker/docker/layer"
+	"github.com/opencontainers/image-spec/identity"
 )
 
 // TypeLayers is used for RootFS.Type for filesystems organized into layers.
 const TypeLayers = "layers"
-
-// typeLayersWithBase is an older format used by Windows up to v1.12. We
-// explicitly handle this as an error case to ensure that a daemon which still
-// has an older image like this on disk can still start, even though the
-// image itself is not usable. See https://github.com/docker/docker/pull/25806.
-const typeLayersWithBase = "layers+base"
 
 // RootFS describes images root filesystem
 // This is currently a placeholder that only supports layers. In the future
@@ -37,18 +33,13 @@ func (r *RootFS) Append(id layer.DiffID) {
 
 // Clone returns a copy of the RootFS
 func (r *RootFS) Clone() *RootFS {
-	newRoot := NewRootFS()
-	newRoot.Type = r.Type
-	newRoot.DiffIDs = make([]layer.DiffID, len(r.DiffIDs))
-	copy(newRoot.DiffIDs, r.DiffIDs)
-	return newRoot
+	return &RootFS{
+		Type:    r.Type,
+		DiffIDs: slices.Clone(r.DiffIDs),
+	}
 }
 
 // ChainID returns the ChainID for the top layer in RootFS.
 func (r *RootFS) ChainID() layer.ChainID {
-	if runtime.GOOS == "windows" && r.Type == typeLayersWithBase {
-		log.G(context.TODO()).Warnf("Layer type is unsupported on this platform. DiffIDs: '%v'", r.DiffIDs)
-		return ""
-	}
-	return layer.CreateChainID(r.DiffIDs)
+	return identity.ChainID(r.DiffIDs)
 }

@@ -1,4 +1,4 @@
-package daemon // import "github.com/docker/docker/daemon"
+package daemon
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/container"
 	daemonevents "github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/libnetwork"
 	gogotypes "github.com/gogo/protobuf/types"
@@ -27,7 +27,7 @@ func (daemon *Daemon) LogContainerEventWithAttributes(container *container.Conta
 	if container.Config.Image != "" {
 		attributes["image"] = container.Config.Image
 	}
-	attributes["name"] = strings.TrimLeft(container.Name, "/")
+	attributes["name"] = strings.TrimPrefix(container.Name, "/")
 	daemon.EventsService.Log(action, events.ContainerEventType, events.Actor{
 		ID:         container.ID,
 		Attributes: attributes,

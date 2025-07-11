@@ -1,14 +1,14 @@
-package images // import "github.com/docker/docker/daemon/images"
+package images
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/internal/metrics"
+	"github.com/docker/docker/daemon/internal/metrics"
 	"github.com/docker/docker/layer"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -33,7 +33,7 @@ func (i *ImageService) ImageHistory(ctx context.Context, name string, platform *
 
 		if !h.EmptyLayer {
 			if len(img.RootFS.DiffIDs) <= layerCounter {
-				return nil, fmt.Errorf("too many non-empty layers in History section")
+				return nil, errors.New("too many non-empty layers in History section")
 			}
 			rootFS.Append(img.RootFS.DiffIDs[layerCounter])
 			l, err := i.layerStore.Get(rootFS.ChainID())

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package distribution // import "github.com/docker/docker/distribution"
+package distribution
 
 import (
 	"context"
@@ -27,7 +27,7 @@ func filterManifests(manifests []manifestlist.ManifestDescriptor, p ocispec.Plat
 		if descP == nil || m.Match(*descP) {
 			matches = append(matches, desc)
 			if descP != nil {
-				log.G(context.TODO()).Debugf("found match for %s with media type %s, digest %s", platforms.Format(p), desc.MediaType, desc.Digest.String())
+				log.G(context.TODO()).Debugf("found match for %s with media type %s, digest %s", platforms.FormatAll(p), desc.MediaType, desc.Digest.String())
 			}
 		}
 	}

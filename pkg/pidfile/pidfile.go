@@ -1,7 +1,7 @@
 // Package pidfile provides structure and helper functions to create and remove
 // PID file. A PID file is usually a file used to store the process ID of a
 // running process.
-package pidfile // import "github.com/docker/docker/pkg/pidfile"
+package pidfile
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 // failing to read the file, or if the file doesn't exist, but malformed content
 // is ignored. Consumers should therefore check if the returned PID is a non-zero
 // value before use.
-func Read(path string) (pid int, err error) {
+func Read(path string) (pid int, _ error) {
 	pidByte, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err

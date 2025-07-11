@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -15,7 +14,6 @@ import (
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
-	"github.com/docker/distribution/manifest/schema1"
 	"github.com/docker/distribution/manifest/schema2"
 	"github.com/docker/docker/registry"
 	"github.com/opencontainers/go-digest"
@@ -250,11 +248,32 @@ func (m *manifestStore) Put(ctx context.Context, manifest distribution.Manifest,
 func detectManifestMediaType(ra content.ReaderAt) (string, error) {
 	dt := make([]byte, ra.Size())
 	if _, err := ra.ReadAt(dt, 0); err != nil {
-		return "", err
+		return "", fmt.Errorf("error detecting media type: %w", err)
 	}
 
 	return detectManifestBlobMediaType(dt)
 }
+
+const (
+	// MediaTypeDockerSchema1Manifest specifies the mediaType for legacy "docker v1" manifests.
+	// It is a local copy of [schema1.MediaTypeManifest]. Note that for schema version 1, the media
+	// is optionally "application/json".
+	//
+	// This const is meant for internal use and should not be used externally as
+	// it may be removed in a future release.
+	//
+	// [schema1.MediaTypeManifest]: https://pkg.go.dev/github.com/docker/distribution@v2.8.3+incompatible/manifest/schema1#MediaTypeManifest
+	MediaTypeDockerSchema1Manifest = "application/vnd.docker.distribution.manifest.v1+json"
+
+	// MediaTypeDockerSchema1SignedManifest specifies the mediatype for legacy "docker v1" signed manifests.
+	// It is a local copy of [schema1.MediaTypeSignedManifest].
+	//
+	// This const is meant for internal use and should not be used externally as
+	// it may be removed in a future release.
+	//
+	// [schema1.MediaTypeSignedManifest]: https://pkg.go.dev/github.com/docker/distribution@v2.8.3+incompatible/manifest/schema1#MediaTypeSignedManifest
+	MediaTypeDockerSchema1SignedManifest = "application/vnd.docker.distribution.manifest.v1+prettyjws"
+)
 
 // This is used when the manifest store does not know the media type of a sha it
 // was told to get. This would currently only happen when pulling by digest.
@@ -291,16 +310,8 @@ func detectManifestBlobMediaType(dt []byte) (string, error) {
 			return "", fmt.Errorf(`media-type: %q should not have "config", "layers", or "fsLayers"`, mfst.MediaType)
 		}
 		return mfst.MediaType, nil
-	case schema1.MediaTypeManifest:
-		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
-			err := DeprecatedSchema1ImageError(nil)
-			log.G(context.TODO()).Warn(err.Error())
-			return "", err
-		}
-		if mfst.Manifests != nil || mfst.Layers != nil {
-			return "", fmt.Errorf(`media-type: %q should not have "manifests" or "layers"`, mfst.MediaType)
-		}
-		return mfst.MediaType, nil
+	case MediaTypeDockerSchema1Manifest, MediaTypeDockerSchema1SignedManifest:
+		return "", DeprecatedSchema1ImageError(nil)
 	default:
 		if mfst.MediaType != "" {
 			return mfst.MediaType, nil
@@ -308,12 +319,7 @@ func detectManifestBlobMediaType(dt []byte) (string, error) {
 	}
 	switch {
 	case mfst.FSLayers != nil && mfst.Manifests == nil && mfst.Layers == nil && mfst.Config == nil:
-		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
-			err := DeprecatedSchema1ImageError(nil)
-			log.G(context.TODO()).Warn(err.Error())
-			return "", err
-		}
-		return schema1.MediaTypeManifest, nil
+		return "", DeprecatedSchema1ImageError(nil)
 	case mfst.Config != nil && mfst.Manifests == nil && mfst.FSLayers == nil,
 		mfst.Layers != nil && mfst.Manifests == nil && mfst.FSLayers == nil:
 		return ocispec.MediaTypeImageManifest, nil

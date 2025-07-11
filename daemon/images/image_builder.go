@@ -1,18 +1,17 @@
-package images // import "github.com/docker/docker/daemon/images"
+package images
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"runtime"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/builder"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/progress"
@@ -46,7 +45,9 @@ func (l *roLayer) Release() error {
 	}
 	if l.roLayer != nil {
 		metadata, err := l.layerStore.Release(l.roLayer)
-		layer.LogReleaseMetadata(metadata)
+		for _, m := range metadata {
+			log.G(context.TODO()).WithField("chainID", m.ChainID).Infof("release ROLayer: cleaned up layer %s", m.ChainID)
+		}
 		if err != nil {
 			return errors.Wrap(err, "failed to release ROLayer")
 		}
@@ -125,7 +126,9 @@ func (l *rwLayer) Release() error {
 	}
 
 	metadata, err := l.layerStore.ReleaseRWLayer(l.rwLayer)
-	layer.LogReleaseMetadata(metadata)
+	for _, m := range metadata {
+		log.G(context.TODO()).WithField("chainID", m.ChainID).Infof("release RWLayer: cleaned up layer %s", m.ChainID)
+	}
 	if err != nil {
 		return errors.Wrap(err, "failed to release RWLayer")
 	}
@@ -166,7 +169,7 @@ func (i *ImageService) pullForBuilder(ctx context.Context, name string, authConf
 	}
 
 	img, err := i.GetImage(ctx, name, backend.GetImageOpts{Platform: platform})
-	if errdefs.IsNotFound(err) && img != nil && platform != nil {
+	if cerrdefs.IsNotFound(err) && img != nil && platform != nil {
 		imgPlat := ocispec.Platform{
 			OS:           img.OS,
 			Architecture: img.BaseImgArch(),
@@ -180,7 +183,7 @@ func (i *ImageService) pullForBuilder(ctx context.Context, name string, authConf
 WARNING: Pulled image with specified platform (%s), but the resulting image's configured platform (%s) does not match.
 This is most likely caused by a bug in the build system that created the fetched image (%s).
 Please notify the image author to correct the configuration.`,
-				platforms.Format(p), platforms.Format(imgPlat), name,
+				platforms.FormatAll(p), platforms.FormatAll(imgPlat), name,
 			)
 			log.G(ctx).WithError(err).WithField("image", name).Warn("Ignoring error about platform mismatch where the manifest list points to an image whose configuration does not match the platform in the manifest.")
 			err = nil
@@ -195,7 +198,7 @@ Please notify the image author to correct the configuration.`,
 func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID string, opts backend.GetImageAndLayerOptions) (builder.Image, builder.ROLayer, error) {
 	if refOrID == "" { // FROM scratch
 		if runtime.GOOS == "windows" {
-			return nil, nil, fmt.Errorf(`"FROM scratch" is not supported on Windows`)
+			return nil, nil, errors.New(`"FROM scratch" is not supported on Windows`)
 		}
 		if opts.Platform != nil {
 			if err := image.CheckOS(opts.Platform.OS); err != nil {
@@ -211,7 +214,7 @@ func (i *ImageService) GetImageAndReleasableLayer(ctx context.Context, refOrID s
 		if err != nil && opts.PullOption == backend.PullOptionNoPull {
 			return nil, nil, err
 		}
-		if err != nil && !errdefs.IsNotFound(err) {
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			return nil, nil, err
 		}
 		if img != nil {

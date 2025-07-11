@@ -1,4 +1,4 @@
-package container // import "github.com/docker/docker/integration/container"
+package container
 
 import (
 	"bytes"
@@ -143,7 +143,7 @@ func getExternalAddress(t *testing.T) net.IP {
 
 	ifaceAddrs, err := iface.Addrs()
 	assert.NilError(t, err)
-	assert.Check(t, 0 != len(ifaceAddrs))
+	assert.Check(t, len(ifaceAddrs) != 0)
 
 	if len(ifaceAddrs) > 1 {
 		// Prefer IPv4 address if multiple addresses found, as rootlesskit

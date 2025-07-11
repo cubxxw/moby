@@ -1,4 +1,4 @@
-package loggertest // import "github.com/docker/docker/daemon/logger/loggertest"
+package loggertest
 
 import (
 	"context"
@@ -421,9 +421,10 @@ func (tr Reader) TestConcurrent(t *testing.T) {
 	stderrMessages := []*logger.Message{}
 	stdoutMessages := []*logger.Message{}
 	for _, m := range makeTestMessages() {
-		if m.Source == "stdout" {
+		switch m.Source {
+		case "stdout":
 			stdoutMessages = append(stdoutMessages, m)
-		} else if m.Source == "stderr" {
+		case "stderr":
 			stderrMessages = append(stderrMessages, m)
 		}
 	}
@@ -468,11 +469,12 @@ func (tr Reader) TestConcurrent(t *testing.T) {
 		}
 
 		var messages *[]*logger.Message
-		if l.Source == "stdout" {
+		switch l.Source {
+		case "stdout":
 			messages = &stdoutMessages
-		} else if l.Source == "stderr" {
+		case "stderr":
 			messages = &stderrMessages
-		} else {
+		default:
 			t.Fatalf("Corrupted message.Source = %q", l.Source)
 		}
 
@@ -509,12 +511,12 @@ func logMessages(t *testing.T, l logger.Logger, messages []*logger.Message) []*l
 // existing behavior of the json-file log driver.
 func transformToExpected(m *logger.Message) *logger.Message {
 	// Copy the log message again so as not to mutate the input.
-	copy := copyLogMessage(m)
+	logMessageCopy := copyLogMessage(m)
 	if m.PLogMetaData == nil || m.PLogMetaData.Last {
-		copy.Line = append(copy.Line, '\n')
+		logMessageCopy.Line = append(logMessageCopy.Line, '\n')
 	}
 
-	return copy
+	return logMessageCopy
 }
 
 func copyLogMessage(src *logger.Message) *logger.Message {
@@ -545,8 +547,8 @@ func readMessage(t *testing.T, lw *logger.LogWatcher) *logger.Message {
 	case msg, open := <-lw.Msg:
 		if !open {
 			select {
-			case err, open := <-lw.Err:
-				t.Errorf("unexpected receive on lw.Err with closed lw.Msg: err=%v, open=%v", err, open)
+			case err, o := <-lw.Err:
+				t.Errorf("unexpected receive on lw.Err with closed lw.Msg: err=%v, open=%v", err, o)
 			default:
 			}
 			return nil

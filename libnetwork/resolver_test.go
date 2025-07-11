@@ -125,7 +125,7 @@ func waitForLocalDNSServer(t *testing.T) {
 		if err != nil {
 			if oerr, ok := err.(*net.OpError); ok {
 				// server is probably initializing
-				if oerr.Err == syscall.ECONNREFUSED {
+				if errors.Is(oerr.Err, syscall.ECONNREFUSED) {
 					continue
 				}
 			} else {
@@ -239,7 +239,7 @@ func testLogger(t *testing.T) *logrus.Entry {
 
 type tlogWriter struct{ t *testing.T }
 
-func (w tlogWriter) Write(p []byte) (n int, err error) {
+func (w tlogWriter) Write(p []byte) (int, error) {
 	w.t.Logf("%s", p)
 	return len(p), nil
 }

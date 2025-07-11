@@ -52,7 +52,11 @@ import (
 	"text/template"
 
 	"github.com/containerd/log"
+	"go.opentelemetry.io/otel"
 )
+
+// Prefix for OTEL span names.
+const spanPrefix = "libnetwork.internal.nftables"
 
 var (
 	// nftPath is the path of the "nft" tool, set by [Enable] and left empty if the tool
@@ -60,8 +64,19 @@ var (
 	nftPath string
 	// incrementalUpdateTempl is a parsed text/template, used to apply incremental updates.
 	incrementalUpdateTempl *template.Template
+	// reloadTempl is a parsed text/template, used to apply a whole table.
+	reloadTempl *template.Template
 	// enableOnce is used by [Enable] to avoid checking the path for "nft" more than once.
 	enableOnce sync.Once
+)
+
+var (
+	// ErrRuleExist is returned when a rule is added, but it already exists in the same
+	// rule group of a chain.
+	ErrRuleExist = errors.New("rule exists")
+	// ErrRuleNotExist is returned when a rule is removed, but does not exist in the
+	// rule group of a chain.
+	ErrRuleNotExist = errors.New("rule does not exist")
 )
 
 // BaseChainType enumerates the base chain types.
@@ -141,7 +156,15 @@ func Enabled() bool {
 	return nftPath != ""
 }
 
-// ////////////////////////////
+// Disable undoes Enable. Intended for unit testing.
+func Disable() {
+	nftPath = ""
+	incrementalUpdateTempl = nil
+	reloadTempl = nil
+	enableOnce = sync.Once{}
+}
+
+//////////////////////////////
 // Tables
 
 // table is the internal representation of an nftables table.
@@ -252,15 +275,55 @@ table {{$family}} {{$tableName}} {
 {{end}}{{end}}
 `
 
+// reloadTemplText is used with text/template to generate an nftables command file
+// (which will be applied atomically), to fully re-create a table.
+//
+// It first declares the table so if it doesn't already exist, it can be deleted.
+// Then it deletes the table and re-creates it.
+const reloadTemplText = `{{$family := .Family}}{{$tableName := .Name}}
+table {{$family}} {{$tableName}} {}
+delete table {{$family}} {{$tableName}}
+table {{$family}} {{$tableName}} {
+	{{range .VMaps}}map {{.Name}} {
+		type {{.ElementType}} : verdict
+		{{if len .Flags}}flags{{range .Flags}} {{.}}{{end}}{{end}}
+        {{if .Elements}}elements = {
+			{{range $k,$v := .Elements}}{{$k}} : {{$v}},
+            {{end -}}
+		}{{end}}
+	}
+	{{end}}
+	{{range .Sets}}set {{.Name}} {
+		type {{.ElementType}}
+		{{if len .Flags}}flags{{range .Flags}} {{.}}{{end}}{{end}}
+        {{if .Elements}}elements = {
+			{{range $k,$v := .Elements}}{{$k}},
+            {{end -}}
+		}{{end}}
+	}
+	{{end}}
+	{{range .Chains}}chain {{.Name}} {
+		{{if .ChainType}}type {{.ChainType}} hook {{.Hook}} priority {{.Priority}}; policy {{.Policy}}{{end}}
+		{{range .Rules}}{{.}}
+		{{end}}
+	}
+	{{end}}
+}
+`
+
 // Apply makes incremental updates to nftables, corresponding to changes to the [TableRef]
 // since Apply was last called.
 func (t TableRef) Apply(ctx context.Context) error {
-	var buf bytes.Buffer
+	if !Enabled() {
+		return errors.New("nftables is not enabled")
+	}
 
 	// Update nftables.
+	var buf bytes.Buffer
 	if err := incrementalUpdateTempl.Execute(&buf, t.t); err != nil {
 		return fmt.Errorf("failed to execute template nft ruleset: %w", err)
 	}
+
 	if err := nftApply(ctx, buf.Bytes()); err != nil {
 		// On error, log a line-numbered version of the generated "nft" input (because
 		// nft error messages refer to line numbers).
@@ -271,25 +334,51 @@ func (t TableRef) Apply(ctx context.Context) error {
 			sb.Write(line)
 		}
 		log.G(ctx).Error("nftables: failed to update nftables:\n", sb.String(), "\n", err)
+
+		// It's possible something destructive has happened to nftables. For example, in
+		// integration-cli tests, tests start daemons in the same netns as the integration
+		// test's own daemon. They don't always use their own daemon, but they tend to leave
+		// behind networks for the test infrastructure to clean up between tests. Starting
+		// a daemon flushes the "docker-bridges" table, so the cleanup fails to delete a
+		// rule that's been flushed. So, try reloading the whole table to get back in-sync.
+		return t.Reload(ctx)
+	}
+
+	// Note that updates have been applied.
+	t.t.updatesApplied()
+	return nil
+}
+
+// Reload deletes the table, then re-creates it, atomically.
+func (t TableRef) Reload(ctx context.Context) error {
+	if !Enabled() {
+		return errors.New("nftables is not enabled")
+	}
+
+	ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{"table": t.t.Name, "family": t.t.Family}))
+	log.G(ctx).Warn("nftables: reloading table")
+
+	// Build the update.
+	var buf bytes.Buffer
+	if err := reloadTempl.Execute(&buf, t.t); err != nil {
+		return fmt.Errorf("failed to execute reload template: %w", err)
+	}
+
+	if err := nftApply(ctx, buf.Bytes()); err != nil {
+		// On error, log a line-numbered version of the generated "nft" input (because
+		// nft error messages refer to line numbers).
+		var sb strings.Builder
+		for i, line := range bytes.SplitAfter(buf.Bytes(), []byte("\n")) {
+			sb.WriteString(strconv.Itoa(i + 1))
+			sb.WriteString(":\t")
+			sb.Write(line)
+		}
+		log.G(ctx).Error("nftables: failed to reload nftable:\n", sb.String(), "\n", err)
 		return err
 	}
 
 	// Note that updates have been applied.
-	t.t.DeleteChainCommands = t.t.DeleteChainCommands[:0]
-	for _, c := range t.t.Chains {
-		c.Dirty = false
-	}
-	for _, m := range t.t.VMaps {
-		m.Dirty = false
-		m.AddedElements = map[string]string{}
-		m.DeletedElements = map[string]struct{}{}
-	}
-	for _, s := range t.t.Sets {
-		s.Dirty = false
-		s.AddedElements = map[string]struct{}{}
-		s.DeletedElements = map[string]struct{}{}
-	}
-	t.t.Dirty = false
+	t.t.updatesApplied()
 	return nil
 }
 
@@ -328,7 +417,7 @@ type ChainRef struct {
 // It is an error to create a base chain that already exists.
 // If the underlying chain already exists, it will be flushed by the
 // next [TableRef.Apply] before new rules are added.
-func (t TableRef) BaseChain(name string, chainType BaseChainType, hook BaseChainHook, priority int) (ChainRef, error) {
+func (t TableRef) BaseChain(ctx context.Context, name string, chainType BaseChainType, hook BaseChainHook, priority int) (ChainRef, error) {
 	if _, ok := t.t.Chains[name]; ok {
 		return ChainRef{}, fmt.Errorf("chain %q already exists", name)
 	}
@@ -343,7 +432,7 @@ func (t TableRef) BaseChain(name string, chainType BaseChainType, hook BaseChain
 		ruleGroups: map[RuleGroup][]string{},
 	}
 	t.t.Chains[name] = c
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": t.t.Family,
 		"table":  t.t.Name,
 		"chain":  name,
@@ -362,7 +451,7 @@ func (t TableRef) BaseChain(name string, chainType BaseChainType, hook BaseChain
 //
 // If a new [ChainRef] is created and the underlying chain already exists, it
 // will be flushed by the next [TableRef.Apply] before new rules are added.
-func (t TableRef) Chain(name string) ChainRef {
+func (t TableRef) Chain(ctx context.Context, name string) ChainRef {
 	c, ok := t.t.Chains[name]
 	if !ok {
 		c = &chain{
@@ -373,7 +462,7 @@ func (t TableRef) Chain(name string) ChainRef {
 		}
 		t.t.Chains[name] = c
 	}
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": t.t.Family,
 		"table":  t.t.Name,
 		"chain":  name,
@@ -382,14 +471,14 @@ func (t TableRef) Chain(name string) ChainRef {
 }
 
 // ChainUpdateFunc is a function that can add rules to a chain, or remove rules from it.
-type ChainUpdateFunc func(RuleGroup, string, ...interface{}) error
+type ChainUpdateFunc func(context.Context, RuleGroup, string, ...interface{}) error
 
 // ChainUpdateFunc returns a [ChainUpdateFunc] to add rules to the named chain if
 // enable is true, or to remove rules from the chain if enable is false.
 // (Written as a convenience function to ease migration of iptables functions
 // originally written with an enable flag.)
-func (t TableRef) ChainUpdateFunc(name string, enable bool) ChainUpdateFunc {
-	c := t.Chain(name)
+func (t TableRef) ChainUpdateFunc(ctx context.Context, name string, enable bool) ChainUpdateFunc {
+	c := t.Chain(ctx, name)
 	if enable {
 		return c.AppendRule
 	}
@@ -397,14 +486,14 @@ func (t TableRef) ChainUpdateFunc(name string, enable bool) ChainUpdateFunc {
 }
 
 // DeleteChain deletes a chain. It is an error to delete a chain that does not exist.
-func (t TableRef) DeleteChain(name string) error {
+func (t TableRef) DeleteChain(ctx context.Context, name string) error {
 	if _, ok := t.t.Chains[name]; !ok {
 		return fmt.Errorf("chain %q does not exist", name)
 	}
 	delete(t.t.Chains, name)
 	t.t.DeleteChainCommands = append(t.t.DeleteChainCommands,
 		fmt.Sprintf("delete chain %s %s %s", t.t.Family, t.t.Name, name))
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": t.t.Family,
 		"table":  t.t.Name,
 		"chain":  name,
@@ -424,16 +513,16 @@ func (c ChainRef) SetPolicy(policy string) error {
 }
 
 // AppendRule appends a rule to a [RuleGroup] in a [ChainRef].
-func (c ChainRef) AppendRule(group RuleGroup, rule string, args ...interface{}) error {
+func (c ChainRef) AppendRule(ctx context.Context, group RuleGroup, rule string, args ...interface{}) error {
 	if len(args) > 0 {
 		rule = fmt.Sprintf(rule, args...)
 	}
 	if rg, ok := c.c.ruleGroups[group]; ok && slices.Contains(rg, rule) {
-		return fmt.Errorf("rule %q already exists", rule)
+		return ErrRuleExist
 	}
 	c.c.ruleGroups[group] = append(c.c.ruleGroups[group], rule)
 	c.c.Dirty = true
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": c.c.table.Family,
 		"table":  c.c.table.Name,
 		"chain":  c.c.Name,
@@ -443,10 +532,18 @@ func (c ChainRef) AppendRule(group RuleGroup, rule string, args ...interface{}) 
 	return nil
 }
 
+// AppendRuleCf calls AppendRule and returns a cleanup function or an error.
+func (c ChainRef) AppendRuleCf(ctx context.Context, group RuleGroup, rule string, args ...interface{}) (func(context.Context) error, error) {
+	if err := c.AppendRule(ctx, group, rule, args...); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error { return c.DeleteRule(ctx, group, rule, args...) }, nil
+}
+
 // DeleteRule deletes a rule from a [RuleGroup] in a [ChainRef]. It is an error
 // to delete from a group that does not exist, or to delete a rule that does not
 // exist.
-func (c ChainRef) DeleteRule(group RuleGroup, rule string, args ...interface{}) error {
+func (c ChainRef) DeleteRule(ctx context.Context, group RuleGroup, rule string, args ...interface{}) error {
 	if len(args) > 0 {
 		rule = fmt.Sprintf(rule, args...)
 	}
@@ -457,10 +554,10 @@ func (c ChainRef) DeleteRule(group RuleGroup, rule string, args ...interface{}) 
 	origLen := len(rg)
 	c.c.ruleGroups[group] = slices.DeleteFunc(rg, func(r string) bool { return r == rule })
 	if len(c.c.ruleGroups[group]) == origLen {
-		return fmt.Errorf("rule %q does not exist", rule)
+		return ErrRuleNotExist
 	}
 	c.c.Dirty = true
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": c.c.table.Family,
 		"table":  c.c.table.Name,
 		"chain":  c.c.Name,
@@ -498,7 +595,7 @@ type VMapRef struct {
 //
 // If a [VMapRef] is created and the underlying map already exists, it will be flushed
 // by the next [TableRef.Apply] before new elements are added.
-func (t TableRef) InterfaceVMap(name string) VMapRef {
+func (t TableRef) InterfaceVMap(ctx context.Context, name string) VMapRef {
 	if vmap, ok := t.t.VMaps[name]; ok {
 		return VMapRef{vmap}
 	}
@@ -512,7 +609,7 @@ func (t TableRef) InterfaceVMap(name string) VMapRef {
 		Dirty:           true,
 	}
 	t.t.VMaps[name] = vmap
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": t.t.Family,
 		"table":  t.t.Name,
 		"vmap":   name,
@@ -522,13 +619,13 @@ func (t TableRef) InterfaceVMap(name string) VMapRef {
 
 // AddElement adds an element to a verdict map. The caller must ensure the key has
 // the correct type. It is an error to add a key that already exists.
-func (v VMapRef) AddElement(key string, verdict string) error {
+func (v VMapRef) AddElement(ctx context.Context, key string, verdict string) error {
 	if _, ok := v.v.Elements[key]; ok {
 		return fmt.Errorf("verdict map already contains element %q", key)
 	}
 	v.v.Elements[key] = verdict
 	v.v.AddedElements[key] = verdict
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family":  v.v.table.Family,
 		"table":   v.v.table.Name,
 		"vmap":    v.v.Name,
@@ -538,15 +635,23 @@ func (v VMapRef) AddElement(key string, verdict string) error {
 	return nil
 }
 
+// AddElementCf calls AddElement and returns a cleanup function or an error.
+func (v VMapRef) AddElementCf(ctx context.Context, key string, verdict string) (func(context.Context) error, error) {
+	if err := v.AddElement(ctx, key, verdict); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error { return v.DeleteElement(ctx, key) }, nil
+}
+
 // DeleteElement deletes an element from a verdict map. It is an error to delete
 // an element that does not exist.
-func (v VMapRef) DeleteElement(key string) error {
+func (v VMapRef) DeleteElement(ctx context.Context, key string) error {
 	if _, ok := v.v.Elements[key]; !ok {
 		return fmt.Errorf("verdict map does not contain element %q", key)
 	}
 	delete(v.v.Elements, key)
 	v.v.DeletedElements[key] = struct{}{}
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": v.v.table.Family,
 		"table":  v.v.table.Name,
 		"vmap":   v.v.Name,
@@ -586,7 +691,7 @@ type SetRef struct {
 // change if we need an "inet" table.)
 //
 // See https://wiki.nftables.org/wiki-nftables/index.php/Sets#Named_sets
-func (t TableRef) PrefixSet(name string) SetRef {
+func (t TableRef) PrefixSet(ctx context.Context, name string) SetRef {
 	if s, ok := t.t.Sets[name]; ok {
 		return SetRef{s}
 	}
@@ -604,7 +709,7 @@ func (t TableRef) PrefixSet(name string) SetRef {
 		s.ElementType = nftTypeIPv6Addr
 	}
 	t.t.Sets[name] = s
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family": t.t.Family,
 		"table":  t.t.Name,
 		"set":    name,
@@ -615,13 +720,13 @@ func (t TableRef) PrefixSet(name string) SetRef {
 // AddElement adds an element to a set. It is the caller's responsibility to make sure
 // the element has the correct type. It is an error to add an element that is already
 // in the set.
-func (s SetRef) AddElement(element string) error {
+func (s SetRef) AddElement(ctx context.Context, element string) error {
 	if _, ok := s.s.Elements[element]; ok {
 		return fmt.Errorf("set already contains element %q", element)
 	}
 	s.s.Elements[element] = struct{}{}
 	s.s.AddedElements[element] = struct{}{}
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family":  s.s.table.Family,
 		"table":   s.s.table.Name,
 		"set":     s.s.Name,
@@ -632,13 +737,13 @@ func (s SetRef) AddElement(element string) error {
 
 // DeleteElement deletes an element from the set. It is an error to delete an
 // element that is not in the set.
-func (s SetRef) DeleteElement(element string) error {
+func (s SetRef) DeleteElement(ctx context.Context, element string) error {
 	if _, ok := s.s.Elements[element]; !ok {
 		return fmt.Errorf("set does not contain element %q", element)
 	}
 	delete(s.s.Elements, element)
 	s.s.DeletedElements[element] = struct{}{}
-	log.G(context.TODO()).WithFields(log.Fields{
+	log.G(ctx).WithFields(log.Fields{
 		"family":  s.s.table.Family,
 		"table":   s.s.table.Name,
 		"set":     s.s.Name,
@@ -649,6 +754,24 @@ func (s SetRef) DeleteElement(element string) error {
 
 // ////////////////////////////
 // Internal
+
+func (t *table) updatesApplied() {
+	t.DeleteChainCommands = t.DeleteChainCommands[:0]
+	for _, c := range t.Chains {
+		c.Dirty = false
+	}
+	for _, m := range t.VMaps {
+		m.Dirty = false
+		m.AddedElements = map[string]string{}
+		m.DeletedElements = map[string]struct{}{}
+	}
+	for _, s := range t.Sets {
+		s.Dirty = false
+		s.AddedElements = map[string]struct{}{}
+		s.DeletedElements = map[string]struct{}{}
+	}
+	t.Dirty = false
+}
 
 /* Can't make text/template range over this, not sure why ...
 func (c *chain) Rules() iter.Seq[string] {
@@ -691,11 +814,18 @@ func parseTemplate() error {
 	if err != nil {
 		return fmt.Errorf("parsing 'incrementalUpdateTemplText': %w", err)
 	}
+	reloadTempl, err = template.New("ruleset").Parse(reloadTemplText)
+	if err != nil {
+		return fmt.Errorf("parsing 'reloadTemplText': %w", err)
+	}
 	return nil
 }
 
 // nftApply runs the "nft" command.
 func nftApply(ctx context.Context, nftCmd []byte) error {
+	ctx, span := otel.Tracer("").Start(ctx, spanPrefix+".nftApply")
+	defer span.End()
+
 	if !Enabled() {
 		return errors.New("nftables is not enabled")
 	}
