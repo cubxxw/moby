@@ -1,0 +1,452 @@
+# Instincts generated from https://github.com/cubxxw/moby
+# Generated: 2026-05-01T04:06:37.705Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: moby-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Commit Length
+
+## Action
+
+Write moderate-length commit messages (~55 characters)
+
+## Evidence
+
+- Average commit message length: 55 chars
+- Based on 7 commits
+
+---
+id: moby-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: moby-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: moby-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: moby-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: moby-workflow-update-vendored-dependency
+trigger: "when doing update vendored dependency"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Workflow Update Vendored Dependency
+
+## Action
+
+Follow the update-vendored-dependency workflow:
+1. Update go.mod to specify the new dependency version.
+2. Update go.sum to reflect new dependency checksums.
+3. Update files under vendor/ for the dependency (e.g., JSON configs, Go files).
+4. Update vendor/modules.txt.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: go.mod, go.sum, vendor/github.com/moby/profiles/seccomp/default.json
+
+---
+id: moby-workflow-add-integration-test-with-testdata
+trigger: "when doing add integration test with testdata"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Workflow Add Integration Test With Testdata
+
+## Action
+
+Follow the add-integration-test-with-testdata workflow:
+1. Create or update integration test Go file (e.g., exec_afalg_linux_test.go).
+2. Add new C source files to integration/container/testdata/ for test binaries.
+3. Commit both the test and testdata files together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: integration/container/exec_afalg_linux_test.go, integration/container/testdata/af_alg.c, integration/container/testdata/af_vsock.c
+
+---
+id: moby-workflow-security-profile-update-with-tests
+trigger: "when doing security profile update with tests"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/cubxxw/moby
+---
+
+# Moby Workflow Security Profile Update With Tests
+
+## Action
+
+Follow the security-profile-update-with-tests workflow:
+1. Update security profile files in vendor/ (e.g., default.json, default_linux.go).
+2. Update go.mod, go.sum, and vendor/modules.txt if a dependency version changes.
+3. Add or update integration test Go files.
+4. Add or update C source files in integration/container/testdata/.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: go.mod, go.sum, vendor/github.com/moby/profiles/seccomp/default.json
+
+---
+id: moby-instinct-file-naming
+trigger: "When creating or renaming a file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct File Naming
+
+## Action
+
+Use snake_case for file names
+
+## Evidence
+
+- Pattern in namingConventions.files: snake_case
+
+---
+id: moby-instinct-function-naming
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Function Naming
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: moby-instinct-class-naming
+trigger: "When defining a struct or class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Class Naming
+
+## Action
+
+Use PascalCase for struct/class names
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: moby-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: moby-instinct-import-style
+trigger: "When importing Go packages"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: moby-instinct-export-style
+trigger: "When exporting symbols in Go"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: moby-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Test Location
+
+## Action
+
+Place integration tests in the 'integration' folder, separate from source code
+
+## Evidence
+
+- Pattern in architecture.testLocation: separate
+- Files in integration/
+
+---
+id: moby-instinct-integration-testdata
+trigger: "When writing integration tests that require custom binaries"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Integration Testdata
+
+## Action
+
+Add C source files to integration/container/testdata/ and commit with the test
+
+## Evidence
+
+- Workflow: add-integration-test-with-testdata
+- Files: integration/container/testdata/*.c
+
+---
+id: moby-instinct-commit-prefix-vendor
+trigger: "When updating vendored dependencies"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Commit Prefix Vendor
+
+## Action
+
+Prefix commit message with 'vendor:'
+
+## Evidence
+
+- Commit example: 'vendor: github.com/moby/profiles/seccomp v0.2.1'
+- Pattern in commits.prefixes: vendor
+
+---
+id: moby-instinct-commit-prefix-integration
+trigger: "When adding or updating integration tests"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Commit Prefix Integration
+
+## Action
+
+Prefix commit message with 'integration/container:'
+
+## Evidence
+
+- Commit example: 'integration/container: Add test for denied socket address families'
+
+---
+id: moby-instinct-commit-merge-pr
+trigger: "When merging a pull request"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Commit Merge Pr
+
+## Action
+
+Use 'Merge pull request #[PR_NUMBER] from [branch]' as commit message
+
+## Evidence
+
+- Commit example: 'Merge pull request #52483 from vvoland/proxy-refused'
+
+---
+id: moby-instinct-update-vendored-dependency
+trigger: "When someone wants to update a vendored Go dependency to a new version"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Update Vendored Dependency
+
+## Action
+
+Update go.mod, go.sum, vendor files for the dependency, and vendor/modules.txt
+
+## Evidence
+
+- Workflow: update-vendored-dependency
+- Files: go.mod, go.sum, vendor/..., vendor/modules.txt
+
+---
+id: moby-instinct-add-integration-test-with-testdata
+trigger: "When someone wants to add new integration tests that require custom binaries or syscall coverage"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Add Integration Test With Testdata
+
+## Action
+
+Create or update integration test Go file and add new C source files to integration/container/testdata/, committing both together
+
+## Evidence
+
+- Workflow: add-integration-test-with-testdata
+- Files: integration/container/exec_afalg_linux_test.go, integration/container/testdata/*.c
+
+---
+id: moby-instinct-security-profile-update-with-tests
+trigger: "When someone wants to strengthen security policies and ensure coverage with tests"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: cubxxw/moby
+---
+
+# Moby Instinct Security Profile Update With Tests
+
+## Action
+
+Update security profile files in vendor/, update go.mod/go.sum/vendor/modules.txt if needed, and add or update integration tests and testdata
+
+## Evidence
+
+- Workflow: security-profile-update-with-tests
+- Files: vendor/github.com/moby/profiles/seccomp/default.json, integration/container/exec_afalg_linux_test.go, integration/container/testdata/*.c
+
